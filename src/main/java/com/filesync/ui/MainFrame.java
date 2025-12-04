@@ -312,7 +312,8 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     }
 
     private void updateSyncButtonState() {
-        boolean canSync = isConnected && syncManager.getSyncFolder() != null && isSender;
+        boolean canSync = isConnected && syncManager.getSyncFolder() != null && isSender 
+                && syncManager.isConnectionAlive();
         syncButton.setEnabled(canSync && !syncManager.isSyncing());
     }
 
@@ -378,6 +379,20 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             updateDirectionButton();
             updateSyncButtonState();
             log("Direction changed by remote: " + (isSender ? "Sender" : "Receiver"));
+        });
+    }
+
+    @Override
+    public void onConnectionStatusChanged(boolean isAlive) {
+        SwingUtilities.invokeLater(() -> {
+            if (isAlive) {
+                statusLabel.setText("Connected");
+                statusLabel.setForeground(new Color(0, 128, 0));
+            } else {
+                statusLabel.setText("Connection Lost");
+                statusLabel.setForeground(Color.ORANGE);
+            }
+            updateSyncButtonState();
         });
     }
 

@@ -23,6 +23,8 @@ public class SyncProtocol {
     public static final String CMD_DIRECTION_CHANGE = "DIRECTION_CHANGE";
     public static final String CMD_ACK = "ACK";
     public static final String CMD_ERROR = "ERROR";
+    public static final String CMD_HEARTBEAT = "HEARTBEAT";
+    public static final String CMD_HEARTBEAT_ACK = "HEARTBEAT_ACK";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -227,6 +229,38 @@ public class SyncProtocol {
      */
     public void sendError(String message) throws IOException {
         sendCommand(CMD_ERROR, message);
+    }
+
+    /**
+     * Send heartbeat to check connection
+     */
+    public void sendHeartbeat() throws IOException {
+        sendCommand(CMD_HEARTBEAT);
+    }
+
+    /**
+     * Send heartbeat acknowledgment
+     */
+    public void sendHeartbeatAck() throws IOException {
+        sendCommand(CMD_HEARTBEAT_ACK);
+    }
+
+    /**
+     * Try to receive a command with short timeout for heartbeat check
+     * Returns null if no data available or timeout
+     */
+    public Message tryReceiveCommand(int shortTimeoutMs) throws IOException {
+        int originalTimeout = timeoutMs;
+        try {
+            serialPort.setReadTimeout(shortTimeoutMs);
+            if (serialPort.available() > 0) {
+                String line = serialPort.readLine(shortTimeoutMs);
+                return parseMessage(line);
+            }
+            return null;
+        } finally {
+            serialPort.setReadTimeout(originalTimeout);
+        }
     }
 
     /**

@@ -15,22 +15,33 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class FileSyncManager {
 
+    private static final long HEARTBEAT_INTERVAL_MS = 5000;  // Send heartbeat every 5 seconds
+    private static final long HEARTBEAT_TIMEOUT_MS = 15000;  // Connection lost if no heartbeat for 15 seconds
+    private static final int HEARTBEAT_CHECK_TIMEOUT_MS = 1000;  // Short timeout for heartbeat check
+
     private final SerialPortManager serialPort;
     private final SyncProtocol protocol;
     private File syncFolder;
     private boolean isSender;
     private final AtomicBoolean running;
     private final AtomicBoolean syncing;
+    private final AtomicBoolean connectionAlive;
 
     private SyncEventListener eventListener;
     private Thread listenerThread;
+    private Thread heartbeatThread;
+    private volatile long lastHeartbeatReceived;
+    private volatile long lastHeartbeatSent;
 
     public FileSyncManager(SerialPortManager serialPort) {
         this.serialPort = serialPort;
         this.protocol = new SyncProtocol(serialPort);
         this.running = new AtomicBoolean(false);
         this.syncing = new AtomicBoolean(false);
+        this.connectionAlive = new AtomicBoolean(false);
         this.isSender = true;
+        this.lastHeartbeatReceived = 0;
+        this.lastHeartbeatSent = 0;
     }
 
     public void setEventListener(SyncEventListener listener) {
@@ -76,6 +87,10 @@ public class FileSyncManager {
         return syncing.get();
     }
 
+    public boolean isConnectionAlive() {
+        return connectionAlive.get();
+    }
+
     /**
      * Start listening for incoming sync requests
      */
@@ -85,9 +100,17 @@ public class FileSyncManager {
         }
 
         running.set(true);
+        connectionAlive.set(true);
+        lastHeartbeatReceived = System.currentTimeMillis();
+        lastHeartbeatSent = System.currentTimeMillis();
+
         listenerThread = new Thread(this::listenLoop, "SyncListener");
         listenerThread.setDaemon(true);
         listenerThread.start();
+
+        heartbeatThread = new Thread(this::heartbeatLoop, "HeartbeatMonitor");
+        heartbeatThread.setDaemon(true);
+        heartbeatThread.start();
     }
 
     /**
@@ -95,9 +118,14 @@ public class FileSyncManager {
      */
     public void stopListening() {
         running.set(false);
+        connectionAlive.set(false);
         if (listenerThread != null) {
             listenerThread.interrupt();
             listenerThread = null;
+        }
+        if (heartbeatThread != null) {
+            heartbeatThread.interrupt();
+            heartbeatThread = null;
         }
     }
 
@@ -115,6 +143,8 @@ public class FileSyncManager {
                 if (protocol.hasData()) {
                     SyncProtocol.Message msg = protocol.receiveCommand();
                     if (msg != null) {
+                        // Update last heartbeat received time on any message
+                        lastHeartbeatReceived = System.currentTimeMillis();
                         handleIncomingMessage(msg);
                     }
                 } else {
@@ -127,6 +157,53 @@ public class FileSyncManager {
                 if (running.get() && eventListener != null) {
                     eventListener.onError("Communication error: " + e.getMessage());
                 }
+            }
+        }
+    }
+
+    /**
+     * Heartbeat monitoring loop - sends heartbeat when idle and monitors connection status
+     */
+    private void heartbeatLoop() {
+        while (running.get()) {
+            try {
+                if (!serialPort.isOpen()) {
+                    Thread.sleep(500);
+                    continue;
+                }
+
+                long now = System.currentTimeMillis();
+
+                // Check if connection is lost (no heartbeat received for too long)
+                if (connectionAlive.get() && (now - lastHeartbeatReceived) > HEARTBEAT_TIMEOUT_MS) {
+                    connectionAlive.set(false);
+                    if (eventListener != null) {
+                        eventListener.onConnectionStatusChanged(false);
+                        eventListener.onLog("Connection lost - no heartbeat response");
+                    }
+                }
+
+                // Send heartbeat if not syncing and interval has passed
+                if (!syncing.get() && (now - lastHeartbeatSent) >= HEARTBEAT_INTERVAL_MS) {
+                    try {
+                        protocol.sendHeartbeat();
+                        lastHeartbeatSent = now;
+                    } catch (IOException e) {
+                        // Heartbeat send failed, connection might be lost
+                        if (connectionAlive.get()) {
+                            connectionAlive.set(false);
+                            if (eventListener != null) {
+                                eventListener.onConnectionStatusChanged(false);
+                                eventListener.onLog("Connection lost - heartbeat send failed");
+                            }
+                        }
+                    }
+                }
+
+                Thread.sleep(1000);  // Check every second
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
         }
     }
@@ -165,6 +242,44 @@ public class FileSyncManager {
                     eventListener.onError("Remote error: " + msg.getParam(0));
                 }
                 break;
+
+            case SyncProtocol.CMD_HEARTBEAT:
+                handleHeartbeat();
+                break;
+
+            case SyncProtocol.CMD_HEARTBEAT_ACK:
+                handleHeartbeatAck();
+                break;
+        }
+    }
+
+    /**
+     * Handle incoming heartbeat - send acknowledgment
+     */
+    private void handleHeartbeat() throws IOException {
+        protocol.sendHeartbeatAck();
+        // Mark connection as alive if it was previously lost
+        if (!connectionAlive.get()) {
+            connectionAlive.set(true);
+            if (eventListener != null) {
+                eventListener.onConnectionStatusChanged(true);
+                eventListener.onLog("Connection restored");
+            }
+        }
+    }
+
+    /**
+     * Handle heartbeat acknowledgment - connection is alive
+     */
+    private void handleHeartbeatAck() {
+        lastHeartbeatReceived = System.currentTimeMillis();
+        // Mark connection as alive if it was previously lost
+        if (!connectionAlive.get()) {
+            connectionAlive.set(true);
+            if (eventListener != null) {
+                eventListener.onConnectionStatusChanged(true);
+                eventListener.onLog("Connection restored");
+            }
         }
     }
 
@@ -377,6 +492,7 @@ public class FileSyncManager {
         void onFileProgress(int currentFile, int totalFiles, String fileName);
         void onTransferProgress(int currentBlock, int totalBlocks);
         void onDirectionChanged(boolean isSender);
+        void onConnectionStatusChanged(boolean isConnected);
         void onLog(String message);
         void onError(String message);
     }
