@@ -1,0 +1,312 @@
+package com.filesync.protocol;
+
+import com.filesync.serial.SerialPortManager;
+import com.filesync.serial.XModemTransfer;
+import com.filesync.sync.CompressionUtil;
+import com.filesync.sync.FileChangeDetector;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * Protocol for file synchronization commands over serial port.
+ * Handles message framing, command exchange, and file transfer coordination.
+ */
+public class SyncProtocol {
+
+    // Protocol commands
+    public static final String CMD_MANIFEST_REQ = "MANIFEST_REQ";
+    public static final String CMD_MANIFEST_DATA = "MANIFEST_DATA";
+    public static final String CMD_FILE_REQ = "FILE_REQ";
+    public static final String CMD_FILE_DATA = "FILE_DATA";
+    public static final String CMD_SYNC_COMPLETE = "SYNC_COMPLETE";
+    public static final String CMD_DIRECTION_CHANGE = "DIRECTION_CHANGE";
+    public static final String CMD_ACK = "ACK";
+    public static final String CMD_ERROR = "ERROR";
+
+    // Protocol markers
+    private static final String START_MARKER = "[[SYNC:";
+    private static final String END_MARKER = "]]";
+    private static final String SEPARATOR = ":";
+
+    private static final int DEFAULT_TIMEOUT_MS = 30000;
+
+    private final SerialPortManager serialPort;
+    private final XModemTransfer xmodem;
+    private int timeoutMs;
+
+    public SyncProtocol(SerialPortManager serialPort) {
+        this.serialPort = serialPort;
+        this.xmodem = new XModemTransfer(serialPort);
+        this.timeoutMs = DEFAULT_TIMEOUT_MS;
+    }
+
+    public void setProgressListener(XModemTransfer.TransferProgressListener listener) {
+        xmodem.setProgressListener(listener);
+    }
+
+    public void setTimeout(int timeoutMs) {
+        this.timeoutMs = timeoutMs;
+    }
+
+    /**
+     * Send a command message
+     */
+    public void sendCommand(String command, String... params) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append(START_MARKER).append(command);
+        for (String param : params) {
+            sb.append(SEPARATOR).append(param);
+        }
+        sb.append(END_MARKER);
+        serialPort.writeLine(sb.toString());
+    }
+
+    /**
+     * Receive and parse a command message
+     */
+    public Message receiveCommand() throws IOException {
+        String line = serialPort.readLine(timeoutMs);
+        return parseMessage(line);
+    }
+
+    /**
+     * Parse a protocol message
+     */
+    public static Message parseMessage(String line) {
+        if (line == null || !line.startsWith(START_MARKER) || !line.endsWith(END_MARKER)) {
+            return null;
+        }
+
+        String content = line.substring(START_MARKER.length(), line.length() - END_MARKER.length());
+        String[] parts = content.split(SEPARATOR, -1);
+
+        if (parts.length == 0) {
+            return null;
+        }
+
+        String command = parts[0];
+        String[] params = new String[parts.length - 1];
+        System.arraycopy(parts, 1, params, 0, params.length);
+
+        return new Message(command, params);
+    }
+
+    /**
+     * Request manifest from remote
+     */
+    public void requestManifest() throws IOException {
+        sendCommand(CMD_MANIFEST_REQ);
+    }
+
+    /**
+     * Send manifest data
+     */
+    public void sendManifest(FileChangeDetector.FileManifest manifest) throws IOException {
+        String json = FileChangeDetector.manifestToJson(manifest);
+        byte[] data = json.getBytes(StandardCharsets.UTF_8);
+        byte[] compressed = CompressionUtil.compress(data);
+
+        sendCommand(CMD_MANIFEST_DATA, String.valueOf(compressed.length));
+
+        // Short delay to let receiver prepare
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Send manifest data via XMODEM
+        xmodem.send(compressed);
+    }
+
+    /**
+     * Receive manifest data
+     */
+    public FileChangeDetector.FileManifest receiveManifest() throws IOException {
+        byte[] compressed = xmodem.receive();
+        if (compressed == null) {
+            throw new IOException("Failed to receive manifest data");
+        }
+
+        byte[] data = CompressionUtil.decompress(compressed);
+        String json = new String(data, StandardCharsets.UTF_8);
+        return FileChangeDetector.manifestFromJson(json);
+    }
+
+    /**
+     * Request a specific file
+     */
+    public void requestFile(String relativePath) throws IOException {
+        sendCommand(CMD_FILE_REQ, relativePath);
+    }
+
+    /**
+     * Send file data
+     */
+    public void sendFile(File baseDir, String relativePath) throws IOException {
+        File file = new File(baseDir, relativePath);
+        if (!file.exists() || !file.isFile()) {
+            sendCommand(CMD_ERROR, "File not found: " + relativePath);
+            return;
+        }
+
+        // Read file content
+        byte[] data = readFileContent(file);
+
+        // Compress if text file
+        CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfText(file.getName(), data);
+
+        // Send file header
+        sendCommand(CMD_FILE_DATA, 
+                relativePath, 
+                String.valueOf(compressedData.getData().length),
+                String.valueOf(compressedData.isCompressed()));
+
+        // Short delay to let receiver prepare
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Send file data via XMODEM
+        xmodem.send(compressedData.getData());
+    }
+
+    /**
+     * Receive file data and save to directory
+     */
+    public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed) throws IOException {
+        byte[] data = xmodem.receive();
+        if (data == null) {
+            throw new IOException("Failed to receive file data");
+        }
+
+        // Decompress if needed
+        if (compressed) {
+            data = CompressionUtil.decompress(data);
+        }
+
+        // Create directories if needed
+        File targetFile = new File(baseDir, relativePath);
+        File parentDir = targetFile.getParentFile();
+        if (parentDir != null && !parentDir.exists()) {
+            parentDir.mkdirs();
+        }
+
+        // Write file
+        try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+            fos.write(data);
+        }
+    }
+
+    /**
+     * Send sync complete notification
+     */
+    public void sendSyncComplete() throws IOException {
+        sendCommand(CMD_SYNC_COMPLETE);
+    }
+
+    /**
+     * Send direction change notification
+     */
+    public void sendDirectionChange(boolean isSender) throws IOException {
+        sendCommand(CMD_DIRECTION_CHANGE, String.valueOf(isSender));
+    }
+
+    /**
+     * Send acknowledgment
+     */
+    public void sendAck() throws IOException {
+        sendCommand(CMD_ACK);
+    }
+
+    /**
+     * Send error message
+     */
+    public void sendError(String message) throws IOException {
+        sendCommand(CMD_ERROR, message);
+    }
+
+    /**
+     * Wait for specific command
+     */
+    public Message waitForCommand(String expectedCommand) throws IOException {
+        long startTime = System.currentTimeMillis();
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            Message msg = receiveCommand();
+            if (msg != null && msg.getCommand().equals(expectedCommand)) {
+                return msg;
+            }
+        }
+        throw new IOException("Timeout waiting for command: " + expectedCommand);
+    }
+
+    /**
+     * Check if there's data available
+     */
+    public boolean hasData() throws IOException {
+        return serialPort.available() > 0;
+    }
+
+    private byte[] readFileContent(File file) throws IOException {
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] data = new byte[(int) file.length()];
+            int totalRead = 0;
+            while (totalRead < data.length) {
+                int read = fis.read(data, totalRead, data.length - totalRead);
+                if (read == -1) break;
+                totalRead += read;
+            }
+            return data;
+        }
+    }
+
+    /**
+     * Protocol message class
+     */
+    public static class Message {
+        private final String command;
+        private final String[] params;
+
+        public Message(String command, String[] params) {
+            this.command = command;
+            this.params = params;
+        }
+
+        public String getCommand() {
+            return command;
+        }
+
+        public String[] getParams() {
+            return params;
+        }
+
+        public String getParam(int index) {
+            if (index >= 0 && index < params.length) {
+                return params[index];
+            }
+            return null;
+        }
+
+        public int getParamAsInt(int index) {
+            String param = getParam(index);
+            if (param != null) {
+                return Integer.parseInt(param);
+            }
+            return 0;
+        }
+
+        public boolean getParamAsBoolean(int index) {
+            String param = getParam(index);
+            return Boolean.parseBoolean(param);
+        }
+
+        @Override
+        public String toString() {
+            return "Message{command='" + command + "', params=" + String.join(", ", params) + "}";
+        }
+    }
+}
+
