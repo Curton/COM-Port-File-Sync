@@ -25,7 +25,7 @@ public class XModemTransfer {
     private static final int TIMEOUT_MS = 10000;
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
     private static final byte PADDING = 0x1A;  // CTRL-Z for padding
-    private static final int POLL_INTERVAL_MS = 1;  // Reduced from 10ms for better throughput
+    private static final int POLL_INTERVAL_MS = 5;  // Balanced: fast enough but not excessive CPU usage
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
