@@ -21,7 +21,7 @@ public class SerialPortManager {
     private static final int DEFAULT_STOP_BITS = SerialPort.ONE_STOP_BIT;
     private static final int DEFAULT_PARITY = SerialPort.NO_PARITY;
     private static final int DEFAULT_TIMEOUT_MS = 5000;
-    private static final int POLL_INTERVAL_MS = 5;  // Balanced: fast enough but not excessive CPU usage
+    private static final int POLL_INTERVAL_MS = 1;  // Reduced from 10ms for better throughput
 
     private SerialPort serialPort;
     private InputStream inputStream;
