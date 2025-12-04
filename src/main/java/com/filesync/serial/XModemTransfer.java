@@ -26,6 +26,8 @@ public class XModemTransfer {
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
+    private long transferStartTime;
+    private long totalBytesTransferred;
 
     public XModemTransfer(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -44,6 +46,10 @@ public class XModemTransfer {
             reportError("Handshake failed: receiver not responding");
             return false;
         }
+
+        // Initialize transfer tracking
+        transferStartTime = System.currentTimeMillis();
+        totalBytesTransferred = 0;
 
         ByteArrayInputStream inputStream = new ByteArrayInputStream(data);
         byte[] block = new byte[BLOCK_SIZE];
@@ -70,7 +76,8 @@ public class XModemTransfer {
                 return false;
             }
 
-            reportProgress(blockNumber, totalBlocks);
+            totalBytesTransferred += BLOCK_SIZE;
+            reportProgress(blockNumber, totalBlocks, totalBytesTransferred);
             blockNumber++;
         }
 
@@ -94,6 +101,10 @@ public class XModemTransfer {
             reportError("Failed to initiate transfer");
             return null;
         }
+
+        // Initialize transfer tracking
+        transferStartTime = System.currentTimeMillis();
+        totalBytesTransferred = 0;
 
         int expectedBlockNumber = 1;
         int retryCount = 0;
@@ -160,7 +171,8 @@ public class XModemTransfer {
                 expectedBlockNumber++;
                 retryCount = 0;
                 serialPort.write(ACK);
-                reportProgress(expectedBlockNumber - 1, -1);  // -1 means unknown total
+                totalBytesTransferred += BLOCK_SIZE;
+                reportProgress(expectedBlockNumber - 1, -1, totalBytesTransferred);  // -1 means unknown total
             } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
                 // Duplicate block, ACK but don't save
                 serialPort.write(ACK);
@@ -311,10 +323,22 @@ public class XModemTransfer {
         return result;
     }
 
-    private void reportProgress(int current, int total) {
+    private void reportProgress(int currentBlock, int totalBlocks, long bytesTransferred) {
         if (progressListener != null) {
-            progressListener.onProgress(current, total);
+            double speedBytesPerSec = calculateSpeed(bytesTransferred);
+            progressListener.onProgress(currentBlock, totalBlocks, bytesTransferred, speedBytesPerSec);
         }
+    }
+
+    /**
+     * Calculate transfer speed in bytes per second
+     */
+    private double calculateSpeed(long bytesTransferred) {
+        long elapsed = System.currentTimeMillis() - transferStartTime;
+        if (elapsed <= 0) {
+            return 0;
+        }
+        return (bytesTransferred * 1000.0) / elapsed;
     }
 
     private void reportError(String message) {
@@ -327,7 +351,7 @@ public class XModemTransfer {
      * Progress listener interface for transfer status updates
      */
     public interface TransferProgressListener {
-        void onProgress(int currentBlock, int totalBlocks);
+        void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec);
         void onError(String message);
     }
 }

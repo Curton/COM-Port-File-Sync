@@ -56,9 +56,9 @@ public class FileSyncManager {
         this.eventListener = listener;
         protocol.setProgressListener(new XModemTransfer.TransferProgressListener() {
             @Override
-            public void onProgress(int currentBlock, int totalBlocks) {
+            public void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
                 if (eventListener != null) {
-                    eventListener.onTransferProgress(currentBlock, totalBlocks);
+                    eventListener.onTransferProgress(currentBlock, totalBlocks, bytesTransferred, speedBytesPerSec);
                 }
             }
 
@@ -619,7 +619,7 @@ public class FileSyncManager {
         void onSyncStarted();
         void onSyncComplete();
         void onFileProgress(int currentFile, int totalFiles, String fileName);
-        void onTransferProgress(int currentBlock, int totalBlocks);
+        void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec);
         void onDirectionChanged(boolean isSender);
         void onConnectionStatusChanged(boolean isConnected);
         void onLog(String message);

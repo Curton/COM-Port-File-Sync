@@ -629,15 +629,29 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     }
 
     @Override
-    public void onTransferProgress(int currentBlock, int totalBlocks) {
+    public void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
         SwingUtilities.invokeLater(() -> {
+            String speedStr = formatSpeed(speedBytesPerSec);
             if (totalBlocks > 0) {
                 int percent = (int) ((double) currentBlock / totalBlocks * 100);
-                progressBar.setString("Block " + currentBlock + "/" + totalBlocks);
+                progressBar.setString("Block " + currentBlock + "/" + totalBlocks + " - " + speedStr);
             } else {
-                progressBar.setString("Block " + currentBlock);
+                progressBar.setString("Block " + currentBlock + " - " + speedStr);
             }
         });
+    }
+
+    /**
+     * Format transfer speed to human-readable string (B/s, KB/s, MB/s)
+     */
+    private String formatSpeed(double bytesPerSec) {
+        if (bytesPerSec < 1024) {
+            return String.format("%.0f B/s", bytesPerSec);
+        } else if (bytesPerSec < 1024 * 1024) {
+            return String.format("%.1f KB/s", bytesPerSec / 1024);
+        } else {
+            return String.format("%.2f MB/s", bytesPerSec / (1024 * 1024));
+        }
     }
 
     @Override
