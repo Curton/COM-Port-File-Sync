@@ -30,35 +30,87 @@ public class FileChangeDetector {
      * Generate a manifest of all files in a directory
      */
     public static FileManifest generateManifest(File directory) throws IOException {
+        return generateManifest(directory, false);
+    }
+
+    /**
+     * Generate a manifest of all files in a directory with optional .gitignore support
+     * 
+     * @param directory the directory to scan
+     * @param respectGitignore if true, files matching .gitignore patterns will be excluded
+     */
+    public static FileManifest generateManifest(File directory, boolean respectGitignore) throws IOException {
         if (!directory.exists() || !directory.isDirectory()) {
             throw new IOException("Invalid directory: " + directory.getAbsolutePath());
         }
 
+        // Initialize gitignore parser if needed
+        GitignoreParser gitignoreParser = null;
+        if (respectGitignore) {
+            gitignoreParser = new GitignoreParser(directory);
+            gitignoreParser.loadGitignoreFiles();
+        }
+        final GitignoreParser parser = gitignoreParser;
+
         Map<String, FileInfo> files = new HashMap<>();
+        java.util.Set<String> emptyDirectories = new java.util.HashSet<>();
         Path basePath = directory.toPath();
 
         try (Stream<Path> paths = Files.walk(basePath)) {
-            paths.filter(Files::isRegularFile)
-                    .forEach(path -> {
-                        try {
-                            String relativePath = basePath.relativize(path).toString().replace('\\', '/');
-                            File file = path.toFile();
-                            String md5 = calculateMD5(file);
-                            FileInfo info = new FileInfo(
-                                    relativePath,
-                                    file.length(),
-                                    file.lastModified(),
-                                    md5
-                            );
-                            files.put(relativePath, info);
-                        } catch (IOException e) {
-                            // Log and skip problematic files
-                            System.err.println("Error processing file: " + path + " - " + e.getMessage());
+            paths.forEach(path -> {
+                try {
+                    String relativePath = basePath.relativize(path).toString().replace('\\', '/');
+                    
+                    // Skip .gitignore files themselves when respectGitignore is enabled
+                    if (parser != null && relativePath.endsWith(".gitignore")) {
+                        return;
+                    }
+                    
+                    if (Files.isRegularFile(path)) {
+                        // Check if file should be ignored based on .gitignore
+                        if (parser != null && parser.isIgnored(relativePath, false)) {
+                            return;
                         }
-                    });
+                        
+                        File file = path.toFile();
+                        String md5 = calculateMD5(file);
+                        FileInfo info = new FileInfo(
+                                relativePath,
+                                file.length(),
+                                file.lastModified(),
+                                md5
+                        );
+                        files.put(relativePath, info);
+                    } else if (Files.isDirectory(path) && !path.equals(basePath)) {
+                        // Check if directory should be ignored based on .gitignore
+                        if (parser != null && parser.isIgnored(relativePath, true)) {
+                            return;
+                        }
+                        
+                        // Check if directory is empty (considering only non-ignored items)
+                        try (Stream<Path> children = Files.list(path)) {
+                            boolean hasVisibleChildren = children.anyMatch(child -> {
+                                String childRelPath = basePath.relativize(child).toString().replace('\\', '/');
+                                if (parser != null) {
+                                    boolean isDir = Files.isDirectory(child);
+                                    return !parser.isIgnored(childRelPath, isDir);
+                                }
+                                return true;
+                            });
+                            
+                            if (!hasVisibleChildren) {
+                                emptyDirectories.add(relativePath);
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    // Log and skip problematic files
+                    System.err.println("Error processing path: " + path + " - " + e.getMessage());
+                }
+            });
         }
 
-        return new FileManifest(files);
+        return new FileManifest(files, emptyDirectories);
     }
 
     /**
@@ -100,6 +152,42 @@ public class FileChangeDetector {
         }
 
         return filesToDelete;
+    }
+
+    /**
+     * Compare two manifests and return empty directories that need to be created
+     * Returns directories that exist in source but not in target
+     */
+    public static List<String> getEmptyDirectoriesToCreate(FileManifest source, FileManifest target) {
+        List<String> dirsToCreate = new ArrayList<>();
+
+        for (String dir : source.getEmptyDirectories()) {
+            if (!target.getEmptyDirectories().contains(dir)) {
+                dirsToCreate.add(dir);
+            }
+        }
+
+        return dirsToCreate;
+    }
+
+    /**
+     * Compare two manifests and return empty directories that need to be deleted
+     * Returns directories that exist in target but not in source (for strict sync mode)
+     */
+    public static List<String> getEmptyDirectoriesToDelete(FileManifest source, FileManifest target) {
+        List<String> dirsToDelete = new ArrayList<>();
+
+        for (String dir : target.getEmptyDirectories()) {
+            if (!source.getEmptyDirectories().contains(dir)) {
+                // Directory exists in target but not in source - should be deleted
+                dirsToDelete.add(dir);
+            }
+        }
+
+        // Sort in reverse order so deeper directories are deleted first
+        dirsToDelete.sort((a, b) -> b.length() - a.length());
+
+        return dirsToDelete;
     }
 
     /**
@@ -145,21 +233,37 @@ public class FileChangeDetector {
      */
     public static class FileManifest {
         private final Map<String, FileInfo> files;
+        private final java.util.Set<String> emptyDirectories;
 
         public FileManifest() {
             this.files = new HashMap<>();
+            this.emptyDirectories = new java.util.HashSet<>();
         }
 
         public FileManifest(Map<String, FileInfo> files) {
             this.files = files;
+            this.emptyDirectories = new java.util.HashSet<>();
+        }
+
+        public FileManifest(Map<String, FileInfo> files, java.util.Set<String> emptyDirectories) {
+            this.files = files;
+            this.emptyDirectories = emptyDirectories != null ? emptyDirectories : new java.util.HashSet<>();
         }
 
         public Map<String, FileInfo> getFiles() {
             return files;
         }
 
+        public java.util.Set<String> getEmptyDirectories() {
+            return emptyDirectories;
+        }
+
         public int getFileCount() {
             return files.size();
+        }
+
+        public int getEmptyDirectoryCount() {
+            return emptyDirectories.size();
         }
     }
 

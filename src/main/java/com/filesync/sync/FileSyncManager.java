@@ -39,6 +39,7 @@ public class FileSyncManager {
     private final AtomicBoolean roleNegotiated;
     private static final Random RANDOM = new Random();
     private boolean strictSyncMode = false;
+    private boolean respectGitignoreMode = false;
 
     public FileSyncManager(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -94,6 +95,14 @@ public class FileSyncManager {
 
     public boolean isStrictSyncMode() {
         return strictSyncMode;
+    }
+
+    public void setRespectGitignoreMode(boolean respectGitignoreMode) {
+        this.respectGitignoreMode = respectGitignoreMode;
+    }
+
+    public boolean isRespectGitignoreMode() {
+        return respectGitignoreMode;
     }
 
     public boolean isRunning() {
@@ -346,7 +355,88 @@ public class FileSyncManager {
             case SyncProtocol.CMD_FILE_DELETE:
                 handleFileDelete(msg.getParam(0));
                 break;
+
+            case SyncProtocol.CMD_MKDIR:
+                handleMkdir(msg.getParam(0));
+                break;
+
+            case SyncProtocol.CMD_RMDIR:
+                handleRmdir(msg.getParam(0));
+                break;
         }
+    }
+
+    /**
+     * Handle mkdir command from remote - create empty directory
+     */
+    private void handleMkdir(String relativePath) {
+        if (syncFolder == null) {
+            return;
+        }
+
+        File dirToCreate = new File(syncFolder, relativePath);
+        if (!dirToCreate.exists()) {
+            if (eventListener != null) {
+                eventListener.onLog("Creating directory: " + relativePath);
+            }
+            if (dirToCreate.mkdirs()) {
+                if (eventListener != null) {
+                    eventListener.onLog("Directory created: " + relativePath);
+                }
+            } else {
+                if (eventListener != null) {
+                    eventListener.onError("Failed to create directory: " + relativePath);
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle rmdir command from remote - delete empty directory (strict sync mode)
+     */
+    private void handleRmdir(String relativePath) {
+        if (syncFolder == null) {
+            return;
+        }
+
+        File dirToDelete = new File(syncFolder, relativePath);
+        if (dirToDelete.exists() && dirToDelete.isDirectory()) {
+            if (eventListener != null) {
+                eventListener.onLog("Deleting directory: " + relativePath);
+            }
+            // Delete recursively in case it has content
+            if (deleteDirectoryRecursively(dirToDelete)) {
+                if (eventListener != null) {
+                    eventListener.onLog("Directory deleted: " + relativePath);
+                }
+                // Clean up empty parent directories
+                cleanupEmptyDirectories(dirToDelete.getParentFile());
+            } else {
+                if (eventListener != null) {
+                    eventListener.onError("Failed to delete directory: " + relativePath);
+                }
+            }
+        }
+    }
+
+    /**
+     * Delete a directory recursively
+     */
+    private boolean deleteDirectoryRecursively(File directory) {
+        if (directory == null || !directory.exists()) {
+            return true;
+        }
+        if (directory.isDirectory()) {
+            File[] files = directory.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    if (!deleteDirectoryRecursively(file)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return directory.delete();
     }
 
     /**
@@ -489,11 +579,16 @@ public class FileSyncManager {
             eventListener.onLog("Sending manifest...");
         }
 
-        FileChangeDetector.FileManifest manifest = FileChangeDetector.generateManifest(syncFolder);
+        FileChangeDetector.FileManifest manifest = FileChangeDetector.generateManifest(syncFolder, respectGitignoreMode);
         protocol.sendManifest(manifest);
 
         if (eventListener != null) {
-            eventListener.onLog("Manifest sent (" + manifest.getFileCount() + " files)");
+            String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
+            if (manifest.getEmptyDirectoryCount() > 0) {
+                logMsg += ", " + manifest.getEmptyDirectoryCount() + " empty dirs";
+            }
+            logMsg += ")";
+            eventListener.onLog(logMsg);
         }
     }
 
@@ -605,7 +700,7 @@ public class FileSyncManager {
             if (eventListener != null) {
                 eventListener.onLog("Generating local manifest...");
             }
-            FileChangeDetector.FileManifest localManifest = FileChangeDetector.generateManifest(syncFolder);
+            FileChangeDetector.FileManifest localManifest = FileChangeDetector.generateManifest(syncFolder, respectGitignoreMode);
 
             // Request remote manifest
             if (eventListener != null) {
@@ -619,19 +714,33 @@ public class FileSyncManager {
             // Receive manifest via XMODEM
             FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest();
             if (eventListener != null) {
-                eventListener.onLog("Remote manifest received (" + remoteManifest.getFileCount() + " files)");
+                String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
+                if (remoteManifest.getEmptyDirectoryCount() > 0) {
+                    logMsg += ", " + remoteManifest.getEmptyDirectoryCount() + " empty dirs";
+                }
+                logMsg += ")";
+                eventListener.onLog(logMsg);
             }
 
             // Compare manifests to find files that need syncing
             List<FileChangeDetector.FileInfo> filesToSync = 
                     FileChangeDetector.getChangedFiles(localManifest, remoteManifest);
 
+            // Get empty directories that need to be created
+            List<String> emptyDirsToCreate = 
+                    FileChangeDetector.getEmptyDirectoriesToCreate(localManifest, remoteManifest);
+
             // Get files to delete if strict sync mode is enabled
             List<String> filesToDelete = strictSyncMode ? 
                     FileChangeDetector.getFilesToDelete(localManifest, remoteManifest) : 
                     new java.util.ArrayList<>();
 
-            int totalOperations = filesToSync.size() + filesToDelete.size();
+            // Get empty directories to delete if strict sync mode is enabled
+            List<String> emptyDirsToDelete = strictSyncMode ?
+                    FileChangeDetector.getEmptyDirectoriesToDelete(localManifest, remoteManifest) :
+                    new java.util.ArrayList<>();
+
+            int totalOperations = filesToSync.size() + emptyDirsToCreate.size() + filesToDelete.size() + emptyDirsToDelete.size();
             
             if (totalOperations == 0) {
                 if (eventListener != null) {
@@ -643,8 +752,17 @@ public class FileSyncManager {
             }
 
             if (eventListener != null) {
-                eventListener.onLog("Files to sync: " + filesToSync.size() + 
-                        (strictSyncMode ? ", Files to delete: " + filesToDelete.size() : ""));
+                String logMsg = "Files to sync: " + filesToSync.size();
+                if (!emptyDirsToCreate.isEmpty()) {
+                    logMsg += ", Empty dirs to create: " + emptyDirsToCreate.size();
+                }
+                if (strictSyncMode) {
+                    logMsg += ", Files to delete: " + filesToDelete.size();
+                    if (!emptyDirsToDelete.isEmpty()) {
+                        logMsg += ", Empty dirs to delete: " + emptyDirsToDelete.size();
+                    }
+                }
+                eventListener.onLog(logMsg);
             }
 
             // Send each changed file
@@ -659,6 +777,16 @@ public class FileSyncManager {
                 protocol.sendFile(syncFolder, fileInfo.getPath());
             }
 
+            // Create empty directories on remote
+            for (String dirPath : emptyDirsToCreate) {
+                operationIndex++;
+                if (eventListener != null) {
+                    eventListener.onLog("Creating dir [" + operationIndex + "/" + totalOperations + "]: " + dirPath);
+                    eventListener.onFileProgress(operationIndex, totalOperations, "[DIR] " + dirPath);
+                }
+                protocol.sendMkdir(dirPath);
+            }
+
             // Send delete commands for files that should be removed (strict sync mode)
             for (String pathToDelete : filesToDelete) {
                 operationIndex++;
@@ -667,6 +795,16 @@ public class FileSyncManager {
                     eventListener.onFileProgress(operationIndex, totalOperations, "[DEL] " + pathToDelete);
                 }
                 protocol.sendFileDelete(pathToDelete);
+            }
+
+            // Delete empty directories that should be removed (strict sync mode)
+            for (String dirToDelete : emptyDirsToDelete) {
+                operationIndex++;
+                if (eventListener != null) {
+                    eventListener.onLog("Deleting dir [" + operationIndex + "/" + totalOperations + "]: " + dirToDelete);
+                    eventListener.onFileProgress(operationIndex, totalOperations, "[RMDIR] " + dirToDelete);
+                }
+                protocol.sendRmdir(dirToDelete);
             }
 
             // Send sync complete

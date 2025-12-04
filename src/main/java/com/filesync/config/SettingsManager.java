@@ -17,6 +17,7 @@ public class SettingsManager {
     private static final String PREF_LAST_PORT = "lastPort";
     private static final String PREF_LAST_FOLDER = "lastFolder";
     private static final String PREF_STRICT_SYNC = "strictSync";
+    private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
 
     // Default values
     public static final int DEFAULT_BAUD_RATE = 115200;
@@ -60,6 +61,7 @@ public class SettingsManager {
     private String lastPort;
     private String lastFolder;
     private boolean strictSync;
+    private boolean respectGitignore;
 
     public SettingsManager() {
         prefs = Preferences.userNodeForPackage(SettingsManager.class);
@@ -77,6 +79,7 @@ public class SettingsManager {
         lastPort = prefs.get(PREF_LAST_PORT, "");
         lastFolder = prefs.get(PREF_LAST_FOLDER, "");
         strictSync = prefs.getBoolean(PREF_STRICT_SYNC, false);
+        respectGitignore = prefs.getBoolean(PREF_RESPECT_GITIGNORE, false);
     }
 
     /**
@@ -90,6 +93,7 @@ public class SettingsManager {
         prefs.put(PREF_LAST_PORT, lastPort != null ? lastPort : "");
         prefs.put(PREF_LAST_FOLDER, lastFolder != null ? lastFolder : "");
         prefs.putBoolean(PREF_STRICT_SYNC, strictSync);
+        prefs.putBoolean(PREF_RESPECT_GITIGNORE, respectGitignore);
     }
 
     // Getters and Setters
@@ -148,6 +152,14 @@ public class SettingsManager {
 
     public void setStrictSync(boolean strictSync) {
         this.strictSync = strictSync;
+    }
+
+    public boolean isRespectGitignore() {
+        return respectGitignore;
+    }
+
+    public void setRespectGitignore(boolean respectGitignore) {
+        this.respectGitignore = respectGitignore;
     }
 
     /**

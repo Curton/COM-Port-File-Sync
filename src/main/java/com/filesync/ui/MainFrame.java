@@ -59,6 +59,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     private JButton browseFolderButton;
     private JButton directionButton;
     private JButton syncButton;
+    private JCheckBox respectGitignoreCheckBox;
     private JCheckBox strictSyncCheckBox;
     private JProgressBar progressBar;
     private JTextArea logTextArea;
@@ -136,8 +137,32 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         strictSyncCheckBox.setSelected(strictSync);
         syncManager.setStrictSyncMode(strictSync);
 
+        // Restore respect .gitignore setting
+        boolean respectGitignore = settings.isRespectGitignore();
+        respectGitignoreCheckBox.setSelected(respectGitignore);
+        syncManager.setRespectGitignoreMode(respectGitignore);
+
+        // Update respect .gitignore state based on strict sync
+        updateRespectGitignoreState();
+
         // Update settings label
         updateSettingsLabel();
+    }
+
+    /**
+     * Update the respect .gitignore checkbox state based on strict sync mode.
+     * When strict sync is enabled, respect .gitignore should be disabled and grayed out.
+     */
+    private void updateRespectGitignoreState() {
+        boolean strictMode = strictSyncCheckBox.isSelected();
+        if (strictMode) {
+            // Disable and uncheck respect .gitignore when strict sync is enabled
+            respectGitignoreCheckBox.setEnabled(false);
+            respectGitignoreCheckBox.setSelected(false);
+            syncManager.setRespectGitignoreMode(false);
+        } else {
+            respectGitignoreCheckBox.setEnabled(true);
+        }
     }
 
     private void initComponents() {
@@ -174,8 +199,12 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         syncButton = new JButton("Start Sync");
         syncButton.setEnabled(false);
 
+        // Respect .gitignore checkbox
+        respectGitignoreCheckBox = new JCheckBox("Respect .gitignore");
+        respectGitignoreCheckBox.setToolTipText("When enabled, files matching .gitignore patterns will be excluded from sync");
+
         // Strict sync checkbox
-        strictSyncCheckBox = new JCheckBox("Strict Sync (delete remote files not in local)");
+        strictSyncCheckBox = new JCheckBox("Strict Sync");
         strictSyncCheckBox.setToolTipText("When enabled, files that exist on the remote but not locally will be deleted");
 
         // Progress bar
@@ -271,8 +300,9 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 10));
         controlPanel.setBorder(new TitledBorder("Sync Control"));
         controlPanel.add(directionButton);
-        controlPanel.add(strictSyncCheckBox);
         controlPanel.add(syncButton);
+        controlPanel.add(respectGitignoreCheckBox);
+        controlPanel.add(strictSyncCheckBox);
 
         // Top section combining connection, folder, and control
         JPanel topSection = new JPanel();
@@ -325,6 +355,15 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         // Sync button
         syncButton.addActionListener(e -> startSync());
 
+        // Respect .gitignore checkbox
+        respectGitignoreCheckBox.addActionListener(e -> {
+            boolean respectGitignore = respectGitignoreCheckBox.isSelected();
+            syncManager.setRespectGitignoreMode(respectGitignore);
+            settings.setRespectGitignore(respectGitignore);
+            settings.save();
+            log("Respect .gitignore: " + (respectGitignore ? "enabled" : "disabled"));
+        });
+
         // Strict sync checkbox
         strictSyncCheckBox.addActionListener(e -> {
             boolean strictMode = strictSyncCheckBox.isSelected();
@@ -332,6 +371,9 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             settings.setStrictSync(strictMode);
             settings.save();
             log("Strict sync mode: " + (strictMode ? "enabled" : "disabled"));
+            
+            // Disable respect .gitignore when strict sync is enabled
+            updateRespectGitignoreState();
         });
 
         // Window close handler
