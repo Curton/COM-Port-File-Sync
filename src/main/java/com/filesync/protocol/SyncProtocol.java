@@ -173,8 +173,8 @@ public class SyncProtocol {
         // Read file content
         byte[] data = readFileContent(file);
 
-        // Compress if text file
-        CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfText(file.getName(), data);
+        // Smart compression based on content analysis
+        CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfBeneficial(file.getName(), data);
 
         // Send file header
         sendCommand(CMD_FILE_DATA, 
