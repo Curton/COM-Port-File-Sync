@@ -1,15 +1,15 @@
 package com.filesync.sync;
 
-import com.filesync.protocol.SyncProtocol;
-import com.filesync.serial.SerialPortManager;
-import com.filesync.serial.XModemTransfer;
-
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+
+import com.filesync.protocol.SyncProtocol;
+import com.filesync.serial.SerialPortManager;
+import com.filesync.serial.XModemTransfer;
 
 /**
  * Orchestrates file synchronization operations between two machines.
@@ -496,6 +496,12 @@ public class FileSyncManager {
         // Mark connection as alive if it was previously lost
         if (!connectionAlive.get()) {
             connectionAlive.set(true);
+            // Reset role negotiation state on reconnection
+            roleNegotiated.set(false);
+            // Reset syncing state in case sync was interrupted
+            syncing.set(false);
+            // Generate new priority for role negotiation on reconnection
+            localPriority.set(System.currentTimeMillis() * 1000 + RANDOM.nextInt(1000));
             if (eventListener != null) {
                 eventListener.onConnectionStatusChanged(true);
                 eventListener.onLog("Connection restored");
@@ -513,6 +519,12 @@ public class FileSyncManager {
         // Mark connection as alive if it was previously lost
         if (!connectionAlive.get()) {
             connectionAlive.set(true);
+            // Reset role negotiation state on reconnection
+            roleNegotiated.set(false);
+            // Reset syncing state in case sync was interrupted
+            syncing.set(false);
+            // Generate new priority for role negotiation on reconnection
+            localPriority.set(System.currentTimeMillis() * 1000 + RANDOM.nextInt(1000));
             if (eventListener != null) {
                 eventListener.onConnectionStatusChanged(true);
                 eventListener.onLog("Connection restored");
@@ -554,13 +566,16 @@ public class FileSyncManager {
         
         if (this.isSender != shouldBeSender) {
             this.isSender = shouldBeSender;
-            if (eventListener != null) {
-                eventListener.onDirectionChanged(this.isSender);
-                eventListener.onLog("Role negotiated: " + (isSender ? "Sender" : "Receiver"));
-            }
         }
         
         roleNegotiated.set(true);
+        
+        // Always notify direction change after role negotiation completes
+        // This ensures UI updates (like sync button state) even if role didn't change
+        if (eventListener != null) {
+            eventListener.onDirectionChanged(this.isSender);
+            eventListener.onLog("Role negotiated: " + (isSender ? "Sender" : "Receiver"));
+        }
         
         // Send our priority back so the other side can also determine its role
         protocol.sendRoleNegotiate(myPriority);
@@ -626,6 +641,9 @@ public class FileSyncManager {
         if (eventListener != null) {
             eventListener.onLog("Receiving file: " + relativePath);
         }
+
+        // Send ACK to synchronize with sender
+        protocol.sendAck();
 
         protocol.receiveFile(syncFolder, relativePath, size, compressed);
 
@@ -711,6 +729,9 @@ public class FileSyncManager {
             // Wait for manifest data command
             SyncProtocol.Message manifestMsg = protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
 
+            // Send ACK to synchronize with sender
+            protocol.sendAck();
+
             // Receive manifest via XMODEM
             FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest();
             if (eventListener != null) {
@@ -769,12 +790,17 @@ public class FileSyncManager {
             int operationIndex = 0;
             for (FileChangeDetector.FileInfo fileInfo : filesToSync) {
                 operationIndex++;
+                
+                boolean wasCompressed = protocol.sendFile(syncFolder, fileInfo.getPath());
+                
                 if (eventListener != null) {
-                    eventListener.onLog("Syncing [" + operationIndex + "/" + totalOperations + "]: " + fileInfo.getPath());
+                    String logMessage = "Syncing [" + operationIndex + "/" + totalOperations + "]: " + fileInfo.getPath();
+                    if (wasCompressed) {
+                        logMessage += " (compressed)";
+                    }
+                    eventListener.onLog(logMessage);
                     eventListener.onFileProgress(operationIndex, totalOperations, fileInfo.getPath());
                 }
-
-                protocol.sendFile(syncFolder, fileInfo.getPath());
             }
 
             // Create empty directories on remote

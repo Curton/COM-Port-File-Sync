@@ -123,12 +123,8 @@ public class SyncProtocol {
 
         sendCommand(CMD_MANIFEST_DATA, String.valueOf(compressed.length));
 
-        // Short delay to let receiver prepare
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        // Wait for receiver ACK to ensure proper synchronization
+        Message ackMsg = waitForCommand(CMD_ACK);
 
         // Send manifest data via XMODEM
         xmodemInProgress.set(true);
@@ -151,7 +147,11 @@ public class SyncProtocol {
             xmodemInProgress.set(false);
         }
         if (compressed == null) {
-            throw new IOException("Failed to receive manifest data");
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException("Failed to receive manifest data (" + detail + ")");
         }
 
         byte[] data = CompressionUtil.decompress(compressed);
@@ -167,13 +167,17 @@ public class SyncProtocol {
     }
 
     /**
-     * Send file data
+     * Send file data.
+     * Performs limited retries around the underlying XMODEM transfer so that
+     * transient handshake issues do not abort the entire sync.
+     *
+     * @return true if file was compressed, false otherwise
      */
-    public void sendFile(File baseDir, String relativePath) throws IOException {
+    public boolean sendFile(File baseDir, String relativePath) throws IOException {
         File file = new File(baseDir, relativePath);
         if (!file.exists() || !file.isFile()) {
             sendCommand(CMD_ERROR, "File not found: " + relativePath);
-            return;
+            return false;
         }
 
         // Read file content
@@ -181,27 +185,62 @@ public class SyncProtocol {
 
         // Smart compression based on content analysis
         CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfBeneficial(file.getName(), data);
+        boolean wasCompressed = compressedData.isCompressed();
 
-        // Send file header
-        sendCommand(CMD_FILE_DATA, 
-                relativePath, 
-                String.valueOf(compressedData.getData().length),
-                String.valueOf(compressedData.isCompressed()));
+        // Try to send the file with limited retries in case of handshake issues
+        final int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // Send file header for this attempt
+            sendCommand(CMD_FILE_DATA,
+                    relativePath,
+                    String.valueOf(compressedData.getData().length),
+                    String.valueOf(wasCompressed));
 
-        // Short delay to let receiver prepare
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            try {
+                // Wait for receiver ACK to ensure proper synchronization
+                Message ackMsg = waitForCommand(CMD_ACK);
+
+                // Send file data via XMODEM
+                xmodemInProgress.set(true);
+                boolean success;
+                try {
+                    success = xmodem.send(compressedData.getData());
+                } finally {
+                    xmodemInProgress.set(false);
+                }
+
+                if (success) {
+                    return wasCompressed;
+                }
+            } catch (IOException e) {
+                // Failed attempt - continue to cleanup and retry logic below
+                throw e;
+            }
+
+            // Best-effort cleanup between attempts
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException e) {
+                // Ignore cleanup errors; we will surface the XMODEM error if all attempts fail
+            }
+
+            if (attempt < maxAttempts) {
+                // Small backoff before retrying
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
 
-        // Send file data via XMODEM
-        xmodemInProgress.set(true);
-        try {
-            xmodem.send(compressedData.getData());
-        } finally {
-            xmodemInProgress.set(false);
+        String detail = xmodem.getLastErrorMessage();
+        if (detail == null || detail.isEmpty()) {
+            detail = "unknown XMODEM error";
         }
+        throw new IOException("Failed to send file " + relativePath +
+                " after " + maxAttempts + " attempts (" + detail + ")");
     }
 
     /**
@@ -216,7 +255,18 @@ public class SyncProtocol {
             xmodemInProgress.set(false);
         }
         if (data == null) {
-            throw new IOException("Failed to receive file data");
+            // Best-effort recovery: clear any stale data from the input buffer
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException e) {
+                // Ignore cleanup failure; we are already reporting a higher-level error
+            }
+
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException("Failed to receive file data for " + relativePath + " (" + detail + ")");
         }
 
         // Decompress if needed

@@ -1,7 +1,5 @@
 package com.filesync.serial;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
@@ -29,6 +27,12 @@ public class XModemTransfer {
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
+    /**
+     * Stores the last human-readable error message for diagnostics.
+     * Higher level code (e.g. SyncProtocol) can use this to provide
+     * more detailed context when reporting failures.
+     */
+    private String lastErrorMessage;
     private long transferStartTime;
     private long totalBytesTransferred;
 
@@ -120,7 +124,27 @@ public class XModemTransfer {
 
         // Initiate transfer by sending 'C' for CRC mode
         if (!initiateReceive()) {
-            reportError("Failed to initiate transfer");
+            // Try to collect a bit more context for diagnostics
+            boolean portOpen = serialPort.isOpen();
+            int availableBytes = 0;
+            try {
+                availableBytes = serialPort.available();
+            } catch (IOException e) {
+                // Ignore, we are already failing the transfer
+            }
+
+            String detailedMessage = "Failed to initiate transfer: " +
+                    "no response from sender after " + MAX_RETRIES + " handshake attempts" +
+                    " (portOpen=" + portOpen + ", bytesAvailable=" + availableBytes + ")";
+            reportError(detailedMessage);
+
+            // Best-effort cancel to put the sender (if any) into a known state
+            try {
+                sendCancel();
+            } catch (IOException e) {
+                // Ignore secondary failure during cancel
+            }
+
             return null;
         }
 
@@ -405,9 +429,20 @@ public class XModemTransfer {
     }
 
     private void reportError(String message) {
+        // Remember the last error so higher-level layers can include it
+        // in their own exception / log messages.
+        this.lastErrorMessage = message;
         if (progressListener != null) {
             progressListener.onError(message);
         }
+    }
+
+    /**
+     * Get the last error message reported by this transfer instance.
+     * May return null if no error has occurred yet.
+     */
+    public String getLastErrorMessage() {
+        return lastErrorMessage;
     }
 
     /**
