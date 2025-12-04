@@ -7,12 +7,17 @@ import com.filesync.sync.FileChangeDetector;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Protocol for file synchronization commands over serial port.
  * Handles message framing, command exchange, and file transfer coordination.
  */
 public class SyncProtocol {
+
+    // Flag to indicate XMODEM transfer is in progress
+    // When true, the listener thread should not read from serial port
+    private final AtomicBoolean xmodemInProgress = new AtomicBoolean(false);
 
     // Protocol commands
     public static final String CMD_MANIFEST_REQ = "MANIFEST_REQ";
@@ -25,6 +30,7 @@ public class SyncProtocol {
     public static final String CMD_ERROR = "ERROR";
     public static final String CMD_HEARTBEAT = "HEARTBEAT";
     public static final String CMD_HEARTBEAT_ACK = "HEARTBEAT_ACK";
+    public static final String CMD_ROLE_NEGOTIATE = "ROLE_NEGOTIATE";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -119,14 +125,25 @@ public class SyncProtocol {
         }
 
         // Send manifest data via XMODEM
-        xmodem.send(compressed);
+        xmodemInProgress.set(true);
+        try {
+            xmodem.send(compressed);
+        } finally {
+            xmodemInProgress.set(false);
+        }
     }
 
     /**
      * Receive manifest data
      */
     public FileChangeDetector.FileManifest receiveManifest() throws IOException {
-        byte[] compressed = xmodem.receive();
+        xmodemInProgress.set(true);
+        byte[] compressed;
+        try {
+            compressed = xmodem.receive();
+        } finally {
+            xmodemInProgress.set(false);
+        }
         if (compressed == null) {
             throw new IOException("Failed to receive manifest data");
         }
@@ -173,14 +190,25 @@ public class SyncProtocol {
         }
 
         // Send file data via XMODEM
-        xmodem.send(compressedData.getData());
+        xmodemInProgress.set(true);
+        try {
+            xmodem.send(compressedData.getData());
+        } finally {
+            xmodemInProgress.set(false);
+        }
     }
 
     /**
      * Receive file data and save to directory
      */
     public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed) throws IOException {
-        byte[] data = xmodem.receive();
+        xmodemInProgress.set(true);
+        byte[] data;
+        try {
+            data = xmodem.receive();
+        } finally {
+            xmodemInProgress.set(false);
+        }
         if (data == null) {
             throw new IOException("Failed to receive file data");
         }
@@ -246,6 +274,13 @@ public class SyncProtocol {
     }
 
     /**
+     * Send role negotiation with priority value
+     */
+    public void sendRoleNegotiate(long priority) throws IOException {
+        sendCommand(CMD_ROLE_NEGOTIATE, String.valueOf(priority));
+    }
+
+    /**
      * Try to receive a command with short timeout for heartbeat check
      * Returns null if no data available or timeout
      */
@@ -282,6 +317,14 @@ public class SyncProtocol {
      */
     public boolean hasData() throws IOException {
         return serialPort.available() > 0;
+    }
+
+    /**
+     * Check if XMODEM transfer is in progress.
+     * When true, other threads should not read from serial port.
+     */
+    public boolean isXmodemInProgress() {
+        return xmodemInProgress.get();
     }
 
     private byte[] readFileContent(File file) throws IOException {
@@ -330,6 +373,14 @@ public class SyncProtocol {
                 return Integer.parseInt(param);
             }
             return 0;
+        }
+
+        public long getParamAsLong(int index) {
+            String param = getParam(index);
+            if (param != null) {
+                return Long.parseLong(param);
+            }
+            return 0L;
         }
 
         public boolean getParamAsBoolean(int index) {

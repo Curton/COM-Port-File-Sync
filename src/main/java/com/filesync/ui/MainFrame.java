@@ -120,7 +120,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         portComboBox.setPreferredSize(new Dimension(200, 25));
 
         refreshPortsButton = new JButton("Refresh");
-        settingsButton = new JButton("Settings...");
+        settingsButton = new JButton("Settings");
         connectButton = new JButton("Connect");
 
         // Settings display label

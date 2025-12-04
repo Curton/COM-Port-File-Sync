@@ -1,8 +1,10 @@
 package com.filesync.serial;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -198,20 +200,20 @@ public class SerialPortManager {
     }
 
     /**
-     * Read a line (until newline character)
+     * Read a line (until newline character) with UTF-8 encoding
      */
     public String readLine(int timeoutMs) throws IOException {
         if (!isOpen()) {
             throw new IOException("Serial port is not open");
         }
 
-        StringBuilder sb = new StringBuilder();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
         long startTime = System.currentTimeMillis();
 
         while (true) {
             if (System.currentTimeMillis() - startTime > timeoutMs) {
-                if (sb.length() > 0) {
-                    return sb.toString();
+                if (baos.size() > 0) {
+                    return baos.toString(StandardCharsets.UTF_8.name());
                 }
                 throw new IOException("Read timeout");
             }
@@ -228,19 +230,19 @@ public class SerialPortManager {
             }
 
             if (b == '\n') {
-                return sb.toString();
+                return baos.toString(StandardCharsets.UTF_8.name());
             }
             if (b != '\r') {
-                sb.append((char) b);
+                baos.write(b);
             }
         }
     }
 
     /**
-     * Write a line (append newline)
+     * Write a line (append newline) with UTF-8 encoding
      */
     public void writeLine(String line) throws IOException {
-        write((line + "\n").getBytes());
+        write((line + "\n").getBytes(StandardCharsets.UTF_8));
     }
 
     /**

@@ -1,8 +1,12 @@
 package com.filesync;
 
-import com.filesync.ui.MainFrame;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 
-import javax.swing.*;
+import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
+
+import com.filesync.ui.MainFrame;
 
 /**
  * Application entry point for COM Port File Sync.
@@ -11,6 +15,14 @@ import javax.swing.*;
 public class Main {
 
     public static void main(String[] args) {
+        // Force UTF-8 encoding for console output to avoid garbled characters
+        try {
+            System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8));
+            System.setErr(new PrintStream(System.err, true, StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            // Ignore if failed, continue with default encoding
+        }
+
         // Set system look and feel
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());

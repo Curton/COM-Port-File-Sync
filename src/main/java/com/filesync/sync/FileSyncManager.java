@@ -7,7 +7,9 @@ import com.filesync.serial.XModemTransfer;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Orchestrates file synchronization operations between two machines.
@@ -33,6 +35,9 @@ public class FileSyncManager {
     private Thread heartbeatThread;
     private volatile long lastHeartbeatReceived;
     private volatile long lastHeartbeatSent;
+    private final AtomicLong localPriority;
+    private final AtomicBoolean roleNegotiated;
+    private static final Random RANDOM = new Random();
 
     public FileSyncManager(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -43,6 +48,8 @@ public class FileSyncManager {
         this.isSender = true;
         this.lastHeartbeatReceived = 0;
         this.lastHeartbeatSent = 0;
+        this.localPriority = new AtomicLong(0);
+        this.roleNegotiated = new AtomicBoolean(false);
     }
 
     public void setEventListener(SyncEventListener listener) {
@@ -104,6 +111,9 @@ public class FileSyncManager {
         connectionAlive.set(false);  // Not connected until heartbeat response received
         lastHeartbeatReceived = 0;  // No heartbeat received yet
         lastHeartbeatSent = System.currentTimeMillis();
+        // Generate random priority for role negotiation (use timestamp + random for uniqueness)
+        localPriority.set(System.currentTimeMillis() * 1000 + RANDOM.nextInt(1000));
+        roleNegotiated.set(false);
 
         listenerThread = new Thread(this::listenLoop, "SyncListener");
         listenerThread.setDaemon(true);
@@ -169,6 +179,7 @@ public class FileSyncManager {
     public void stopListening() {
         running.set(false);
         connectionAlive.set(false);
+        roleNegotiated.set(false);
         if (listenerThread != null) {
             listenerThread.interrupt();
             listenerThread = null;
@@ -187,6 +198,13 @@ public class FileSyncManager {
             try {
                 if (!serialPort.isOpen()) {
                     Thread.sleep(500);
+                    continue;
+                }
+
+                // Skip reading if XMODEM transfer is in progress on another thread
+                // to avoid consuming XMODEM binary data as protocol commands
+                if (protocol.isXmodemInProgress()) {
+                    Thread.sleep(100);
                     continue;
                 }
 
@@ -219,6 +237,13 @@ public class FileSyncManager {
             try {
                 if (!serialPort.isOpen()) {
                     Thread.sleep(500);
+                    continue;
+                }
+
+                // Skip heartbeat operations during XMODEM transfer
+                // to avoid interfering with binary data transfer
+                if (protocol.isXmodemInProgress()) {
+                    Thread.sleep(100);
                     continue;
                 }
 
@@ -302,6 +327,10 @@ public class FileSyncManager {
             case SyncProtocol.CMD_HEARTBEAT_ACK:
                 handleHeartbeatAck();
                 break;
+
+            case SyncProtocol.CMD_ROLE_NEGOTIATE:
+                handleRoleNegotiate(msg.getParamAsLong(0));
+                break;
         }
     }
 
@@ -317,6 +346,8 @@ public class FileSyncManager {
                 eventListener.onConnectionStatusChanged(true);
                 eventListener.onLog("Connection restored");
             }
+            // Start role negotiation after connection is established
+            sendRoleNegotiation();
         }
     }
 
@@ -332,7 +363,53 @@ public class FileSyncManager {
                 eventListener.onConnectionStatusChanged(true);
                 eventListener.onLog("Connection restored");
             }
+            // Start role negotiation after connection is established
+            sendRoleNegotiation();
         }
+    }
+
+    /**
+     * Send role negotiation message
+     */
+    private void sendRoleNegotiation() {
+        if (roleNegotiated.get()) {
+            return;
+        }
+        try {
+            protocol.sendRoleNegotiate(localPriority.get());
+        } catch (IOException e) {
+            if (eventListener != null) {
+                eventListener.onError("Failed to send role negotiation: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Handle incoming role negotiation
+     */
+    private void handleRoleNegotiate(long remotePriority) throws IOException {
+        if (roleNegotiated.get()) {
+            return;  // Already negotiated
+        }
+        
+        long myPriority = localPriority.get();
+        
+        // Higher priority becomes Sender, lower becomes Receiver
+        // If equal (very rare), the one receiving this message becomes Receiver
+        boolean shouldBeSender = myPriority > remotePriority;
+        
+        if (this.isSender != shouldBeSender) {
+            this.isSender = shouldBeSender;
+            if (eventListener != null) {
+                eventListener.onDirectionChanged(this.isSender);
+                eventListener.onLog("Role negotiated: " + (isSender ? "Sender" : "Receiver"));
+            }
+        }
+        
+        roleNegotiated.set(true);
+        
+        // Send our priority back so the other side can also determine its role
+        protocol.sendRoleNegotiate(myPriority);
     }
 
     /**
