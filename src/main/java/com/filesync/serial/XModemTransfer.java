@@ -50,6 +50,10 @@ public class XModemTransfer {
             return false;
         }
 
+        // Clear any extra 'C' characters that may have been sent by receiver during handshake
+        // This prevents reading stale 'C' when waiting for ACK after first block
+        drainExtraHandshakeChars();
+
         // Initialize transfer tracking
         transferStartTime = System.currentTimeMillis();
         totalBytesTransferred = 0;
@@ -229,6 +233,29 @@ public class XModemTransfer {
         return false;
     }
 
+    /**
+     * Drain any extra 'C' or NAK characters from the buffer after handshake.
+     * The receiver may have sent multiple 'C' chars before the sender started listening,
+     * and these stale chars could interfere with ACK detection during block sending.
+     */
+    private void drainExtraHandshakeChars() throws IOException {
+        // Small delay to let any in-flight 'C' chars arrive
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
+        // Drain any 'C' or NAK chars
+        while (serialPort.available() > 0) {
+            int b = serialPort.read() & 0xFF;
+            if (b != C && b != NAK) {
+                // Unexpected byte, stop draining
+                break;
+            }
+        }
+    }
+
     private boolean initiateReceive() throws IOException {
         serialPort.clearInputBuffer();
 
@@ -266,6 +293,14 @@ public class XModemTransfer {
         packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
+            // Clear any stale 'C' chars before sending (especially on retry)
+            while (serialPort.available() > 0) {
+                int stale = serialPort.read() & 0xFF;
+                if (stale != C && stale != NAK) {
+                    break;  // Unexpected byte, stop draining
+                }
+            }
+            
             serialPort.write(packet);
 
             int response = readByteWithTimeout(TIMEOUT_MS);
@@ -275,7 +310,7 @@ public class XModemTransfer {
             if (response == CAN) {
                 return false;
             }
-            // NAK or timeout, retry
+            // NAK, 'C' (stale handshake char), or timeout - retry
         }
         return false;
     }
