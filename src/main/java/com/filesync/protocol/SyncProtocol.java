@@ -1,13 +1,16 @@
 package com.filesync.protocol;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.FileChangeDetector;
-
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Protocol for file synchronization commands over serial port.
@@ -32,6 +35,8 @@ public class SyncProtocol {
     public static final String CMD_HEARTBEAT_ACK = "HEARTBEAT_ACK";
     public static final String CMD_ROLE_NEGOTIATE = "ROLE_NEGOTIATE";
     public static final String CMD_FILE_DELETE = "FILE_DELETE";
+    public static final String CMD_MKDIR = "MKDIR";
+    public static final String CMD_RMDIR = "RMDIR";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -286,6 +291,20 @@ public class SyncProtocol {
      */
     public void sendFileDelete(String relativePath) throws IOException {
         sendCommand(CMD_FILE_DELETE, relativePath);
+    }
+
+    /**
+     * Send mkdir command to create a directory on remote
+     */
+    public void sendMkdir(String relativePath) throws IOException {
+        sendCommand(CMD_MKDIR, relativePath);
+    }
+
+    /**
+     * Send rmdir command to delete an empty directory on remote
+     */
+    public void sendRmdir(String relativePath) throws IOException {
+        sendCommand(CMD_RMDIR, relativePath);
     }
 
     /**
