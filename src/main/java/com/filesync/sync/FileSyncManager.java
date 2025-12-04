@@ -18,6 +18,7 @@ public class FileSyncManager {
     private static final long HEARTBEAT_INTERVAL_MS = 5000;  // Send heartbeat every 5 seconds
     private static final long HEARTBEAT_TIMEOUT_MS = 15000;  // Connection lost if no heartbeat for 15 seconds
     private static final int HEARTBEAT_CHECK_TIMEOUT_MS = 1000;  // Short timeout for heartbeat check
+    private static final long INITIAL_CONNECT_TIMEOUT_MS = 60000;  // 60 seconds timeout for initial connection
 
     private final SerialPortManager serialPort;
     private final SyncProtocol protocol;
@@ -100,8 +101,8 @@ public class FileSyncManager {
         }
 
         running.set(true);
-        connectionAlive.set(true);
-        lastHeartbeatReceived = System.currentTimeMillis();
+        connectionAlive.set(false);  // Not connected until heartbeat response received
+        lastHeartbeatReceived = 0;  // No heartbeat received yet
         lastHeartbeatSent = System.currentTimeMillis();
 
         listenerThread = new Thread(this::listenLoop, "SyncListener");
@@ -111,6 +112,55 @@ public class FileSyncManager {
         heartbeatThread = new Thread(this::heartbeatLoop, "HeartbeatMonitor");
         heartbeatThread.setDaemon(true);
         heartbeatThread.start();
+    }
+
+    /**
+     * Wait for initial connection with the other side (waits for heartbeat response)
+     * @param timeoutMs timeout in milliseconds
+     * @return true if connected, false if timeout
+     */
+    public boolean waitForConnection(long timeoutMs) {
+        long startTime = System.currentTimeMillis();
+        
+        // Send initial heartbeat immediately
+        try {
+            protocol.sendHeartbeat();
+            lastHeartbeatSent = System.currentTimeMillis();
+        } catch (IOException e) {
+            // Ignore, will retry in loop
+        }
+        
+        while (running.get() && !connectionAlive.get()) {
+            if (System.currentTimeMillis() - startTime > timeoutMs) {
+                return false;  // Timeout
+            }
+            
+            try {
+                Thread.sleep(500);
+                
+                // Send heartbeat more frequently during initial connection
+                if (System.currentTimeMillis() - lastHeartbeatSent >= 2000) {
+                    try {
+                        protocol.sendHeartbeat();
+                        lastHeartbeatSent = System.currentTimeMillis();
+                    } catch (IOException e) {
+                        // Ignore, will retry
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        
+        return connectionAlive.get();
+    }
+
+    /**
+     * Get initial connection timeout value
+     */
+    public static long getInitialConnectTimeoutMs() {
+        return INITIAL_CONNECT_TIMEOUT_MS;
     }
 
     /**
@@ -175,7 +225,9 @@ public class FileSyncManager {
                 long now = System.currentTimeMillis();
 
                 // Check if connection is lost (no heartbeat received for too long)
-                if (connectionAlive.get() && (now - lastHeartbeatReceived) > HEARTBEAT_TIMEOUT_MS) {
+                // Only check after we've established connection at least once
+                if (connectionAlive.get() && lastHeartbeatReceived > 0 
+                        && (now - lastHeartbeatReceived) > HEARTBEAT_TIMEOUT_MS) {
                     connectionAlive.set(false);
                     if (eventListener != null) {
                         eventListener.onConnectionStatusChanged(false);

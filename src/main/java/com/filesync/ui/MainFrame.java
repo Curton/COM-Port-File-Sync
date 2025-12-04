@@ -230,6 +230,10 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         }
     }
 
+    private boolean isConnecting() {
+        return isConnected && !syncManager.isConnectionAlive();
+    }
+
     private void connect() {
         String selectedPort = (String) portComboBox.getSelectedItem();
         if (selectedPort == null || selectedPort.isEmpty()) {
@@ -239,15 +243,50 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         }
 
         if (serialPort.open(selectedPort)) {
+            // Show connecting status and disable UI
             isConnected = true;
-            connectButton.setText("Disconnect");
-            statusLabel.setText("Connected");
-            statusLabel.setForeground(new Color(0, 128, 0));
+            connectButton.setText("Cancel");
+            statusLabel.setText("Connecting...");
+            statusLabel.setForeground(Color.ORANGE);
             portComboBox.setEnabled(false);
             refreshPortsButton.setEnabled(false);
-            updateSyncButtonState();
+            syncButton.setEnabled(false);
+            log("Connecting to " + selectedPort + "...");
+
+            // Start listening and wait for connection in background thread
             syncManager.startListening();
-            log("Connected to " + selectedPort);
+            
+            Thread connectThread = new Thread(() -> {
+                boolean connected = syncManager.waitForConnection(
+                        FileSyncManager.getInitialConnectTimeoutMs());
+                
+                SwingUtilities.invokeLater(() -> {
+                    if (connected) {
+                        connectButton.setText("Disconnect");
+                        statusLabel.setText("Connected");
+                        statusLabel.setForeground(new Color(0, 128, 0));
+                        updateSyncButtonState();
+                        log("Connected to " + selectedPort);
+                    } else {
+                        // Connection timeout - disconnect
+                        syncManager.stopListening();
+                        serialPort.close();
+                        isConnected = false;
+                        connectButton.setText("Connect");
+                        statusLabel.setText("Disconnected");
+                        statusLabel.setForeground(Color.RED);
+                        portComboBox.setEnabled(true);
+                        refreshPortsButton.setEnabled(true);
+                        updateSyncButtonState();
+                        log("Connection timeout - other side not responding");
+                        JOptionPane.showMessageDialog(MainFrame.this, 
+                                "Connection timeout - other side not responding", 
+                                "Connection Error", JOptionPane.ERROR_MESSAGE);
+                    }
+                });
+            }, "ConnectionWaiter");
+            connectThread.setDaemon(true);
+            connectThread.start();
         } else {
             JOptionPane.showMessageDialog(this, "Failed to open " + selectedPort, 
                     "Connection Error", JOptionPane.ERROR_MESSAGE);
