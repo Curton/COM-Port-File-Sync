@@ -5,24 +5,27 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * Implements XMODEM-CRC protocol for reliable file transfer over serial port.
- * Uses 128-byte blocks with CRC-16 checksum.
+ * Implements XMODEM-1K protocol for reliable file transfer over serial port.
+ * Uses 1024-byte blocks (STX) with CRC-16 checksum, falls back to 128-byte (SOH) for small data.
  */
 public class XModemTransfer {
 
     // XMODEM control characters
     public static final byte SOH = 0x01;  // Start of Header (128 byte block)
+    public static final byte STX = 0x02;  // Start of Header (1024 byte block) - XMODEM-1K
     public static final byte EOT = 0x04;  // End of Transmission
     public static final byte ACK = 0x06;  // Acknowledge
     public static final byte NAK = 0x15;  // Negative Acknowledge
     public static final byte CAN = 0x18;  // Cancel
     public static final byte C = 0x43;    // 'C' for CRC mode
 
-    private static final int BLOCK_SIZE = 128;
+    private static final int BLOCK_SIZE_1K = 1024;  // XMODEM-1K block size
+    private static final int BLOCK_SIZE_128 = 128;  // Standard XMODEM block size
     private static final int MAX_RETRIES = 10;
     private static final int TIMEOUT_MS = 10000;
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
     private static final byte PADDING = 0x1A;  // CTRL-Z for padding
+    private static final int POLL_INTERVAL_MS = 1;  // Reduced from 10ms for better throughput
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
@@ -38,7 +41,7 @@ public class XModemTransfer {
     }
 
     /**
-     * Send data using XMODEM-CRC protocol
+     * Send data using XMODEM-1K protocol (1024-byte blocks)
      */
     public boolean send(byte[] data) throws IOException {
         // Wait for receiver to send 'C' to initiate CRC mode
@@ -51,32 +54,47 @@ public class XModemTransfer {
         transferStartTime = System.currentTimeMillis();
         totalBytesTransferred = 0;
 
-        ByteArrayInputStream inputStream = new ByteArrayInputStream(data);
-        byte[] block = new byte[BLOCK_SIZE];
+        int dataOffset = 0;
         int blockNumber = 1;
-        int totalBlocks = (data.length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        int totalBlocks = (data.length + BLOCK_SIZE_1K - 1) / BLOCK_SIZE_1K;
 
-        while (true) {
-            int bytesRead = inputStream.read(block);
-            if (bytesRead <= 0) {
-                break;
+        while (dataOffset < data.length) {
+            int remaining = data.length - dataOffset;
+            
+            // Choose block size: use 1K blocks when possible, 128-byte for small remaining data
+            int blockSize;
+            byte headerByte;
+            if (remaining >= BLOCK_SIZE_1K) {
+                blockSize = BLOCK_SIZE_1K;
+                headerByte = STX;
+            } else if (remaining > BLOCK_SIZE_128) {
+                // Still use 1K block but with padding
+                blockSize = BLOCK_SIZE_1K;
+                headerByte = STX;
+            } else {
+                // Use 128-byte block for small remaining data
+                blockSize = BLOCK_SIZE_128;
+                headerByte = SOH;
             }
 
-            // Pad the last block if necessary
-            if (bytesRead < BLOCK_SIZE) {
-                for (int i = bytesRead; i < BLOCK_SIZE; i++) {
-                    block[i] = PADDING;
-                }
+            byte[] block = new byte[blockSize];
+            int bytesToCopy = Math.min(remaining, blockSize);
+            System.arraycopy(data, dataOffset, block, 0, bytesToCopy);
+            
+            // Pad the block if necessary
+            for (int i = bytesToCopy; i < blockSize; i++) {
+                block[i] = PADDING;
             }
 
             // Send block with retries
-            if (!sendBlock(block, blockNumber)) {
+            if (!sendBlock(block, blockNumber, headerByte)) {
                 reportError("Failed to send block " + blockNumber + " after " + MAX_RETRIES + " retries");
                 sendCancel();
                 return false;
             }
 
-            totalBytesTransferred += BLOCK_SIZE;
+            dataOffset += bytesToCopy;
+            totalBytesTransferred += bytesToCopy;
             reportProgress(blockNumber, totalBlocks, totalBytesTransferred);
             blockNumber++;
         }
@@ -91,7 +109,7 @@ public class XModemTransfer {
     }
 
     /**
-     * Receive data using XMODEM-CRC protocol
+     * Receive data using XMODEM-1K protocol (supports both 1024-byte and 128-byte blocks)
      */
     public byte[] receive() throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -123,7 +141,13 @@ public class XModemTransfer {
                 return null;
             }
 
-            if (header != SOH) {
+            // Determine block size based on header
+            int blockSize;
+            if (header == STX) {
+                blockSize = BLOCK_SIZE_1K;
+            } else if (header == SOH) {
+                blockSize = BLOCK_SIZE_128;
+            } else {
                 retryCount++;
                 if (retryCount > MAX_RETRIES) {
                     reportError("Too many errors, aborting transfer");
@@ -145,7 +169,7 @@ public class XModemTransfer {
             }
 
             // Read data block
-            byte[] block = serialPort.readExact(BLOCK_SIZE, TIMEOUT_MS);
+            byte[] block = serialPort.readExact(blockSize, TIMEOUT_MS);
 
             // Read CRC (2 bytes, high byte first)
             int crcHigh = readByteWithTimeout(TIMEOUT_MS);
@@ -171,7 +195,7 @@ public class XModemTransfer {
                 expectedBlockNumber++;
                 retryCount = 0;
                 serialPort.write(ACK);
-                totalBytesTransferred += BLOCK_SIZE;
+                totalBytesTransferred += blockSize;
                 reportProgress(expectedBlockNumber - 1, -1, totalBytesTransferred);  // -1 means unknown total
             } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
                 // Duplicate block, ACK but don't save
@@ -211,31 +235,35 @@ public class XModemTransfer {
         // Send 'C' to request CRC mode
         for (int i = 0; i < MAX_RETRIES; i++) {
             serialPort.write(C);
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-
-            // Check if sender responded
-            if (serialPort.available() > 0) {
-                return true;
+            
+            // Wait up to 1 second for response, checking frequently
+            long waitStart = System.currentTimeMillis();
+            while (System.currentTimeMillis() - waitStart < 1000) {
+                if (serialPort.available() > 0) {
+                    return true;
+                }
+                try {
+                    Thread.sleep(POLL_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
             }
         }
         return false;
     }
 
-    private boolean sendBlock(byte[] block, int blockNumber) throws IOException {
-        byte[] packet = new byte[3 + BLOCK_SIZE + 2];  // SOH + blockNum + complement + data + CRC
-        packet[0] = SOH;
+    private boolean sendBlock(byte[] block, int blockNumber, byte headerByte) throws IOException {
+        int blockSize = block.length;
+        byte[] packet = new byte[3 + blockSize + 2];  // Header + blockNum + complement + data + CRC
+        packet[0] = headerByte;
         packet[1] = (byte) (blockNumber & 0xFF);
         packet[2] = (byte) (255 - (blockNumber & 0xFF));
-        System.arraycopy(block, 0, packet, 3, BLOCK_SIZE);
+        System.arraycopy(block, 0, packet, 3, blockSize);
 
         int crc = calculateCRC16(block);
-        packet[3 + BLOCK_SIZE] = (byte) ((crc >> 8) & 0xFF);
-        packet[3 + BLOCK_SIZE + 1] = (byte) (crc & 0xFF);
+        packet[3 + blockSize] = (byte) ((crc >> 8) & 0xFF);
+        packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
             serialPort.write(packet);
@@ -276,7 +304,7 @@ public class XModemTransfer {
                 return serialPort.read() & 0xFF;
             }
             try {
-                Thread.sleep(10);
+                Thread.sleep(POLL_INTERVAL_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Read interrupted");

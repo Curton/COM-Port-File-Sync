@@ -21,6 +21,7 @@ public class SerialPortManager {
     private static final int DEFAULT_STOP_BITS = SerialPort.ONE_STOP_BIT;
     private static final int DEFAULT_PARITY = SerialPort.NO_PARITY;
     private static final int DEFAULT_TIMEOUT_MS = 5000;
+    private static final int POLL_INTERVAL_MS = 1;  // Reduced from 10ms for better throughput
 
     private SerialPort serialPort;
     private InputStream inputStream;
@@ -189,7 +190,7 @@ public class SerialPortManager {
                 }
             } else {
                 try {
-                    Thread.sleep(10);
+                    Thread.sleep(POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IOException("Read interrupted");
@@ -221,7 +222,7 @@ public class SerialPortManager {
             int b = inputStream.read();
             if (b == -1) {
                 try {
-                    Thread.sleep(10);
+                    Thread.sleep(POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IOException("Read interrupted");
