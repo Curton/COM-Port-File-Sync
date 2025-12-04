@@ -24,13 +24,22 @@ public class SerialPortManager {
     private InputStream inputStream;
     private OutputStream outputStream;
     private int baudRate;
+    private int dataBits;
+    private int stopBits;
+    private int parity;
 
     public SerialPortManager() {
         this.baudRate = DEFAULT_BAUD_RATE;
+        this.dataBits = DEFAULT_DATA_BITS;
+        this.stopBits = DEFAULT_STOP_BITS;
+        this.parity = DEFAULT_PARITY;
     }
 
-    public SerialPortManager(int baudRate) {
+    public SerialPortManager(int baudRate, int dataBits, int stopBits, int parity) {
         this.baudRate = baudRate;
+        this.dataBits = dataBits;
+        this.stopBits = stopBits;
+        this.parity = parity;
     }
 
     /**
@@ -64,9 +73,9 @@ public class SerialPortManager {
         try {
             serialPort = SerialPort.getCommPort(portName);
             serialPort.setBaudRate(baudRate);
-            serialPort.setNumDataBits(DEFAULT_DATA_BITS);
-            serialPort.setNumStopBits(DEFAULT_STOP_BITS);
-            serialPort.setParity(DEFAULT_PARITY);
+            serialPort.setNumDataBits(dataBits);
+            serialPort.setNumStopBits(stopBits);
+            serialPort.setParity(parity);
             serialPort.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
 
             if (serialPort.openPort()) {
@@ -273,6 +282,39 @@ public class SerialPortManager {
         this.baudRate = baudRate;
         if (serialPort != null) {
             serialPort.setBaudRate(baudRate);
+        }
+    }
+
+    public int getDataBits() {
+        return dataBits;
+    }
+
+    public void setDataBits(int dataBits) {
+        this.dataBits = dataBits;
+        if (serialPort != null) {
+            serialPort.setNumDataBits(dataBits);
+        }
+    }
+
+    public int getStopBits() {
+        return stopBits;
+    }
+
+    public void setStopBits(int stopBits) {
+        this.stopBits = stopBits;
+        if (serialPort != null) {
+            serialPort.setNumStopBits(stopBits);
+        }
+    }
+
+    public int getParity() {
+        return parity;
+    }
+
+    public void setParity(int parity) {
+        this.parity = parity;
+        if (serialPort != null) {
+            serialPort.setParity(parity);
         }
     }
 

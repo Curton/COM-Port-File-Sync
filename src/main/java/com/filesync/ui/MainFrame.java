@@ -1,5 +1,6 @@
 package com.filesync.ui;
 
+import com.filesync.config.SettingsManager;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
 
@@ -20,12 +21,13 @@ import java.util.List;
  */
 public class MainFrame extends JFrame implements FileSyncManager.SyncEventListener {
 
-    private static final int WINDOW_WIDTH = 600;
-    private static final int WINDOW_HEIGHT = 500;
+    private static final int WINDOW_WIDTH = 700;
+    private static final int WINDOW_HEIGHT = 520;
 
     // UI Components
     private JComboBox<String> portComboBox;
     private JButton refreshPortsButton;
+    private JButton settingsButton;
     private JButton connectButton;
     private JTextField folderTextField;
     private JButton browseFolderButton;
@@ -34,26 +36,61 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     private JProgressBar progressBar;
     private JTextArea logTextArea;
     private JLabel statusLabel;
+    private JLabel settingsLabel;
 
     // Application state
     private SerialPortManager serialPort;
     private FileSyncManager syncManager;
+    private SettingsManager settings;
     private boolean isSender = true;
     private boolean isConnected = false;
 
     public MainFrame() {
+        initSettings();
         initComponents();
         initSerialPort();
         layoutComponents();
         setupEventHandlers();
         refreshPorts();
+        loadSavedState();
+    }
+
+    private void initSettings() {
+        settings = new SettingsManager();
+    }
+
+    private void loadSavedState() {
+        // Restore last selected port
+        String lastPort = settings.getLastPort();
+        if (lastPort != null && !lastPort.isEmpty()) {
+            for (int i = 0; i < portComboBox.getItemCount(); i++) {
+                if (lastPort.equals(portComboBox.getItemAt(i))) {
+                    portComboBox.setSelectedIndex(i);
+                    break;
+                }
+            }
+        }
+
+        // Restore last folder
+        String lastFolder = settings.getLastFolder();
+        if (lastFolder != null && !lastFolder.isEmpty()) {
+            File folder = new File(lastFolder);
+            if (folder.exists() && folder.isDirectory()) {
+                folderTextField.setText(lastFolder);
+                syncManager.setSyncFolder(folder);
+                updateSyncButtonState();
+            }
+        }
+
+        // Update settings label
+        updateSettingsLabel();
     }
 
     private void initComponents() {
         setTitle("COM Port File Sync");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
-        setMinimumSize(new Dimension(500, 400));
+        setMinimumSize(new Dimension(650, 450));
         setLocationRelativeTo(null);
 
         // COM Port components
@@ -61,7 +98,13 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         portComboBox.setPreferredSize(new Dimension(200, 25));
 
         refreshPortsButton = new JButton("Refresh");
+        settingsButton = new JButton("Settings...");
         connectButton = new JButton("Connect");
+
+        // Settings display label
+        settingsLabel = new JLabel();
+        settingsLabel.setFont(settingsLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        settingsLabel.setForeground(Color.GRAY);
 
         // Folder selection components
         folderTextField = new JTextField();
@@ -91,7 +134,12 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     }
 
     private void initSerialPort() {
-        serialPort = new SerialPortManager();
+        serialPort = new SerialPortManager(
+                settings.getBaudRate(),
+                settings.getDataBits(),
+                settings.getStopBits(),
+                settings.getParity()
+        );
         syncManager = new FileSyncManager(serialPort);
         syncManager.setEventListener(this);
     }
@@ -121,10 +169,24 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         connectionPanel.add(refreshPortsButton, gbc);
 
         gbc.gridx = 3;
-        connectionPanel.add(connectButton, gbc);
+        connectionPanel.add(settingsButton, gbc);
 
         gbc.gridx = 4;
+        connectionPanel.add(connectButton, gbc);
+
+        gbc.gridx = 5;
         connectionPanel.add(statusLabel, gbc);
+
+        // Settings display row
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        connectionPanel.add(new JLabel("Config:"), gbc);
+
+        gbc.gridx = 1;
+        gbc.gridwidth = 5;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        connectionPanel.add(settingsLabel, gbc);
+        gbc.gridwidth = 1;
 
         // Folder panel
         JPanel folderPanel = new JPanel(new GridBagLayout());
@@ -188,6 +250,9 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         // Refresh ports button
         refreshPortsButton.addActionListener(e -> refreshPorts());
 
+        // Settings button
+        settingsButton.addActionListener(e -> showSettingsDialog());
+
         // Connect button
         connectButton.addActionListener(e -> toggleConnection());
 
@@ -250,7 +315,13 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             statusLabel.setForeground(Color.ORANGE);
             portComboBox.setEnabled(false);
             refreshPortsButton.setEnabled(false);
+            settingsButton.setEnabled(false);
             syncButton.setEnabled(false);
+
+            // Save the selected port
+            settings.setLastPort(selectedPort);
+            settings.save();
+
             log("Connecting to " + selectedPort + "...");
 
             // Start listening and wait for connection in background thread
@@ -277,6 +348,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
                         statusLabel.setForeground(Color.RED);
                         portComboBox.setEnabled(true);
                         refreshPortsButton.setEnabled(true);
+                        settingsButton.setEnabled(true);
                         updateSyncButtonState();
                         log("Connection timeout - other side not responding");
                         JOptionPane.showMessageDialog(MainFrame.this, 
@@ -303,6 +375,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         statusLabel.setForeground(Color.RED);
         portComboBox.setEnabled(true);
         refreshPortsButton.setEnabled(true);
+        settingsButton.setEnabled(true);
         updateSyncButtonState();
         log("Disconnected");
     }
@@ -312,13 +385,147 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         fileChooser.setDialogTitle("Select Sync Folder");
 
+        // Start from last folder if available
+        String lastFolder = settings.getLastFolder();
+        if (lastFolder != null && !lastFolder.isEmpty()) {
+            File lastDir = new File(lastFolder);
+            if (lastDir.exists()) {
+                fileChooser.setCurrentDirectory(lastDir);
+            }
+        }
+
         if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             File selectedFolder = fileChooser.getSelectedFile();
             folderTextField.setText(selectedFolder.getAbsolutePath());
             syncManager.setSyncFolder(selectedFolder);
             updateSyncButtonState();
+
+            // Save the selected folder
+            settings.setLastFolder(selectedFolder.getAbsolutePath());
+            settings.save();
+
             log("Selected folder: " + selectedFolder.getAbsolutePath());
         }
+    }
+
+    private void showSettingsDialog() {
+        JDialog dialog = new JDialog(this, "COM Port Settings", true);
+        dialog.setLayout(new BorderLayout(10, 10));
+        dialog.setSize(350, 250);
+        dialog.setLocationRelativeTo(this);
+
+        JPanel formPanel = new JPanel(new GridBagLayout());
+        formPanel.setBorder(new EmptyBorder(15, 15, 15, 15));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.anchor = GridBagConstraints.WEST;
+
+        // Baud Rate
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        formPanel.add(new JLabel("Baud Rate:"), gbc);
+
+        JComboBox<Integer> baudRateCombo = new JComboBox<>();
+        for (int rate : SettingsManager.BAUD_RATES) {
+            baudRateCombo.addItem(rate);
+        }
+        baudRateCombo.setSelectedItem(settings.getBaudRate());
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        formPanel.add(baudRateCombo, gbc);
+
+        // Data Bits
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        formPanel.add(new JLabel("Data Bits:"), gbc);
+
+        JComboBox<Integer> dataBitsCombo = new JComboBox<>();
+        for (int bits : SettingsManager.DATA_BITS_OPTIONS) {
+            dataBitsCombo.addItem(bits);
+        }
+        dataBitsCombo.setSelectedItem(settings.getDataBits());
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        formPanel.add(dataBitsCombo, gbc);
+
+        // Stop Bits
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        formPanel.add(new JLabel("Stop Bits:"), gbc);
+
+        JComboBox<String> stopBitsCombo = new JComboBox<>(SettingsManager.STOP_BITS_NAMES);
+        stopBitsCombo.setSelectedIndex(SettingsManager.getStopBitsIndex(settings.getStopBits()));
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        formPanel.add(stopBitsCombo, gbc);
+
+        // Parity
+        gbc.gridx = 0;
+        gbc.gridy = 3;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        formPanel.add(new JLabel("Parity:"), gbc);
+
+        JComboBox<String> parityCombo = new JComboBox<>(SettingsManager.PARITY_NAMES);
+        parityCombo.setSelectedIndex(SettingsManager.getParityIndex(settings.getParity()));
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        formPanel.add(parityCombo, gbc);
+
+        // Buttons
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton okButton = new JButton("OK");
+        JButton cancelButton = new JButton("Cancel");
+
+        okButton.addActionListener(e -> {
+            // Save settings
+            settings.setBaudRate((Integer) baudRateCombo.getSelectedItem());
+            settings.setDataBits((Integer) dataBitsCombo.getSelectedItem());
+            settings.setStopBits(SettingsManager.STOP_BITS_VALUES[stopBitsCombo.getSelectedIndex()]);
+            settings.setParity(SettingsManager.PARITY_VALUES[parityCombo.getSelectedIndex()]);
+            settings.save();
+
+            // Update serial port settings
+            serialPort.setBaudRate(settings.getBaudRate());
+            serialPort.setDataBits(settings.getDataBits());
+            serialPort.setStopBits(settings.getStopBits());
+            serialPort.setParity(settings.getParity());
+
+            updateSettingsLabel();
+            log("Settings updated: " + getSettingsString());
+            dialog.dispose();
+        });
+
+        cancelButton.addActionListener(e -> dialog.dispose());
+
+        buttonPanel.add(okButton);
+        buttonPanel.add(cancelButton);
+
+        dialog.add(formPanel, BorderLayout.CENTER);
+        dialog.add(buttonPanel, BorderLayout.SOUTH);
+        dialog.setVisible(true);
+    }
+
+    private void updateSettingsLabel() {
+        settingsLabel.setText(getSettingsString());
+    }
+
+    private String getSettingsString() {
+        int stopBitsIdx = SettingsManager.getStopBitsIndex(settings.getStopBits());
+        int parityIdx = SettingsManager.getParityIndex(settings.getParity());
+        return String.format("%d baud, %d data bits, %s stop bits, %s parity",
+                settings.getBaudRate(),
+                settings.getDataBits(),
+                SettingsManager.STOP_BITS_NAMES[stopBitsIdx],
+                SettingsManager.PARITY_NAMES[parityIdx]);
     }
 
     private void toggleDirection() {
