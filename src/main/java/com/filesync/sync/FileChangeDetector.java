@@ -86,6 +86,23 @@ public class FileChangeDetector {
     }
 
     /**
+     * Compare two manifests and return files that need to be deleted from target
+     * Returns files that exist in target but not in source (for strict sync mode)
+     */
+    public static List<String> getFilesToDelete(FileManifest source, FileManifest target) {
+        List<String> filesToDelete = new ArrayList<>();
+
+        for (String path : target.getFiles().keySet()) {
+            if (!source.getFiles().containsKey(path)) {
+                // File exists in target but not in source - should be deleted
+                filesToDelete.add(path);
+            }
+        }
+
+        return filesToDelete;
+    }
+
+    /**
      * Calculate MD5 hash of a file
      */
     public static String calculateMD5(File file) throws IOException {

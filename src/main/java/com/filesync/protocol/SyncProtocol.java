@@ -31,6 +31,7 @@ public class SyncProtocol {
     public static final String CMD_HEARTBEAT = "HEARTBEAT";
     public static final String CMD_HEARTBEAT_ACK = "HEARTBEAT_ACK";
     public static final String CMD_ROLE_NEGOTIATE = "ROLE_NEGOTIATE";
+    public static final String CMD_FILE_DELETE = "FILE_DELETE";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -278,6 +279,13 @@ public class SyncProtocol {
      */
     public void sendRoleNegotiate(long priority) throws IOException {
         sendCommand(CMD_ROLE_NEGOTIATE, String.valueOf(priority));
+    }
+
+    /**
+     * Send file delete command to delete a file on remote
+     */
+    public void sendFileDelete(String relativePath) throws IOException {
+        sendCommand(CMD_FILE_DELETE, relativePath);
     }
 
     /**

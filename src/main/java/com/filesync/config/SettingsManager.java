@@ -16,6 +16,7 @@ public class SettingsManager {
     private static final String PREF_PARITY = "parity";
     private static final String PREF_LAST_PORT = "lastPort";
     private static final String PREF_LAST_FOLDER = "lastFolder";
+    private static final String PREF_STRICT_SYNC = "strictSync";
 
     // Default values
     public static final int DEFAULT_BAUD_RATE = 115200;
@@ -58,6 +59,7 @@ public class SettingsManager {
     private int parity;
     private String lastPort;
     private String lastFolder;
+    private boolean strictSync;
 
     public SettingsManager() {
         prefs = Preferences.userNodeForPackage(SettingsManager.class);
@@ -74,6 +76,7 @@ public class SettingsManager {
         parity = prefs.getInt(PREF_PARITY, DEFAULT_PARITY);
         lastPort = prefs.get(PREF_LAST_PORT, "");
         lastFolder = prefs.get(PREF_LAST_FOLDER, "");
+        strictSync = prefs.getBoolean(PREF_STRICT_SYNC, false);
     }
 
     /**
@@ -86,6 +89,7 @@ public class SettingsManager {
         prefs.putInt(PREF_PARITY, parity);
         prefs.put(PREF_LAST_PORT, lastPort != null ? lastPort : "");
         prefs.put(PREF_LAST_FOLDER, lastFolder != null ? lastFolder : "");
+        prefs.putBoolean(PREF_STRICT_SYNC, strictSync);
     }
 
     // Getters and Setters
@@ -136,6 +140,14 @@ public class SettingsManager {
 
     public void setLastFolder(String lastFolder) {
         this.lastFolder = lastFolder;
+    }
+
+    public boolean isStrictSync() {
+        return strictSync;
+    }
+
+    public void setStrictSync(boolean strictSync) {
+        this.strictSync = strictSync;
     }
 
     /**

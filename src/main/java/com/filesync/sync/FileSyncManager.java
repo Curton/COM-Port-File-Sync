@@ -38,6 +38,7 @@ public class FileSyncManager {
     private final AtomicLong localPriority;
     private final AtomicBoolean roleNegotiated;
     private static final Random RANDOM = new Random();
+    private boolean strictSyncMode = false;
 
     public FileSyncManager(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -85,6 +86,14 @@ public class FileSyncManager {
 
     public boolean isSender() {
         return isSender;
+    }
+
+    public void setStrictSyncMode(boolean strictSyncMode) {
+        this.strictSyncMode = strictSyncMode;
+    }
+
+    public boolean isStrictSyncMode() {
+        return strictSyncMode;
     }
 
     public boolean isRunning() {
@@ -251,7 +260,9 @@ public class FileSyncManager {
 
                 // Check if connection is lost (no heartbeat received for too long)
                 // Only check after we've established connection at least once
+                // Skip timeout check during sync - heartbeat exchange is paused during file transfers
                 if (connectionAlive.get() && lastHeartbeatReceived > 0 
+                        && !syncing.get()
                         && (now - lastHeartbeatReceived) > HEARTBEAT_TIMEOUT_MS) {
                     connectionAlive.set(false);
                     if (eventListener != null) {
@@ -331,6 +342,59 @@ public class FileSyncManager {
             case SyncProtocol.CMD_ROLE_NEGOTIATE:
                 handleRoleNegotiate(msg.getParamAsLong(0));
                 break;
+
+            case SyncProtocol.CMD_FILE_DELETE:
+                handleFileDelete(msg.getParam(0));
+                break;
+        }
+    }
+
+    /**
+     * Handle file delete command from remote (strict sync mode)
+     */
+    private void handleFileDelete(String relativePath) throws IOException {
+        if (syncFolder == null) {
+            return;
+        }
+
+        File fileToDelete = new File(syncFolder, relativePath);
+        if (fileToDelete.exists() && fileToDelete.isFile()) {
+            if (eventListener != null) {
+                eventListener.onLog("Deleting file: " + relativePath);
+            }
+            if (fileToDelete.delete()) {
+                if (eventListener != null) {
+                    eventListener.onLog("File deleted: " + relativePath);
+                }
+                // Clean up empty parent directories
+                cleanupEmptyDirectories(fileToDelete.getParentFile());
+            } else {
+                if (eventListener != null) {
+                    eventListener.onError("Failed to delete file: " + relativePath);
+                }
+            }
+        }
+    }
+
+    /**
+     * Clean up empty parent directories after file deletion
+     */
+    private void cleanupEmptyDirectories(File directory) {
+        if (directory == null || !directory.exists() || !directory.isDirectory()) {
+            return;
+        }
+        // Don't delete the sync folder itself
+        if (directory.equals(syncFolder)) {
+            return;
+        }
+        // Only delete if empty
+        String[] contents = directory.list();
+        if (contents != null && contents.length == 0) {
+            File parent = directory.getParentFile();
+            if (directory.delete()) {
+                // Recursively clean up parent directories
+                cleanupEmptyDirectories(parent);
+            }
         }
     }
 
@@ -457,6 +521,9 @@ public class FileSyncManager {
             return;
         }
 
+        // Mark as syncing to prevent heartbeat timeout during file receive
+        syncing.set(true);
+
         String relativePath = msg.getParam(0);
         int size = msg.getParamAsInt(1);
         boolean compressed = msg.getParamAsBoolean(2);
@@ -488,6 +555,8 @@ public class FileSyncManager {
      */
     private void handleSyncComplete() {
         syncing.set(false);
+        // Reset heartbeat timer to prevent false timeout detection after sync
+        lastHeartbeatReceived = System.currentTimeMillis();
         if (eventListener != null) {
             eventListener.onSyncComplete();
         }
@@ -557,9 +626,16 @@ public class FileSyncManager {
             List<FileChangeDetector.FileInfo> filesToSync = 
                     FileChangeDetector.getChangedFiles(localManifest, remoteManifest);
 
-            if (filesToSync.isEmpty()) {
+            // Get files to delete if strict sync mode is enabled
+            List<String> filesToDelete = strictSyncMode ? 
+                    FileChangeDetector.getFilesToDelete(localManifest, remoteManifest) : 
+                    new java.util.ArrayList<>();
+
+            int totalOperations = filesToSync.size() + filesToDelete.size();
+            
+            if (totalOperations == 0) {
                 if (eventListener != null) {
-                    eventListener.onLog("No files need to be synced");
+                    eventListener.onLog("No files need to be synced or deleted");
                     eventListener.onSyncComplete();
                 }
                 syncing.set(false);
@@ -567,19 +643,30 @@ public class FileSyncManager {
             }
 
             if (eventListener != null) {
-                eventListener.onLog("Files to sync: " + filesToSync.size());
+                eventListener.onLog("Files to sync: " + filesToSync.size() + 
+                        (strictSyncMode ? ", Files to delete: " + filesToDelete.size() : ""));
             }
 
             // Send each changed file
-            int fileIndex = 0;
+            int operationIndex = 0;
             for (FileChangeDetector.FileInfo fileInfo : filesToSync) {
-                fileIndex++;
+                operationIndex++;
                 if (eventListener != null) {
-                    eventListener.onLog("Syncing [" + fileIndex + "/" + filesToSync.size() + "]: " + fileInfo.getPath());
-                    eventListener.onFileProgress(fileIndex, filesToSync.size(), fileInfo.getPath());
+                    eventListener.onLog("Syncing [" + operationIndex + "/" + totalOperations + "]: " + fileInfo.getPath());
+                    eventListener.onFileProgress(operationIndex, totalOperations, fileInfo.getPath());
                 }
 
                 protocol.sendFile(syncFolder, fileInfo.getPath());
+            }
+
+            // Send delete commands for files that should be removed (strict sync mode)
+            for (String pathToDelete : filesToDelete) {
+                operationIndex++;
+                if (eventListener != null) {
+                    eventListener.onLog("Deleting [" + operationIndex + "/" + totalOperations + "]: " + pathToDelete);
+                    eventListener.onFileProgress(operationIndex, totalOperations, "[DEL] " + pathToDelete);
+                }
+                protocol.sendFileDelete(pathToDelete);
             }
 
             // Send sync complete
@@ -596,6 +683,8 @@ public class FileSyncManager {
             }
         } finally {
             syncing.set(false);
+            // Reset heartbeat timer to prevent false timeout detection after sync
+            lastHeartbeatReceived = System.currentTimeMillis();
         }
     }
 

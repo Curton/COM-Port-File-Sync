@@ -11,13 +11,17 @@ import java.awt.Insets;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.Properties;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JDialog;
 import javax.swing.JFileChooser;
@@ -55,6 +59,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     private JButton browseFolderButton;
     private JButton directionButton;
     private JButton syncButton;
+    private JCheckBox strictSyncCheckBox;
     private JProgressBar progressBar;
     private JTextArea logTextArea;
     private JLabel statusLabel;
@@ -75,6 +80,28 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         setupEventHandlers();
         refreshPorts();
         loadSavedState();
+    }
+
+    /**
+     * Reads the application version from version.properties file
+     * @return version string or "1.0.0" as fallback
+     */
+    private String getApplicationVersion() {
+        try (InputStream is = getClass().getClassLoader().getResourceAsStream("version.properties")) {
+            if (is != null) {
+                Properties props = new Properties();
+                props.load(is);
+                String version = props.getProperty("application.version");
+                if (version != null && !version.trim().isEmpty()) {
+                    return version.trim();
+                }
+            }
+        } catch (IOException e) {
+            // Fall through to fallback
+        }
+
+        // Default fallback version
+        return "1.0.0";
     }
 
     private void initSettings() {
@@ -104,12 +131,18 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             }
         }
 
+        // Restore strict sync mode setting
+        boolean strictSync = settings.isStrictSync();
+        strictSyncCheckBox.setSelected(strictSync);
+        syncManager.setStrictSyncMode(strictSync);
+
         // Update settings label
         updateSettingsLabel();
     }
 
     private void initComponents() {
-        setTitle("COM Port File Sync");
+        String version = getApplicationVersion();
+        setTitle("COM Port File Sync v" + version);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
         setMinimumSize(new Dimension(650, 450));
@@ -140,6 +173,10 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         // Sync button
         syncButton = new JButton("Start Sync");
         syncButton.setEnabled(false);
+
+        // Strict sync checkbox
+        strictSyncCheckBox = new JCheckBox("Strict Sync (delete remote files not in local)");
+        strictSyncCheckBox.setToolTipText("When enabled, files that exist on the remote but not locally will be deleted");
 
         // Progress bar
         progressBar = new JProgressBar(0, 100);
@@ -234,6 +271,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 10));
         controlPanel.setBorder(new TitledBorder("Sync Control"));
         controlPanel.add(directionButton);
+        controlPanel.add(strictSyncCheckBox);
         controlPanel.add(syncButton);
 
         // Top section combining connection, folder, and control
@@ -286,6 +324,15 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
 
         // Sync button
         syncButton.addActionListener(e -> startSync());
+
+        // Strict sync checkbox
+        strictSyncCheckBox.addActionListener(e -> {
+            boolean strictMode = strictSyncCheckBox.isSelected();
+            syncManager.setStrictSyncMode(strictMode);
+            settings.setStrictSync(strictMode);
+            settings.save();
+            log("Strict sync mode: " + (strictMode ? "enabled" : "disabled"));
+        });
 
         // Window close handler
         addWindowListener(new WindowAdapter() {
@@ -555,6 +602,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         updateDirectionButton();
         syncManager.setIsSender(isSender);
         syncManager.notifyDirectionChange();
+        updateSyncButtonState();
         log("Direction changed: " + (isSender ? "Sender (A -> B)" : "Receiver (B <- A)"));
     }
 
