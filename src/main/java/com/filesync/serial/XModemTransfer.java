@@ -172,19 +172,19 @@ public class XModemTransfer {
 
             // Determine block size based on header
             int blockSize;
-            if (header == STX) {
-                blockSize = BLOCK_SIZE_1K;
-            } else if (header == SOH) {
-                blockSize = BLOCK_SIZE_128;
-            } else {
-                retryCount++;
-                if (retryCount > MAX_RETRIES) {
-                    reportError("Too many errors, aborting transfer");
-                    sendCancel();
-                    return null;
+            switch (header) {
+                case STX -> blockSize = BLOCK_SIZE_1K;
+                case SOH -> blockSize = BLOCK_SIZE_128;
+                default -> {
+                    retryCount++;
+                    if (retryCount > MAX_RETRIES) {
+                        reportError("Too many errors, aborting transfer");
+                        sendCancel();
+                        return null;
+                    }
+                    serialPort.write(NAK);
+                    continue;
                 }
-                serialPort.write(NAK);
-                continue;
             }
 
             // Read block number and its complement
@@ -252,7 +252,6 @@ public class XModemTransfer {
             if (b == NAK) {
                 // Checksum mode requested, but we only support CRC
                 // Keep waiting for 'C'
-                continue;
             }
         }
         return false;
