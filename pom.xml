@@ -6,7 +6,7 @@
 
     <groupId>com.filesync</groupId>
     <artifactId>com-file-sync</artifactId>
-    <version>1.1.8</version>
+    <version>1.1.30</version>
     <packaging>jar</packaging>
 
     <name>COM Port File Sync</name>
@@ -27,6 +27,12 @@
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>2.13.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -49,14 +55,10 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <version>3.3.0</version>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
                 <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>com.filesync.Main</mainClass>
-                        </manifest>
-                    </archive>
+                    <useModulePath>false</useModulePath>
                 </configuration>
             </plugin>
             <plugin>
@@ -70,6 +72,11 @@
                             <goal>shade</goal>
                         </goals>
                         <configuration>
+                            <outputFile>${project.build.directory}/${project.build.finalName}.jar</outputFile>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createSourcesJar>false</createSourcesJar>
+                            <createTestSourcesJar>false</createTestSourcesJar>
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
@@ -92,4 +99,3 @@
         </plugins>
     </build>
 </project>
-

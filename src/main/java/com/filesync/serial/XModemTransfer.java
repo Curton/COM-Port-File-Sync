@@ -1,23 +1,24 @@
 package com.filesync.serial;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * Implements XMODEM-1K protocol for reliable file transfer over serial port.
- * Uses 1024-byte blocks (STX) with CRC-16 checksum, falls back to 128-byte (SOH) for small data.
+ * Implements XMODEM protocol variant for reliable file transfer over serial port.
+ * Uses 2048-byte blocks (STX) with CRC-16 checksum, falls back to 128-byte (SOH) for small data.
  */
 public class XModemTransfer {
 
     // XMODEM control characters
     public static final byte SOH = 0x01;  // Start of Header (128 byte block)
-    public static final byte STX = 0x02;  // Start of Header (1024 byte block) - XMODEM-1K
+    public static final byte STX = 0x02;  // Start of Header (2048 byte block)
     public static final byte EOT = 0x04;  // End of Transmission
     public static final byte ACK = 0x06;  // Acknowledge
     public static final byte NAK = 0x15;  // Negative Acknowledge
     public static final byte CAN = 0x18;  // Cancel
     public static final byte C = 0x43;    // 'C' for CRC mode
 
-    private static final int BLOCK_SIZE_1K = 1024;  // XMODEM-1K block size
+    private static final int LARGE_BLOCK_SIZE = 2048;  // Large block size (2K)
     private static final int BLOCK_SIZE_128 = 128;  // Standard XMODEM block size
     private static final int MAX_RETRIES = 10;
     private static final int TIMEOUT_MS = 10000;
@@ -45,7 +46,7 @@ public class XModemTransfer {
     }
 
     /**
-     * Send data using XMODEM-1K protocol (1024-byte blocks)
+     * Send data using large-block XMODEM protocol (2048-byte blocks)
      */
     public boolean send(byte[] data) throws IOException {
         // Wait for receiver to send 'C' to initiate CRC mode
@@ -64,20 +65,20 @@ public class XModemTransfer {
 
         int dataOffset = 0;
         int blockNumber = 1;
-        int totalBlocks = (data.length + BLOCK_SIZE_1K - 1) / BLOCK_SIZE_1K;
+        int totalBlocks = (data.length + LARGE_BLOCK_SIZE - 1) / LARGE_BLOCK_SIZE;
 
         while (dataOffset < data.length) {
             int remaining = data.length - dataOffset;
             
-            // Choose block size: use 1K blocks when possible, 128-byte for small remaining data
+            // Choose block size: use 2K blocks when possible, 128-byte for small remaining data
             int blockSize;
             byte headerByte;
-            if (remaining >= BLOCK_SIZE_1K) {
-                blockSize = BLOCK_SIZE_1K;
+            if (remaining >= LARGE_BLOCK_SIZE) {
+                blockSize = LARGE_BLOCK_SIZE;
                 headerByte = STX;
             } else if (remaining > BLOCK_SIZE_128) {
-                // Still use 1K block but with padding
-                blockSize = BLOCK_SIZE_1K;
+                // Still use 2K block but with padding
+                blockSize = LARGE_BLOCK_SIZE;
                 headerByte = STX;
             } else {
                 // Use 128-byte block for small remaining data
@@ -156,7 +157,59 @@ public class XModemTransfer {
         int retryCount = 0;
 
         while (true) {
-            int header = readByteWithTimeout(TIMEOUT_MS);
+            int header;
+            try {
+                header = readByteWithTimeout(TIMEOUT_MS);
+            } catch (IOException e) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException ex) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: read timeout/IO error while reading header " +
+                        "(error=%s), retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                        "portOpen=%s, bytesAvailable=%d",
+                        e.getMessage(), retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
+
+            if (header == -1) {
+                // EOF/timeout case
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: EOF/timeout while reading header (read returned -1), " +
+                        "retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                        "portOpen=%s, bytesAvailable=%d",
+                        retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
 
             if (header == EOT) {
                 // End of transmission
@@ -172,13 +225,41 @@ public class XModemTransfer {
             // Determine block size based on header
             int blockSize;
             if (header == STX) {
-                blockSize = BLOCK_SIZE_1K;
+                blockSize = LARGE_BLOCK_SIZE;
             } else if (header == SOH) {
                 blockSize = BLOCK_SIZE_128;
             } else {
                 retryCount++;
                 if (retryCount > MAX_RETRIES) {
-                    reportError("Too many errors, aborting transfer");
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage;
+                    if ((header & 0xFF) >= 32 && (header & 0xFF) <= 126) {
+                        // Printable ASCII character - might be protocol message interference
+                        detailedMessage = String.format(
+                            "XMODEM protocol error: received unexpected character '%c' (0x%02X) instead of block header. " +
+                            "This usually indicates stale protocol data in the serial buffer. " +
+                            "retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                            "portOpen=%s, bytesAvailable=%d",
+                            (char)(header & 0xFF), header & 0xFF, retryCount, MAX_RETRIES,
+                            expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    } else {
+                        // Non-printable byte
+                        detailedMessage = String.format(
+                            "XMODEM protocol error: invalid header byte 0x%02X (expected STX=0x%02X or SOH=0x%02X). " +
+                            "This usually indicates protocol synchronization issues. " +
+                            "retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                            "portOpen=%s, bytesAvailable=%d",
+                            header & 0xFF, STX & 0xFF, SOH & 0xFF, retryCount, MAX_RETRIES,
+                            expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    }
+                    reportError(detailedMessage);
                     sendCancel();
                     return null;
                 }
@@ -187,21 +268,173 @@ public class XModemTransfer {
             }
 
             // Read block number and its complement
-            int blockNum = readByteWithTimeout(TIMEOUT_MS);
-            int blockNumComplement = readByteWithTimeout(TIMEOUT_MS);
+            int blockNum;
+            int blockNumComplement;
+            try {
+                blockNum = readByteWithTimeout(TIMEOUT_MS);
+                blockNumComplement = readByteWithTimeout(TIMEOUT_MS);
+            } catch (IOException e) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException ex) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: read timeout/IO error while reading block number " +
+                        "(error=%s), retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                        "portOpen=%s, bytesAvailable=%d",
+                        e.getMessage(), retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
+
+            if (blockNum == -1 || blockNumComplement == -1) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: EOF/timeout while reading block number " +
+                        "(blockNum=%d, blockNumComplement=%d), retryCount=%d/%d, expectedBlock=%d, " +
+                        "bytesTransferred=%d, elapsedMs=%d, portOpen=%s, bytesAvailable=%d",
+                        blockNum, blockNumComplement, retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
 
             // Verify block number
             if (blockNum + blockNumComplement != 255) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: invalid block number complement " +
+                        "(blockNum=0x%02X, blockNumComplement=0x%02X, sum=%d, expected=255), " +
+                        "retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                        "portOpen=%s, bytesAvailable=%d",
+                        blockNum & 0xFF, blockNumComplement & 0xFF, (blockNum + blockNumComplement) & 0xFF,
+                        retryCount, MAX_RETRIES, expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
                 serialPort.write(NAK);
                 continue;
             }
 
             // Read data block
-            byte[] block = serialPort.readExact(blockSize, TIMEOUT_MS);
+            byte[] block;
+            try {
+                block = serialPort.readExact(blockSize, TIMEOUT_MS);
+            } catch (IOException e) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException ex) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: read timeout/IO error while reading data block " +
+                        "(error=%s, blockSize=%d, blockNum=%d), retryCount=%d/%d, expectedBlock=%d, " +
+                        "bytesTransferred=%d, elapsedMs=%d, portOpen=%s, bytesAvailable=%d",
+                        e.getMessage(), blockSize, blockNum & 0xFF, retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
 
             // Read CRC (2 bytes, high byte first)
-            int crcHigh = readByteWithTimeout(TIMEOUT_MS);
-            int crcLow = readByteWithTimeout(TIMEOUT_MS);
+            int crcHigh;
+            int crcLow;
+            try {
+                crcHigh = readByteWithTimeout(TIMEOUT_MS);
+                crcLow = readByteWithTimeout(TIMEOUT_MS);
+            } catch (IOException e) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException ex) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: read timeout/IO error while reading CRC " +
+                        "(error=%s, blockNum=%d), retryCount=%d/%d, expectedBlock=%d, " +
+                        "bytesTransferred=%d, elapsedMs=%d, portOpen=%s, bytesAvailable=%d",
+                        e.getMessage(), blockNum & 0xFF, retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
+
+            if (crcHigh == -1 || crcLow == -1) {
+                retryCount++;
+                if (retryCount > MAX_RETRIES) {
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many errors, aborting transfer: EOF/timeout while reading CRC " +
+                        "(crcHigh=%d, crcLow=%d, blockNum=%d), retryCount=%d/%d, expectedBlock=%d, " +
+                        "bytesTransferred=%d, elapsedMs=%d, portOpen=%s, bytesAvailable=%d",
+                        crcHigh, crcLow, blockNum & 0xFF, retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
+                    sendCancel();
+                    return null;
+                }
+                serialPort.write(NAK);
+                continue;
+            }
+
             int receivedCrc = ((crcHigh & 0xFF) << 8) | (crcLow & 0xFF);
 
             // Verify CRC
@@ -209,7 +442,21 @@ public class XModemTransfer {
             if (receivedCrc != calculatedCrc) {
                 retryCount++;
                 if (retryCount > MAX_RETRIES) {
-                    reportError("Too many CRC errors, aborting transfer");
+                    long elapsedMs = System.currentTimeMillis() - transferStartTime;
+                    boolean portOpen = serialPort.isOpen();
+                    int availableBytes = 0;
+                    try {
+                        availableBytes = serialPort.available();
+                    } catch (IOException e) {
+                        // Ignore, we are already failing the transfer
+                    }
+                    String detailedMessage = String.format(
+                        "Too many CRC errors, aborting transfer: blockNum=%d, receivedCRC=0x%04X, calculatedCRC=0x%04X, " +
+                        "retryCount=%d/%d, expectedBlock=%d, bytesTransferred=%d, elapsedMs=%d, " +
+                        "portOpen=%s, bytesAvailable=%d",
+                        blockNum & 0xFF, receivedCrc, calculatedCrc, retryCount, MAX_RETRIES,
+                        expectedBlockNumber, totalBytesTransferred, elapsedMs, portOpen, availableBytes);
+                    reportError(detailedMessage);
                     sendCancel();
                     return null;
                 }
@@ -263,11 +510,12 @@ public class XModemTransfer {
      * and these stale chars could interfere with ACK detection during block sending.
      */
     private void drainExtraHandshakeChars() throws IOException {
-        // Small delay to let any in-flight 'C' chars arrive
-        try {
-            Thread.sleep(50);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // Use a short timeout instead of fixed sleep to drain in-flight characters
+        long startTime = System.currentTimeMillis();
+        while (System.currentTimeMillis() - startTime < 10) { // 10ms timeout
+            if (serialPort.available() > 0) {
+                break; // Data available, proceed to drain
+            }
         }
         
         // Drain any 'C' or NAK chars
@@ -293,12 +541,8 @@ public class XModemTransfer {
                 if (serialPort.available() > 0) {
                     return true;
                 }
-                try {
-                    Thread.sleep(POLL_INTERVAL_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                }
+                // Use a very short yield instead of sleep for better responsiveness
+                Thread.yield();
             }
         }
         return false;
@@ -357,19 +601,9 @@ public class XModemTransfer {
     }
 
     private int readByteWithTimeout(int timeoutMs) throws IOException {
-        long startTime = System.currentTimeMillis();
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
-            if (serialPort.available() > 0) {
-                return serialPort.read() & 0xFF;
-            }
-            try {
-                Thread.sleep(POLL_INTERVAL_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException("Read interrupted");
-            }
-        }
-        return -1;
+        serialPort.setReadTimeout(timeoutMs);
+        int result = serialPort.read();
+        return result;
     }
 
     /**

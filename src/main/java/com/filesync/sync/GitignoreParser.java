@@ -4,7 +4,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -16,18 +15,18 @@ import java.util.regex.Pattern;
  * Supports multiple .gitignore files in subdirectories.
  */
 public class GitignoreParser {
-
+    
     private static final String GITIGNORE_FILENAME = ".gitignore";
     
     private final File baseDirectory;
     // Maps directory path to list of patterns from .gitignore in that directory
     private final Map<String, List<GitignorePattern>> patternsByDir;
-
+    
     public GitignoreParser(File baseDirectory) {
         this.baseDirectory = baseDirectory;
         this.patternsByDir = new HashMap<>();
     }
-
+    
     /**
      * Scan for all .gitignore files and load patterns
      */
@@ -35,7 +34,7 @@ public class GitignoreParser {
         patternsByDir.clear();
         scanForGitignoreFiles(baseDirectory, "");
     }
-
+    
     /**
      * Recursively scan for .gitignore files
      */
@@ -45,20 +44,20 @@ public class GitignoreParser {
             List<GitignorePattern> patterns = parseGitignoreFile(gitignoreFile);
             patternsByDir.put(relativePath, patterns);
         }
-
+        
         File[] children = directory.listFiles();
         if (children != null) {
             for (File child : children) {
                 if (child.isDirectory()) {
-                    String childRelativePath = relativePath.isEmpty() ? 
-                            child.getName() : 
+                    String childRelativePath = relativePath.isEmpty() ?
+                            child.getName() :
                             relativePath + "/" + child.getName();
                     scanForGitignoreFiles(child, childRelativePath);
                 }
             }
         }
     }
-
+    
     /**
      * Parse a .gitignore file and return list of patterns
      */
@@ -84,7 +83,7 @@ public class GitignoreParser {
         
         return patterns;
     }
-
+    
     /**
      * Parse a single gitignore pattern line
      */
@@ -123,7 +122,7 @@ public class GitignoreParser {
         
         return new GitignorePattern(Pattern.compile(regex), negation, directoryOnly, anchored);
     }
-
+    
     /**
      * Convert gitignore glob pattern to regex
      */
@@ -185,12 +184,12 @@ public class GitignoreParser {
         
         return regex.toString();
     }
-
+    
     /**
      * Check if a relative path should be ignored based on .gitignore rules
-     * 
+     *
      * @param relativePath relative path from base directory (using / as separator)
-     * @param isDirectory true if the path is a directory
+     * @param isDirectory  true if the path is a directory
      * @return true if the path should be ignored
      */
     public boolean isIgnored(String relativePath, boolean isDirectory) {
@@ -213,7 +212,13 @@ public class GitignoreParser {
                 if (dirPath.isEmpty()) {
                     pathToCheck = relativePath;
                 } else {
-                    pathToCheck = relativePath.substring(dirPath.length() + 1);
+                    int startIndex = dirPath.length() + 1;
+                    if (startIndex >= relativePath.length()) {
+                        // dirPath equals or is longer than relativePath, skip this check
+                        pathToCheck = "";
+                    } else {
+                        pathToCheck = relativePath.substring(startIndex);
+                    }
                 }
                 
                 for (GitignorePattern pattern : patterns) {
@@ -233,7 +238,7 @@ public class GitignoreParser {
         
         return ignored;
     }
-
+    
     /**
      * Represents a single gitignore pattern
      */
@@ -242,14 +247,14 @@ public class GitignoreParser {
         private final boolean negation;
         private final boolean directoryOnly;
         private final boolean anchored;
-
+        
         public GitignorePattern(Pattern regex, boolean negation, boolean directoryOnly, boolean anchored) {
             this.regex = regex;
             this.negation = negation;
             this.directoryOnly = directoryOnly;
             this.anchored = anchored;
         }
-
+        
         public boolean matches(String path, boolean isDirectory) {
             // Directory-only patterns only match directories
             if (directoryOnly && !isDirectory) {
@@ -258,10 +263,9 @@ public class GitignoreParser {
             
             return regex.matcher(path).find();
         }
-
+        
         public boolean isNegation() {
             return negation;
         }
     }
 }
-

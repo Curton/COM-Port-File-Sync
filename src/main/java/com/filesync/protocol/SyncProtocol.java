@@ -61,6 +61,13 @@ public class SyncProtocol {
 
     public void setTimeout(int timeoutMs) {
         this.timeoutMs = timeoutMs;
+        // Keep underlying serial port timeout in sync so low-level reads
+        // do not time out earlier than the protocol-level timeout.
+        serialPort.setReadTimeout(timeoutMs);
+    }
+
+    public int getTimeout() {
+        return timeoutMs;
     }
 
     /**
@@ -200,6 +207,16 @@ public class SyncProtocol {
                 // Wait for receiver ACK to ensure proper synchronization
                 Message ackMsg = waitForCommand(CMD_ACK);
 
+                // Clear any stale data from input buffer before starting XMODEM send
+                // This ensures clean separation between protocol commands and XMODEM data
+                serialPort.clearInputBuffer();
+
+                // Use a short timeout instead of fixed sleep to ensure receiver is ready
+                long waitStart = System.currentTimeMillis();
+                while (System.currentTimeMillis() - waitStart < 10) { // 10ms timeout
+                    // Just wait briefly for any in-flight data
+                }
+
                 // Send file data via XMODEM
                 xmodemInProgress.set(true);
                 boolean success;
@@ -226,12 +243,8 @@ public class SyncProtocol {
 
             if (attempt < maxAttempts) {
                 // Small backoff before retrying
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
+                // Use Thread.yield() instead of sleep to avoid unnecessary delays
+                Thread.yield();
             }
         }
 
@@ -250,6 +263,16 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] data;
         try {
+            // Clear any stale data from input buffer before starting XMODEM receive
+            // This prevents interference from leftover protocol messages or noise
+            serialPort.clearInputBuffer();
+
+            // Use a short timeout instead of fixed sleep to ensure sender has started transmitting
+            long waitStart = System.currentTimeMillis();
+            while (System.currentTimeMillis() - waitStart < 10) { // 10ms timeout
+                // Just wait briefly for any in-flight data
+            }
+
             data = xmodem.receive();
         } finally {
             xmodemInProgress.set(false);

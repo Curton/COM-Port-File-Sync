@@ -9,7 +9,7 @@ import java.util.prefs.Preferences;
  * Stores COM port configuration including baud rate, data bits, stop bits, and parity.
  */
 public class SettingsManager {
-
+    
     private static final String PREF_BAUD_RATE = "baudRate";
     private static final String PREF_DATA_BITS = "dataBits";
     private static final String PREF_STOP_BITS = "stopBits";
@@ -18,22 +18,23 @@ public class SettingsManager {
     private static final String PREF_LAST_FOLDER = "lastFolder";
     private static final String PREF_STRICT_SYNC = "strictSync";
     private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
-
+    private static final String PREF_FAST_MODE = "fastMode";
+    
     // Default values
     public static final int DEFAULT_BAUD_RATE = 115200;
     public static final int DEFAULT_DATA_BITS = 8;
     public static final int DEFAULT_STOP_BITS = SerialPort.ONE_STOP_BIT;
     public static final int DEFAULT_PARITY = SerialPort.NO_PARITY;
-
+    
     // Common baud rates
     public static final int[] BAUD_RATES = {
             300, 1200, 2400, 4800, 9600, 14400, 19200, 38400,
             57600, 115200, 230400, 460800, 921600
     };
-
+    
     // Data bits options
     public static final int[] DATA_BITS_OPTIONS = {5, 6, 7, 8};
-
+    
     // Stop bits options (display names and values)
     public static final String[] STOP_BITS_NAMES = {"1", "1.5", "2"};
     public static final int[] STOP_BITS_VALUES = {
@@ -41,7 +42,7 @@ public class SettingsManager {
             SerialPort.ONE_POINT_FIVE_STOP_BITS,
             SerialPort.TWO_STOP_BITS
     };
-
+    
     // Parity options (display names and values)
     public static final String[] PARITY_NAMES = {"None", "Odd", "Even", "Mark", "Space"};
     public static final int[] PARITY_VALUES = {
@@ -51,9 +52,9 @@ public class SettingsManager {
             SerialPort.MARK_PARITY,
             SerialPort.SPACE_PARITY
     };
-
+    
     private final Preferences prefs;
-
+    
     private int baudRate;
     private int dataBits;
     private int stopBits;
@@ -62,12 +63,13 @@ public class SettingsManager {
     private String lastFolder;
     private boolean strictSync;
     private boolean respectGitignore;
-
+    private boolean fastMode;
+    
     public SettingsManager() {
         prefs = Preferences.userNodeForPackage(SettingsManager.class);
         load();
     }
-
+    
     /**
      * Load settings from preferences storage
      */
@@ -80,8 +82,9 @@ public class SettingsManager {
         lastFolder = prefs.get(PREF_LAST_FOLDER, "");
         strictSync = prefs.getBoolean(PREF_STRICT_SYNC, false);
         respectGitignore = prefs.getBoolean(PREF_RESPECT_GITIGNORE, false);
+        fastMode = prefs.getBoolean(PREF_FAST_MODE, true);
     }
-
+    
     /**
      * Save current settings to preferences storage
      */
@@ -94,74 +97,83 @@ public class SettingsManager {
         prefs.put(PREF_LAST_FOLDER, lastFolder != null ? lastFolder : "");
         prefs.putBoolean(PREF_STRICT_SYNC, strictSync);
         prefs.putBoolean(PREF_RESPECT_GITIGNORE, respectGitignore);
+        prefs.putBoolean(PREF_FAST_MODE, fastMode);
     }
-
+    
     // Getters and Setters
-
+    
     public int getBaudRate() {
         return baudRate;
     }
-
+    
     public void setBaudRate(int baudRate) {
         this.baudRate = baudRate;
     }
-
+    
     public int getDataBits() {
         return dataBits;
     }
-
+    
     public void setDataBits(int dataBits) {
         this.dataBits = dataBits;
     }
-
+    
     public int getStopBits() {
         return stopBits;
     }
-
+    
     public void setStopBits(int stopBits) {
         this.stopBits = stopBits;
     }
-
+    
     public int getParity() {
         return parity;
     }
-
+    
     public void setParity(int parity) {
         this.parity = parity;
     }
-
+    
     public String getLastPort() {
         return lastPort;
     }
-
+    
     public void setLastPort(String lastPort) {
         this.lastPort = lastPort;
     }
-
+    
     public String getLastFolder() {
         return lastFolder;
     }
-
+    
     public void setLastFolder(String lastFolder) {
         this.lastFolder = lastFolder;
     }
-
+    
     public boolean isStrictSync() {
         return strictSync;
     }
-
+    
     public void setStrictSync(boolean strictSync) {
         this.strictSync = strictSync;
     }
-
+    
     public boolean isRespectGitignore() {
         return respectGitignore;
     }
-
+    
     public void setRespectGitignore(boolean respectGitignore) {
         this.respectGitignore = respectGitignore;
     }
-
+    
+    public boolean isFastMode() {
+        return fastMode;
+    }
+    
+    public void setFastMode(boolean fastMode) {
+        this.fastMode = fastMode;
+    }
+    
     /**
      * Get the index of a stop bits value in STOP_BITS_VALUES array
      */
@@ -173,7 +185,7 @@ public class SettingsManager {
         }
         return 0;
     }
-
+    
     /**
      * Get the index of a parity value in PARITY_VALUES array
      */
@@ -185,7 +197,7 @@ public class SettingsManager {
         }
         return 0;
     }
-
+    
     /**
      * Get the index of a baud rate in BAUD_RATES array
      */
@@ -197,7 +209,7 @@ public class SettingsManager {
         }
         return 9; // Default to 115200 index
     }
-
+    
     /**
      * Get the index of data bits in DATA_BITS_OPTIONS array
      */
@@ -210,4 +222,3 @@ public class SettingsManager {
         return 3; // Default to 8 bits index
     }
 }
-
