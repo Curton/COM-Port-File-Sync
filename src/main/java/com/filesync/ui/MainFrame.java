@@ -7,9 +7,14 @@ import com.filesync.sync.FileSyncManager;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -40,6 +45,9 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     private JCheckBox strictSyncCheckBox;
     private JCheckBox fastModeCheckBox;
     private JProgressBar progressBar;
+    private JTextArea sharedTextArea;
+    private Timer sharedTextSyncTimer;
+    private boolean suppressSharedTextEvents = false;
     private JTextArea logTextArea;
     private JLabel statusLabel;
     private JLabel settingsLabel;
@@ -200,6 +208,14 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         progressBar = new JProgressBar(0, 100);
         progressBar.setStringPainted(true);
         
+        // Shared text area
+        sharedTextArea = new JTextArea();
+        sharedTextArea.setLineWrap(true);
+        sharedTextArea.setWrapStyleWord(true);
+        sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        sharedTextSyncTimer = new Timer(3000, e -> pushSharedTextToRemote());
+        sharedTextSyncTimer.setRepeats(false);
+        
         // Log area
         logTextArea = new JTextArea();
         logTextArea.setEditable(false);
@@ -308,6 +324,13 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         progressPanel.setBorder(new TitledBorder("Progress"));
         progressPanel.add(progressBar, BorderLayout.CENTER);
         
+        // Shared text panel
+        JPanel sharedPanel = new JPanel(new BorderLayout());
+        sharedPanel.setBorder(new TitledBorder("Shared Text"));
+        JScrollPane sharedScroll = new JScrollPane(sharedTextArea);
+        sharedScroll.setPreferredSize(new Dimension(0, 120));
+        sharedPanel.add(sharedScroll, BorderLayout.CENTER);
+        
         // Log panel
         JPanel logPanel = new JPanel(new BorderLayout());
         logPanel.setBorder(new TitledBorder("Log"));
@@ -316,9 +339,13 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         logPanel.add(scrollPane, BorderLayout.CENTER);
         
         // Bottom section
-        JPanel bottomSection = new JPanel(new BorderLayout(0, 5));
-        bottomSection.add(progressPanel, BorderLayout.NORTH);
-        bottomSection.add(logPanel, BorderLayout.CENTER);
+        JPanel bottomSection = new JPanel();
+        bottomSection.setLayout(new BoxLayout(bottomSection, BoxLayout.Y_AXIS));
+        bottomSection.add(progressPanel);
+        bottomSection.add(Box.createVerticalStrut(5));
+        bottomSection.add(sharedPanel);
+        bottomSection.add(Box.createVerticalStrut(5));
+        bottomSection.add(logPanel);
         
         mainPanel.add(topSection, BorderLayout.NORTH);
         mainPanel.add(bottomSection, BorderLayout.CENTER);
@@ -373,6 +400,37 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             settings.setFastMode(fastMode);
             settings.save();
             log("Fast mode: " + (fastMode ? "enabled" : "disabled"));
+        });
+
+        // Shared text change listener (debounced 3s send)
+        sharedTextArea.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                onSharedTextEdited();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                onSharedTextEdited();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                onSharedTextEdited();
+            }
+        });
+
+        // Double-click to copy shared text
+        sharedTextArea.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    String text = sharedTextArea.getText();
+                    StringSelection selection = new StringSelection(text);
+                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+                    log("Shared text copied to clipboard");
+                }
+            }
         });
         
         // Window close handler
@@ -841,5 +899,38 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
             progressBar.setString("Error");
             updateSyncButtonState();
         });
+    }
+
+    @Override
+    public void onSharedTextReceived(String text) {
+        SwingUtilities.invokeLater(() -> {
+            suppressSharedTextEvents = true;
+            try {
+                sharedTextSyncTimer.stop();
+                sharedTextArea.setText(text);
+            } finally {
+                suppressSharedTextEvents = false;
+            }
+        });
+    }
+
+    /**
+     * Handle local shared text edits with debounce
+     */
+    private void onSharedTextEdited() {
+        if (suppressSharedTextEvents) {
+            return;
+        }
+        sharedTextSyncTimer.restart();
+    }
+
+    /**
+     * Push shared text to remote after debounce interval
+     */
+    private void pushSharedTextToRemote() {
+        if (!isConnected || !syncManager.isConnectionAlive()) {
+            return;
+        }
+        syncManager.sendSharedText(sharedTextArea.getText());
     }
 }

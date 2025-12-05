@@ -218,6 +218,25 @@ public class FileSyncManager {
     }
 
     /**
+     * Send shared text to remote
+     */
+    public void sendSharedText(String text) {
+        if (!running.get() || !connectionAlive.get()) {
+            if (eventListener != null) {
+                eventListener.onError("Cannot send shared text - not connected");
+            }
+            return;
+        }
+        try {
+            protocol.sendSharedText(text);
+        } catch (IOException e) {
+            if (eventListener != null) {
+                eventListener.onError("Failed to send shared text: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
      * Main listening loop for incoming commands
      */
     private void listenLoop() {
@@ -371,6 +390,10 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_RMDIR:
                 handleRmdir(msg.getParam(0));
+                break;
+
+            case SyncProtocol.CMD_SHARED_TEXT:
+                handleSharedText(msg.getParam(0));
                 break;
         }
     }
@@ -685,6 +708,17 @@ public class FileSyncManager {
     }
 
     /**
+     * Handle shared text received from remote
+     */
+    private void handleSharedText(String encodedPayload) {
+        if (eventListener == null) {
+            return;
+        }
+        String text = protocol.decodeSharedText(encodedPayload);
+        eventListener.onSharedTextReceived(text);
+    }
+
+    /**
      * Initiate synchronization as sender
      */
     public void initiateSync() {
@@ -888,6 +922,7 @@ public class FileSyncManager {
         void onConnectionStatusChanged(boolean isConnected);
         void onLog(String message);
         void onError(String message);
+        void onSharedTextReceived(String text);
     }
 }
 

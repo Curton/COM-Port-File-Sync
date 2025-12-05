@@ -37,6 +37,7 @@ public class SyncProtocol {
     public static final String CMD_FILE_DELETE = "FILE_DELETE";
     public static final String CMD_MKDIR = "MKDIR";
     public static final String CMD_RMDIR = "RMDIR";
+    public static final String CMD_SHARED_TEXT = "SHARED_TEXT";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -48,6 +49,8 @@ public class SyncProtocol {
     private final SerialPortManager serialPort;
     private final XModemTransfer xmodem;
     private int timeoutMs;
+    private static final java.util.Base64.Encoder BASE64_ENCODER = java.util.Base64.getEncoder();
+    private static final java.util.Base64.Decoder BASE64_DECODER = java.util.Base64.getDecoder();
 
     public SyncProtocol(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -355,6 +358,33 @@ public class SyncProtocol {
      */
     public void sendRmdir(String relativePath) throws IOException {
         sendCommand(CMD_RMDIR, relativePath);
+    }
+
+    /**
+     * Send shared text payload (Base64 encoded to protect delimiters)
+     */
+    public void sendSharedText(String text) throws IOException {
+        String encoded = encodeText(text);
+        sendCommand(CMD_SHARED_TEXT, encoded);
+    }
+
+    /**
+     * Decode shared text payload received from remote
+     */
+    public String decodeSharedText(String encodedPayload) {
+        if (encodedPayload == null) {
+            return "";
+        }
+        byte[] data = BASE64_DECODER.decode(encodedPayload);
+        return new String(data, StandardCharsets.UTF_8);
+    }
+
+    private String encodeText(String text) {
+        if (text == null) {
+            text = "";
+        }
+        byte[] data = text.getBytes(StandardCharsets.UTF_8);
+        return BASE64_ENCODER.encodeToString(data);
     }
 
     /**
