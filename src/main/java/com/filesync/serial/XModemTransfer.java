@@ -24,7 +24,6 @@ public class XModemTransfer {
     private static final int TIMEOUT_MS = 10000;
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
     private static final byte PADDING = 0x1A;  // CTRL-Z for padding
-    private static final int POLL_INTERVAL_MS = 1;  // Reduced from 10ms for better throughput
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
@@ -157,6 +156,9 @@ public class XModemTransfer {
         int retryCount = 0;
 
         while (true) {
+            // Clear any stale data before reading each block header
+            performThoroughBufferClear();
+            
             int header;
             try {
                 header = readByteWithTimeout(TIMEOUT_MS);
@@ -263,6 +265,9 @@ public class XModemTransfer {
                     sendCancel();
                     return null;
                 }
+                
+                // Instead of immediately failing on unexpected header, try to clear buffer and retry
+                performThoroughBufferClear();
                 serialPort.write(NAK);
                 continue;
             }
@@ -486,12 +491,54 @@ public class XModemTransfer {
         return removePadding(result);
     }
 
+    /**
+     * Perform thorough buffer clearing to remove stale data that could interfere with protocol.
+     * This is more comprehensive than the basic clearInputBuffer() and includes retries.
+     */
+    private void performThoroughBufferClear() throws IOException {
+        if (!serialPort.isOpen()) {
+            return;
+        }
+        
+        long startTime = System.currentTimeMillis();
+        int totalCleared = 0;
+        
+        // Keep clearing until no more data is available or timeout reached
+        while (System.currentTimeMillis() - startTime < 100) { // 100ms max clearing time
+            try {
+                // Clear any available data
+                int available = serialPort.available();
+                if (available > 0) {
+                    byte[] tempBuffer = new byte[Math.min(available, 1024)];
+                    int actuallyRead = serialPort.read(tempBuffer);
+                    totalCleared += actuallyRead;
+                } else {
+                    // No more data available, brief pause to catch in-flight data
+                    Thread.sleep(1);
+                }
+            } catch (IOException e) {
+                // If we can't read, stop clearing
+                break;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        
+        // If we cleared more than expected, log it (but only for debugging)
+        if (totalCleared > 0) {
+            // Optional: Could add debug logging here if needed
+        }
+    }
+
     private boolean waitForHandshake() throws IOException {
         long startTime = System.currentTimeMillis();
-        serialPort.clearInputBuffer();
+        
+        // Perform thorough buffer clearing before starting handshake
+        performThoroughBufferClear();
 
         while (System.currentTimeMillis() - startTime < HANDSHAKE_TIMEOUT_MS) {
-            int b = readByteWithTimeout(1000);
+            int b = readByteWithTimeout(100); // Reduced from 1000ms to 100ms
             if (b == C) {
                 return true;
             }
@@ -500,6 +547,8 @@ public class XModemTransfer {
                 // Keep waiting for 'C'
                 continue;
             }
+            // Use yield instead of implicit sleep in readByteWithTimeout
+            Thread.yield();
         }
         return false;
     }
@@ -510,19 +559,24 @@ public class XModemTransfer {
      * and these stale chars could interfere with ACK detection during block sending.
      */
     private void drainExtraHandshakeChars() throws IOException {
-        // Use a short timeout instead of fixed sleep to drain in-flight characters
+        // Perform aggressive buffer clearing to remove all stale handshake characters
+        performThoroughBufferClear();
+        
+        // Additional brief drain to catch any in-flight characters
         long startTime = System.currentTimeMillis();
-        while (System.currentTimeMillis() - startTime < 10) { // 10ms timeout
+        while (System.currentTimeMillis() - startTime < 50) { // 50ms timeout
             if (serialPort.available() > 0) {
                 break; // Data available, proceed to drain
             }
         }
         
-        // Drain any 'C' or NAK chars
+        // Drain any 'C', NAK, or other stale characters
         while (serialPort.available() > 0) {
             int b = serialPort.read() & 0xFF;
-            if (b != C && b != NAK) {
-                // Unexpected byte, stop draining
+            // Keep draining until we find expected data or buffer is empty
+            if (b != C && b != NAK && b != ACK) {
+                // Unexpected byte found, drain everything and restart protocol
+                performThoroughBufferClear();
                 break;
             }
         }
@@ -561,13 +615,8 @@ public class XModemTransfer {
         packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
-            // Clear any stale 'C' chars before sending (especially on retry)
-            while (serialPort.available() > 0) {
-                int stale = serialPort.read() & 0xFF;
-                if (stale != C && stale != NAK) {
-                    break;  // Unexpected byte, stop draining
-                }
-            }
+            // Clear any stale characters before sending (especially on retry)
+            performThoroughBufferClear();
             
             serialPort.write(packet);
 

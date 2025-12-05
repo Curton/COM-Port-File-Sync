@@ -21,7 +21,6 @@ public class SerialPortManager {
     private static final int DEFAULT_STOP_BITS = SerialPort.ONE_STOP_BIT;
     private static final int DEFAULT_PARITY = SerialPort.NO_PARITY;
     private static final int DEFAULT_TIMEOUT_MS = 5000;
-    private static final int POLL_INTERVAL_MS = 1;
 
     private SerialPort serialPort;
     private InputStream inputStream;
@@ -189,12 +188,8 @@ public class SerialPortManager {
                     bytesRead += read;
                 }
             } else {
-                try {
-                    Thread.sleep(POLL_INTERVAL_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Read interrupted");
-                }
+                // Use yield instead of sleep for better responsiveness
+                Thread.yield();
             }
         }
         return buffer;
@@ -221,12 +216,8 @@ public class SerialPortManager {
 
             int b = inputStream.read();
             if (b == -1) {
-                try {
-                    Thread.sleep(POLL_INTERVAL_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Read interrupted");
-                }
+                // Use yield instead of sleep for better responsiveness
+                Thread.yield();
                 continue;
             }
 
@@ -263,8 +254,10 @@ public class SerialPortManager {
         if (!isOpen()) {
             return;
         }
+        byte[] buffer = new byte[1024];
         while (inputStream.available() > 0) {
-            inputStream.read();
+            int bytesToRead = Math.min(inputStream.available(), buffer.length);
+            inputStream.read(buffer, 0, bytesToRead);
         }
     }
 

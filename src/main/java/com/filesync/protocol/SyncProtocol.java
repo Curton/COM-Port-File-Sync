@@ -133,6 +133,14 @@ public class SyncProtocol {
         // Wait for receiver ACK to ensure proper synchronization
         Message ackMsg = waitForCommand(CMD_ACK);
 
+        // Clear any stale data from the input buffer before starting XMODEM
+        // to avoid leftover protocol text being interpreted as packet headers
+        serialPort.clearInputBuffer();
+        long waitStart = System.currentTimeMillis();
+        while (System.currentTimeMillis() - waitStart < 10) { // brief wait for in-flight bytes
+            // intentional tight loop
+        }
+
         // Send manifest data via XMODEM
         xmodemInProgress.set(true);
         try {
@@ -149,11 +157,23 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] compressed;
         try {
+            // Clear stale protocol bytes before XMODEM receive to prevent header mismatch
+            serialPort.clearInputBuffer();
+            long waitStart = System.currentTimeMillis();
+            while (System.currentTimeMillis() - waitStart < 10) { // brief wait for in-flight bytes
+                // intentional tight loop
+            }
             compressed = xmodem.receive();
         } finally {
             xmodemInProgress.set(false);
         }
         if (compressed == null) {
+            // Best-effort cleanup to restore protocol state after a failed transfer
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException e) {
+                // Ignore cleanup failure; primary error will be surfaced below
+            }
             String detail = xmodem.getLastErrorMessage();
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
