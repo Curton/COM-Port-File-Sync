@@ -120,7 +120,7 @@ public class GitignoreParser {
         // Convert gitignore glob to regex
         String regex = convertGlobToRegex(line, anchored);
         
-        return new GitignorePattern(Pattern.compile(regex), negation, directoryOnly, anchored);
+        return new GitignorePattern(Pattern.compile(regex), negation, directoryOnly);
     }
     
     /**
@@ -140,7 +140,7 @@ public class GitignoreParser {
             char c = glob.charAt(i);
             
             switch (c) {
-                case '*':
+                case '*' -> {
                     if (i + 1 < glob.length() && glob.charAt(i + 1) == '*') {
                         // ** matches any number of directories
                         if (i + 2 < glob.length() && glob.charAt(i + 2) == '/') {
@@ -154,28 +154,10 @@ public class GitignoreParser {
                         // * matches anything except /
                         regex.append("[^/]*");
                     }
-                    break;
-                case '?':
-                    regex.append("[^/]");
-                    break;
-                case '.':
-                case '(':
-                case ')':
-                case '+':
-                case '|':
-                case '^':
-                case '$':
-                case '@':
-                case '%':
-                case '{':
-                case '}':
-                case '[':
-                case ']':
-                case '\\':
-                    regex.append("\\").append(c);
-                    break;
-                default:
-                    regex.append(c);
+                }
+                case '?' -> regex.append("[^/]");
+                case '.', '(', ')', '+', '|', '^', '$', '@', '%', '{', '}', '[', ']', '\\' -> regex.append("\\").append(c);
+                default -> regex.append(c);
             }
         }
         
@@ -246,13 +228,11 @@ public class GitignoreParser {
         private final Pattern regex;
         private final boolean negation;
         private final boolean directoryOnly;
-        private final boolean anchored;
         
-        public GitignorePattern(Pattern regex, boolean negation, boolean directoryOnly, boolean anchored) {
+        public GitignorePattern(Pattern regex, boolean negation, boolean directoryOnly) {
             this.regex = regex;
             this.negation = negation;
             this.directoryOnly = directoryOnly;
-            this.anchored = anchored;
         }
         
         public boolean matches(String path, boolean isDirectory) {
