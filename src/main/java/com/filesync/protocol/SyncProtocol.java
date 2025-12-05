@@ -61,13 +61,6 @@ public class SyncProtocol {
 
     public void setTimeout(int timeoutMs) {
         this.timeoutMs = timeoutMs;
-        // Keep underlying serial port timeout in sync so low-level reads
-        // do not time out earlier than the protocol-level timeout.
-        serialPort.setReadTimeout(timeoutMs);
-    }
-
-    public int getTimeout() {
-        return timeoutMs;
     }
 
     /**
@@ -133,14 +126,6 @@ public class SyncProtocol {
         // Wait for receiver ACK to ensure proper synchronization
         Message ackMsg = waitForCommand(CMD_ACK);
 
-        // Clear any stale data from the input buffer before starting XMODEM
-        // to avoid leftover protocol text being interpreted as packet headers
-        serialPort.clearInputBuffer();
-        long waitStart = System.currentTimeMillis();
-        while (System.currentTimeMillis() - waitStart < 10) { // brief wait for in-flight bytes
-            // intentional tight loop
-        }
-
         // Send manifest data via XMODEM
         xmodemInProgress.set(true);
         try {
@@ -157,23 +142,11 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] compressed;
         try {
-            // Clear stale protocol bytes before XMODEM receive to prevent header mismatch
-            serialPort.clearInputBuffer();
-            long waitStart = System.currentTimeMillis();
-            while (System.currentTimeMillis() - waitStart < 10) { // brief wait for in-flight bytes
-                // intentional tight loop
-            }
             compressed = xmodem.receive();
         } finally {
             xmodemInProgress.set(false);
         }
         if (compressed == null) {
-            // Best-effort cleanup to restore protocol state after a failed transfer
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException e) {
-                // Ignore cleanup failure; primary error will be surfaced below
-            }
             String detail = xmodem.getLastErrorMessage();
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
@@ -227,16 +200,6 @@ public class SyncProtocol {
                 // Wait for receiver ACK to ensure proper synchronization
                 Message ackMsg = waitForCommand(CMD_ACK);
 
-                // Clear any stale data from input buffer before starting XMODEM send
-                // This ensures clean separation between protocol commands and XMODEM data
-                serialPort.clearInputBuffer();
-
-                // Use a short timeout instead of fixed sleep to ensure receiver is ready
-                long waitStart = System.currentTimeMillis();
-                while (System.currentTimeMillis() - waitStart < 10) { // 10ms timeout
-                    // Just wait briefly for any in-flight data
-                }
-
                 // Send file data via XMODEM
                 xmodemInProgress.set(true);
                 boolean success;
@@ -263,8 +226,12 @@ public class SyncProtocol {
 
             if (attempt < maxAttempts) {
                 // Small backoff before retrying
-                // Use Thread.yield() instead of sleep to avoid unnecessary delays
-                Thread.yield();
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
 
@@ -283,16 +250,6 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] data;
         try {
-            // Clear any stale data from input buffer before starting XMODEM receive
-            // This prevents interference from leftover protocol messages or noise
-            serialPort.clearInputBuffer();
-
-            // Use a short timeout instead of fixed sleep to ensure sender has started transmitting
-            long waitStart = System.currentTimeMillis();
-            while (System.currentTimeMillis() - waitStart < 10) { // 10ms timeout
-                // Just wait briefly for any in-flight data
-            }
-
             data = xmodem.receive();
         } finally {
             xmodemInProgress.set(false);
