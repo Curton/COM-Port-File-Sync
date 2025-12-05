@@ -1,20 +1,19 @@
 package com.filesync.ui;
 
-import com.filesync.config.SettingsManager;
-import com.filesync.serial.SerialPortManager;
-import com.filesync.sync.FileSyncManager;
-
-import javax.swing.*;
-import javax.swing.border.EmptyBorder;
-import javax.swing.border.TitledBorder;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import java.awt.Insets;
+import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
-import java.awt.event.WindowAdapter;
-import java.awt.event.WindowEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -23,6 +22,32 @@ import java.util.Date;
 import java.util.List;
 import java.util.Properties;
 
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
+import javax.swing.JDialog;
+import javax.swing.JFileChooser;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JProgressBar;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+
+import com.filesync.config.SettingsManager;
+import com.filesync.serial.SerialPortManager;
+import com.filesync.sync.FileSyncManager;
+
 /**
  * Main application window for COM Port File Sync.
  * Provides UI for COM port selection, folder selection, sync direction, and sync control.
@@ -30,7 +55,7 @@ import java.util.Properties;
 public class MainFrame extends JFrame implements FileSyncManager.SyncEventListener {
     
     private static final int WINDOW_WIDTH = 700;
-    private static final int WINDOW_HEIGHT = 520;
+    private static final int WINDOW_HEIGHT = 600;
     
     // UI Components
     private JComboBox<String> portComboBox;
@@ -323,6 +348,8 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         JPanel progressPanel = new JPanel(new BorderLayout(5, 5));
         progressPanel.setBorder(new TitledBorder("Progress"));
         progressPanel.add(progressBar, BorderLayout.CENTER);
+        Dimension progressPreferred = progressPanel.getPreferredSize();
+        progressPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, progressPreferred.height));
         
         // Shared text panel
         JPanel sharedPanel = new JPanel(new BorderLayout());
@@ -330,6 +357,8 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         JScrollPane sharedScroll = new JScrollPane(sharedTextArea);
         sharedScroll.setPreferredSize(new Dimension(0, 120));
         sharedPanel.add(sharedScroll, BorderLayout.CENTER);
+        Dimension sharedPreferred = sharedPanel.getPreferredSize();
+        sharedPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, sharedPreferred.height));
         
         // Log panel
         JPanel logPanel = new JPanel(new BorderLayout());
@@ -337,6 +366,8 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         JScrollPane scrollPane = new JScrollPane(logTextArea);
         scrollPane.setPreferredSize(new Dimension(0, 150));
         logPanel.add(scrollPane, BorderLayout.CENTER);
+        Dimension logPreferred = logPanel.getPreferredSize();
+        logPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, logPreferred.height));
         
         // Bottom section
         JPanel bottomSection = new JPanel();
@@ -346,6 +377,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         bottomSection.add(sharedPanel);
         bottomSection.add(Box.createVerticalStrut(5));
         bottomSection.add(logPanel);
+        bottomSection.add(Box.createVerticalGlue());
         
         mainPanel.add(topSection, BorderLayout.NORTH);
         mainPanel.add(bottomSection, BorderLayout.CENTER);
