@@ -4,14 +4,16 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * Implements XMODEM-1K protocol for reliable file transfer over serial port.
- * Uses 1024-byte blocks (STX) with CRC-16 checksum, falls back to 128-byte (SOH) for small data.
+ * Implements XMODEM protocol for reliable file transfer over serial port.
+ * Uses 4096-byte blocks for large payloads, 1024-byte blocks (STX) with CRC-16 checksum,
+ * and falls back to 128-byte (SOH) for small data.
  */
 public class XModemTransfer {
 
     // XMODEM control characters
     public static final byte SOH = 0x01;  // Start of Header (128 byte block)
     public static final byte STX = 0x02;  // Start of Header (1024 byte block) - XMODEM-1K
+    public static final byte STX4K = 0x05;  // Start of Header (4096 byte block) - XMODEM-4K (custom)
     public static final byte EOT = 0x04;  // End of Transmission
     public static final byte ACK = 0x06;  // Acknowledge
     public static final byte NAK = 0x15;  // Negative Acknowledge
@@ -19,6 +21,7 @@ public class XModemTransfer {
     public static final byte C = 0x43;    // 'C' for CRC mode
 
     private static final int BLOCK_SIZE_1K = 1024;  // XMODEM-1K block size
+    private static final int BLOCK_SIZE_4K = 4096;  // XMODEM-4K block size
     private static final int BLOCK_SIZE_128 = 128;  // Standard XMODEM block size
     private static final int MAX_RETRIES = 10;
     private static final int TIMEOUT_MS = 10000;
@@ -46,7 +49,7 @@ public class XModemTransfer {
     }
 
     /**
-     * Send data using XMODEM-1K protocol (1024-byte blocks)
+     * Send data using XMODEM protocol (supports 4096/1024/128-byte blocks)
      */
     public boolean send(byte[] data) throws IOException {
         // Wait for receiver to send 'C' to initiate CRC mode
@@ -65,26 +68,15 @@ public class XModemTransfer {
 
         int dataOffset = 0;
         int blockNumber = 1;
-        int totalBlocks = (data.length + BLOCK_SIZE_1K - 1) / BLOCK_SIZE_1K;
+        int totalBlocks = estimateTotalBlocks(data.length);
 
         while (dataOffset < data.length) {
             int remaining = data.length - dataOffset;
-            
-            // Choose block size: use 1K blocks when possible, 128-byte for small remaining data
-            int blockSize;
-            byte headerByte;
-            if (remaining >= BLOCK_SIZE_1K) {
-                blockSize = BLOCK_SIZE_1K;
-                headerByte = STX;
-            } else if (remaining > BLOCK_SIZE_128) {
-                // Still use 1K block but with padding
-                blockSize = BLOCK_SIZE_1K;
-                headerByte = STX;
-            } else {
-                // Use 128-byte block for small remaining data
-                blockSize = BLOCK_SIZE_128;
-                headerByte = SOH;
-            }
+
+            // Choose block size: prefer 4K, then 1K, fall back to 128-byte for tiny tails
+            BlockFormat format = selectBlockFormat(remaining);
+            int blockSize = format.size();
+            byte headerByte = format.header();
 
             byte[] block = new byte[blockSize];
             int bytesToCopy = Math.min(remaining, blockSize);
@@ -118,7 +110,7 @@ public class XModemTransfer {
     }
 
     /**
-     * Receive data using XMODEM-1K protocol (supports both 1024-byte and 128-byte blocks)
+     * Receive data using XMODEM protocol (supports 4096, 1024 and 128-byte blocks)
      */
     public byte[] receive() throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -173,6 +165,7 @@ public class XModemTransfer {
             // Determine block size based on header
             int blockSize;
             switch (header) {
+                case STX4K -> blockSize = BLOCK_SIZE_4K;
                 case STX -> blockSize = BLOCK_SIZE_1K;
                 case SOH -> blockSize = BLOCK_SIZE_128;
                 default -> {
@@ -428,6 +421,30 @@ public class XModemTransfer {
         return (bytesTransferred * 1000.0) / elapsed;
     }
 
+    private BlockFormat selectBlockFormat(int remainingBytes) {
+        if (remainingBytes >= BLOCK_SIZE_4K) {
+            return new BlockFormat(BLOCK_SIZE_4K, STX4K);
+        }
+        if (remainingBytes >= BLOCK_SIZE_1K) {
+            return new BlockFormat(BLOCK_SIZE_1K, STX);
+        }
+        if (remainingBytes > BLOCK_SIZE_128) {
+            return new BlockFormat(BLOCK_SIZE_1K, STX);
+        }
+        return new BlockFormat(BLOCK_SIZE_128, SOH);
+    }
+
+    private int estimateTotalBlocks(int dataLength) {
+        int remaining = dataLength;
+        int blocks = 0;
+        while (remaining > 0) {
+            BlockFormat format = selectBlockFormat(remaining);
+            blocks++;
+            remaining -= Math.min(remaining, format.size());
+        }
+        return blocks;
+    }
+
     private void reportError(String message) {
         // Remember the last error so higher-level layers can include it
         // in their own exception / log messages.
@@ -436,6 +453,8 @@ public class XModemTransfer {
             progressListener.onError(message);
         }
     }
+
+    private record BlockFormat(int size, byte header) { }
 
     /**
      * Get the last error message reported by this transfer instance.

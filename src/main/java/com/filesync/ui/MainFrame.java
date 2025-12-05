@@ -238,7 +238,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         sharedTextArea.setLineWrap(true);
         sharedTextArea.setWrapStyleWord(true);
         sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        sharedTextSyncTimer = new Timer(3000, e -> pushSharedTextToRemote());
+        sharedTextSyncTimer = new Timer(2000, e -> pushSharedTextToRemote());
         sharedTextSyncTimer.setRepeats(false);
         
         // Log area

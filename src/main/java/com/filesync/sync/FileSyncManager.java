@@ -41,6 +41,7 @@ public class FileSyncManager {
     private boolean strictSyncMode = false;
     private boolean respectGitignoreMode = false;
     private boolean fastMode = false;
+    private volatile String pendingSharedText = null;
 
     public FileSyncManager(SerialPortManager serialPort) {
         this.serialPort = serialPort;
@@ -221,14 +222,31 @@ public class FileSyncManager {
      * Send shared text to remote
      */
     public void sendSharedText(String text) {
+        pendingSharedText = text;  // Keep the latest edit so we can resend after transfers
+        flushPendingSharedTextIfIdle();
+    }
+
+    /**
+     * Best-effort delivery of pending shared text when the link is idle.
+     * Skips sending while a file transfer is running to avoid corrupting XMODEM traffic.
+     */
+    private void flushPendingSharedTextIfIdle() {
+        String textToSend = pendingSharedText;
+        if (textToSend == null) {
+            return;
+        }
         if (!running.get() || !connectionAlive.get()) {
             if (eventListener != null) {
                 eventListener.onError("Cannot send shared text - not connected");
             }
             return;
         }
+        if (syncing.get() || protocol.isXmodemInProgress()) {
+            return; // Defer until after current transfer finishes
+        }
         try {
-            protocol.sendSharedText(text);
+            protocol.sendSharedText(textToSend);
+            pendingSharedText = null;
         } catch (IOException e) {
             if (eventListener != null) {
                 eventListener.onError("Failed to send shared text: " + e.getMessage());
@@ -289,7 +307,7 @@ public class FileSyncManager {
                 // Skip heartbeat operations during XMODEM transfer
                 // to avoid interfering with binary data transfer
                 if (protocol.isXmodemInProgress()) {
-                    Thread.sleep(100);
+                    Thread.sleep(1000);
                     continue;
                 }
 
@@ -702,6 +720,7 @@ public class FileSyncManager {
         syncing.set(false);
         // Reset heartbeat timer to prevent false timeout detection after sync
         lastHeartbeatReceived = System.currentTimeMillis();
+        flushPendingSharedTextIfIdle(); // Push any edits that happened during the sync
         if (eventListener != null) {
             eventListener.onSyncComplete();
         }
