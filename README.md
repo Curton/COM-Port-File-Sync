@@ -24,7 +24,6 @@ COM Port File Sync enables reliable file transfer between two machines connected
 
 ### Additional Features
 - **`.gitignore` Support** - Respects `.gitignore` patterns to exclude files from synchronization
-- **Empty Directory Sync** - Preserves directory structure including empty directories
 - **Shared Text Area** - Real-time text sharing between connected machines (clipboard sync)
 - **Auto-Connect** - Automatically connects to the last used port or single available port on startup
 - **Role Negotiation** - Automatic sender/receiver role assignment on connection
@@ -107,21 +106,26 @@ The Shared Text area allows real-time text sharing between connected machines:
 
 ```
 com.filesync/
-|-- Main.java                    # Application entry point
+|-- Main.java                       # Application entry point and wiring
 |-- config/
-|   |-- SettingsManager.java     # Persists user preferences
+|   |-- SettingsManager.java        # Persists UI and sync preferences
 |-- protocol/
-|   |-- SyncProtocol.java        # High-level sync protocol commands
+|   |-- SyncProtocol.java           # High-level sync protocol commands
 |-- serial/
-|   |-- SerialPortManager.java   # Serial port I/O wrapper
-|   |-- XModemTransfer.java      # XMODEM protocol implementation
+|   |-- SerialPortManager.java      # Serial port discovery and lifecycle
+|   |-- XModemTransfer.java         # XMODEM block transfer with CRC-16
 |-- sync/
-|   |-- CompressionUtil.java     # GZIP compression with smart detection
-|   |-- FileChangeDetector.java  # Manifest generation and comparison
-|   |-- FileSyncManager.java     # Sync orchestration
-|   |-- GitignoreParser.java     # .gitignore pattern matching
+|   |-- FileSyncManager.java        # Orchestrates manifest and transfer pipeline
+|   |-- SyncCoordinator.java        # Maintains sender/receiver state machine
+|   |-- RoleNegotiationService.java # Auto role negotiation handshake
+|   |-- ConnectionService.java      # Heartbeat and reconnect handling
+|   |-- SharedTextService.java      # Shared text channel over protocol
+|   |-- FileChangeDetector.java     # Manifest generation and delta detection
+|   |-- CompressionUtil.java        # GZIP compression with smart detection
+|   |-- GitignoreParser.java        # .gitignore pattern matching
+|   |-- SyncEventBus.java           # Event bus interface (SimpleSyncEventBus impl)
 |-- ui/
-    |-- MainFrame.java           # Swing GUI
+    |-- MainFrame.java              # Swing GUI and user interactions
 ```
 
 ## Protocol Details
@@ -189,10 +193,6 @@ mvn test
 # Build without tests
 mvn clean package -DskipTests
 ```
-
-## License
-
-This project is open source. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
