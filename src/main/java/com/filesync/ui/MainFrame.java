@@ -47,12 +47,16 @@ import javax.swing.event.DocumentListener;
 import com.filesync.config.SettingsManager;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
+import com.filesync.sync.SyncEvent;
+import com.filesync.sync.SyncEventBus;
+import com.filesync.sync.SyncEventListener;
+import com.filesync.sync.SyncEventType;
 
 /**
  * Main application window for COM Port File Sync.
  * Provides UI for COM port selection, folder selection, sync direction, and sync control.
  */
-public class MainFrame extends JFrame implements FileSyncManager.SyncEventListener {
+public class MainFrame extends JFrame {
     
     private static final int WINDOW_WIDTH = 700;
     private static final int WINDOW_HEIGHT = 600;
@@ -80,6 +84,8 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     // Application state
     private SerialPortManager serialPort;
     private FileSyncManager syncManager;
+    private SyncEventBus eventBus;
+    private SyncEventListener eventBusListener;
     private SettingsManager settings;
     private boolean isSender = true;
     private boolean isConnected = false;
@@ -259,7 +265,9 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
                 settings.getParity()
         );
         syncManager = new FileSyncManager(serialPort);
-        syncManager.setEventListener(this);
+        eventBus = syncManager.getEventBus();
+        eventBusListener = this::handleSyncEvent;
+        eventBus.register(eventBusListener);
     }
     
     private void layoutComponents() {
@@ -549,10 +557,6 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         }
     }
     
-    private boolean isConnecting() {
-        return isConnected && !syncManager.isConnectionAlive();
-    }
-    
     private void connect() {
         String selectedPort = (String) portComboBox.getSelectedItem();
         if (selectedPort == null || selectedPort.isEmpty()) {
@@ -828,14 +832,65 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
     }
     
     private void cleanup() {
+        if (eventBus != null && eventBusListener != null) {
+            eventBus.unregister(eventBusListener);
+        }
         syncManager.stopListening();
         serialPort.close();
     }
     
-    // SyncEventListener implementation
+    // Event bus handling
     
-    @Override
-    public void onSyncStarted() {
+    private void handleSyncEvent(SyncEvent event) {
+        if (event == null) {
+            return;
+        }
+        SyncEventType type = event.getType();
+        switch (type) {
+            case SYNC_STARTED:
+                onSyncStarted();
+                break;
+            case SYNC_COMPLETE:
+                onSyncComplete();
+                break;
+            case TRANSFER_COMPLETE:
+                onTransferComplete();
+                break;
+            case FILE_PROGRESS:
+                SyncEvent.FileProgressEvent fileProgress = (SyncEvent.FileProgressEvent) event;
+                onFileProgress(fileProgress.getCurrentFile(), fileProgress.getTotalFiles(), fileProgress.getFileName());
+                break;
+            case TRANSFER_PROGRESS:
+                SyncEvent.TransferProgressEvent transferProgress = (SyncEvent.TransferProgressEvent) event;
+                onTransferProgress(transferProgress.getCurrentBlock(), transferProgress.getTotalBlocks(),
+                        transferProgress.getBytesTransferred(), transferProgress.getSpeedBytesPerSec());
+                break;
+            case DIRECTION_CHANGED:
+                SyncEvent.DirectionEvent directionEvent = (SyncEvent.DirectionEvent) event;
+                onDirectionChanged(directionEvent.isSender());
+                break;
+            case CONNECTION_STATUS:
+                SyncEvent.ConnectionEvent connectionEvent = (SyncEvent.ConnectionEvent) event;
+                onConnectionStatusChanged(connectionEvent.isConnected());
+                break;
+            case LOG:
+                SyncEvent.LogEvent logEvent = (SyncEvent.LogEvent) event;
+                onLog(logEvent.getMessage());
+                break;
+            case ERROR:
+                SyncEvent.ErrorEvent errorEvent = (SyncEvent.ErrorEvent) event;
+                onError(errorEvent.getMessage());
+                break;
+            case SHARED_TEXT_RECEIVED:
+                SyncEvent.SharedTextReceivedEvent sharedTextEvent = (SyncEvent.SharedTextReceivedEvent) event;
+                onSharedTextReceived(sharedTextEvent.getText());
+                break;
+            default:
+                break;
+        }
+    }
+    
+    private void onSyncStarted() {
         SwingUtilities.invokeLater(() -> {
             syncButton.setEnabled(false);
             progressBar.setValue(0);
@@ -843,8 +898,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
     
-    @Override
-    public void onSyncComplete() {
+    private void onSyncComplete() {
         SwingUtilities.invokeLater(() -> {
             progressBar.setValue(100);
             progressBar.setString("Sync complete");
@@ -852,8 +906,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
     
-    @Override
-    public void onFileProgress(int currentFile, int totalFiles, String fileName) {
+    private void onFileProgress(int currentFile, int totalFiles, String fileName) {
         SwingUtilities.invokeLater(() -> {
             int percent = (int) ((double) currentFile / totalFiles * 100);
             progressBar.setValue(percent);
@@ -861,12 +914,12 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
     
-    @Override
-    public void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
+    private void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
         SwingUtilities.invokeLater(() -> {
             String speedStr = formatSpeed(speedBytesPerSec);
             if (totalBlocks > 0) {
                 int percent = (int) ((double) currentBlock / totalBlocks * 100);
+                progressBar.setValue(percent);
                 progressBar.setString("Block " + currentBlock + "/" + totalBlocks + " - " + speedStr);
             } else {
                 progressBar.setString("Block " + currentBlock + " - " + speedStr);
@@ -874,8 +927,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
 
-    @Override
-    public void onTransferComplete() {
+    private void onTransferComplete() {
         SwingUtilities.invokeLater(() -> {
             progressBar.setString("Transfer complete");
             progressBar.setValue(100);
@@ -895,8 +947,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         }
     }
     
-    @Override
-    public void onDirectionChanged(boolean isSender) {
+    private void onDirectionChanged(boolean isSender) {
         SwingUtilities.invokeLater(() -> {
             this.isSender = isSender;
             updateDirectionButton();
@@ -905,8 +956,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
     
-    @Override
-    public void onConnectionStatusChanged(boolean isAlive) {
+    private void onConnectionStatusChanged(boolean isAlive) {
         SwingUtilities.invokeLater(() -> {
             if (isAlive) {
                 statusLabel.setText("Connected");
@@ -919,13 +969,11 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
     
-    @Override
-    public void onLog(String message) {
+    private void onLog(String message) {
         log(message);
     }
     
-    @Override
-    public void onError(String message) {
+    private void onError(String message) {
         SwingUtilities.invokeLater(() -> {
             log("ERROR: " + message);
             progressBar.setString("Error");
@@ -933,8 +981,7 @@ public class MainFrame extends JFrame implements FileSyncManager.SyncEventListen
         });
     }
 
-    @Override
-    public void onSharedTextReceived(String text) {
+    private void onSharedTextReceived(String text) {
         SwingUtilities.invokeLater(() -> {
             suppressSharedTextEvents = true;
             try {
