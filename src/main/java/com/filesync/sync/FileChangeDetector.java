@@ -6,10 +6,12 @@ import com.google.gson.GsonBuilder;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.DosFileAttributes;
 import java.security.MessageDigest;
@@ -18,6 +20,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
@@ -28,12 +36,144 @@ import java.util.stream.Stream;
 public class FileChangeDetector {
     
     /**
-     * Callback interface for manifest generation progress
+     * Callback interface for manifest generation progress.
+     * Default methods allow callers to override only the hooks they need.
      */
     public interface ManifestProgressCallback {
-        void onProgress(int processedFiles, int totalFiles);
+        default void onStart(int totalFiles) { }
         
-        void onFileProcessed(String fileName);
+        default void onProgress(int processedFiles, int totalFiles) { }
+        
+        default void onFileProcessed(String fileName) { }
+        
+        default void onFileProcessed(String fileName, int processedFiles, int totalFiles) {
+            onFileProcessed(fileName);
+        }
+        
+        default void onComplete(FileManifest manifest) { }
+    }
+    
+    /**
+     * Strategy for computing file hashes. Allows tests to inject counters or mocks.
+     */
+    public interface FileHasher {
+        String hash(File file) throws IOException;
+    }
+    
+    /**
+     * Options controlling manifest generation behavior.
+     */
+    public static final class ManifestGenerationOptions {
+        private final boolean respectGitignore;
+        private final boolean useQuickHash;
+        private final ManifestProgressCallback progressCallback;
+        private final int hashThreadPoolSize;
+        private final File persistedManifestFile;
+        private final boolean persistResult;
+        private final FileManifest previousManifest;
+        private final FileHasher hasher;
+        
+        private ManifestGenerationOptions(Builder builder) {
+            this.respectGitignore = builder.respectGitignore;
+            this.useQuickHash = builder.useQuickHash;
+            this.progressCallback = builder.progressCallback;
+            this.hashThreadPoolSize = Math.max(1, builder.hashThreadPoolSize);
+            this.persistedManifestFile = builder.persistedManifestFile;
+            this.persistResult = builder.persistResult;
+            this.previousManifest = builder.previousManifest;
+            this.hasher = builder.hasher != null ? builder.hasher : FileChangeDetector::calculateMD5;
+        }
+        
+        public boolean isRespectGitignore() {
+            return respectGitignore;
+        }
+        
+        public boolean isUseQuickHash() {
+            return useQuickHash;
+        }
+        
+        public ManifestProgressCallback getProgressCallback() {
+            return progressCallback;
+        }
+        
+        public int getHashThreadPoolSize() {
+            return hashThreadPoolSize;
+        }
+        
+        public File getPersistedManifestFile() {
+            return persistedManifestFile;
+        }
+        
+        public boolean isPersistResult() {
+            return persistResult;
+        }
+        
+        public FileManifest getPreviousManifest() {
+            return previousManifest;
+        }
+        
+        public FileHasher getHasher() {
+            return hasher;
+        }
+        
+        public static Builder builder() {
+            return new Builder();
+        }
+        
+        public static final class Builder {
+            private boolean respectGitignore;
+            private boolean useQuickHash;
+            private ManifestProgressCallback progressCallback;
+            private int hashThreadPoolSize = Math.max(2, Runtime.getRuntime().availableProcessors());
+            private File persistedManifestFile;
+            private boolean persistResult = true;
+            private FileManifest previousManifest;
+            private FileHasher hasher;
+            
+            public Builder withRespectGitignore(boolean respectGitignore) {
+                this.respectGitignore = respectGitignore;
+                return this;
+            }
+            
+            public Builder withUseQuickHash(boolean useQuickHash) {
+                this.useQuickHash = useQuickHash;
+                return this;
+            }
+            
+            public Builder withProgressCallback(ManifestProgressCallback progressCallback) {
+                this.progressCallback = progressCallback;
+                return this;
+            }
+            
+            public Builder withHashThreadPoolSize(int hashThreadPoolSize) {
+                this.hashThreadPoolSize = hashThreadPoolSize;
+                return this;
+            }
+            
+            public Builder withPersistedManifestFile(File persistedManifestFile) {
+                this.persistedManifestFile = persistedManifestFile;
+                return this;
+            }
+            
+            public Builder withPersistResult(boolean persistResult) {
+                this.persistResult = persistResult;
+                return this;
+            }
+            
+            public Builder withPreviousManifest(FileManifest previousManifest) {
+                this.previousManifest = previousManifest;
+                return this;
+            }
+            
+            public Builder withHasher(FileHasher hasher) {
+                this.hasher = hasher;
+                return this;
+            }
+            
+            public ManifestGenerationOptions build() {
+                return new ManifestGenerationOptions(this);
+            }
+        }
     }
     
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -75,28 +215,48 @@ public class FileChangeDetector {
      * @param progressCallback callback for progress reporting, can be null
      */
     public static FileManifest generateManifest(File directory, boolean respectGitignore, boolean useQuickHash, ManifestProgressCallback progressCallback) throws IOException {
+        ManifestGenerationOptions options = ManifestGenerationOptions.builder()
+                .withRespectGitignore(respectGitignore)
+                .withUseQuickHash(useQuickHash)
+                .withProgressCallback(progressCallback)
+                .build();
+        return generateManifest(directory, options);
+    }
+    
+    /**
+     * Generate a manifest of all files in a directory with extended options.
+     */
+    public static FileManifest generateManifest(File directory, ManifestGenerationOptions options) throws IOException {
         if (!directory.exists() || !directory.isDirectory()) {
             throw new IOException("Invalid directory: " + directory.getAbsolutePath());
         }
+        ManifestGenerationOptions resolvedOptions = options != null ? options : ManifestGenerationOptions.builder().build();
         
         // Initialize gitignore parser if needed
         GitignoreParser gitignoreParser = null;
-        if (respectGitignore) {
+        if (resolvedOptions.isRespectGitignore()) {
             gitignoreParser = new GitignoreParser(directory);
             gitignoreParser.loadGitignoreFiles();
         }
         final GitignoreParser parser = gitignoreParser;
         
-        Map<String, FileInfo> files = new HashMap<>();
-        java.util.Set<String> directories = new java.util.HashSet<>();
-        java.util.Set<String> emptyDirectories = new java.util.HashSet<>();
-        Map<String, Boolean> dirHasChildren = new HashMap<>();
+        Map<String, FileInfo> files = new ConcurrentHashMap<>();
+        Set<String> directories = ConcurrentHashMap.newKeySet();
+        Set<String> emptyDirectories = ConcurrentHashMap.newKeySet();
+        Map<String, Boolean> dirHasChildren = new ConcurrentHashMap<>();
         dirHasChildren.put("", false);
         Path basePath = directory.toPath();
+        
+        FileManifest cachedManifest = resolvedOptions.getPreviousManifest();
+        if (cachedManifest == null) {
+            cachedManifest = loadPersistedManifest(resolvedOptions.getPersistedManifestFile());
+        }
+        Map<String, FileInfo> cachedFiles = cachedManifest != null ? cachedManifest.getFiles() : java.util.Collections.emptyMap();
         
         // Count total files for progress reporting (only when callback provided)
         AtomicInteger totalFiles = new AtomicInteger(0);
         AtomicInteger processedFiles = new AtomicInteger(0);
+        ManifestProgressCallback progressCallback = resolvedOptions.getProgressCallback();
         
         if (progressCallback != null) {
             try (Stream<Path> countPaths = Files.walk(basePath)) {
@@ -129,7 +289,12 @@ public class FileChangeDetector {
                     }
                 });
             }
+            progressCallback.onStart(totalFiles.get());
         }
+        
+        ExecutorService hashExecutor = resolvedOptions.isUseQuickHash() ? null :
+                Executors.newFixedThreadPool(resolvedOptions.getHashThreadPoolSize());
+        List<Future<?>> hashTasks = new ArrayList<>();
         
         Files.walkFileTree(basePath, new SimpleFileVisitor<Path>() {
             @Override
@@ -177,36 +342,43 @@ public class FileChangeDetector {
                 }
                 
                 File fileObj = file.toFile();
+                long size = fileObj.length();
+                long lastModified = fileObj.lastModified();
+                
+                FileInfo cachedInfo = cachedFiles.get(relativePath);
                 // Rsync-style: in quick mode we only rely on metadata and avoid per-file checksums
-                String hash = null;
-                if (!useQuickHash) {
-                    try {
-                        hash = calculateMD5(fileObj);
-                    } catch (IOException e) {
-                        System.err.println("Failed to calculate MD5 for file: " + fileObj.getAbsolutePath() + " - " + e.getMessage());
-                    }
-                }
-                
-                FileInfo info = new FileInfo(
-                        relativePath,
-                        fileObj.length(),
-                        fileObj.lastModified(),
-                        hash
-                );
-                files.put(relativePath, info);
-                
-                markParentHasChild(relativePath, dirHasChildren);
-                
-                // Report progress
-                if (progressCallback != null) {
-                    int processed = processedFiles.incrementAndGet();
-                    progressCallback.onProgress(processed, totalFiles.get());
-                    progressCallback.onFileProcessed(relativePath);
+                if (resolvedOptions.isUseQuickHash() || canReuseHash(cachedInfo, size, lastModified)) {
+                    String hash = resolvedOptions.isUseQuickHash() ? cachedInfo != null ? cachedInfo.getMd5() : null : cachedInfo.getMd5();
+                    files.put(relativePath, new FileInfo(relativePath, size, lastModified, hash));
+                    markParentHasChild(relativePath, dirHasChildren);
+                    reportProgress(relativePath, processedFiles, totalFiles, progressCallback);
+                } else if (hashExecutor != null) {
+                    Future<?> future = hashExecutor.submit(() -> {
+                        try {
+                            String hash = computeHash(resolvedOptions.getHasher(), fileObj);
+                            files.put(relativePath, new FileInfo(relativePath, size, lastModified, hash));
+                            markParentHasChild(relativePath, dirHasChildren);
+                            reportProgress(relativePath, processedFiles, totalFiles, progressCallback);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+                    hashTasks.add(future);
+                } else {
+                    String hash = computeHash(resolvedOptions.getHasher(), fileObj);
+                    files.put(relativePath, new FileInfo(relativePath, size, lastModified, hash));
+                    markParentHasChild(relativePath, dirHasChildren);
+                    reportProgress(relativePath, processedFiles, totalFiles, progressCallback);
                 }
                 
                 return FileVisitResult.CONTINUE;
             }
         });
+        
+        waitForHashes(hashTasks);
+        if (hashExecutor != null) {
+            hashExecutor.shutdown();
+        }
         
         for (String dir : directories) {
             boolean hasChildren = dirHasChildren.getOrDefault(dir, false);
@@ -215,7 +387,16 @@ public class FileChangeDetector {
             }
         }
         
-        return new FileManifest(files, emptyDirectories);
+        FileManifest manifest = new FileManifest(files, emptyDirectories);
+        if (resolvedOptions.isPersistResult()) {
+            persistManifest(resolvedOptions.getPersistedManifestFile(), manifest);
+        }
+        
+        if (progressCallback != null) {
+            progressCallback.onComplete(manifest);
+        }
+        
+        return manifest;
     }
     
     /**
@@ -370,6 +551,76 @@ public class FileChangeDetector {
         int lastSeparator = relativePath.lastIndexOf('/');
         String parent = lastSeparator == -1 ? "" : relativePath.substring(0, lastSeparator);
         dirHasChildren.put(parent, true);
+    }
+    
+    private static boolean canReuseHash(FileInfo cachedInfo, long size, long lastModified) {
+        return cachedInfo != null &&
+                cachedInfo.getMd5() != null &&
+                cachedInfo.getSize() == size &&
+                cachedInfo.getLastModified() == lastModified;
+    }
+    
+    private static String computeHash(FileHasher hasher, File file) throws IOException {
+        try {
+            return hasher.hash(file);
+        } catch (IOException e) {
+            System.err.println("Failed to calculate hash for file: " + file.getAbsolutePath() + " - " + e.getMessage());
+            throw e;
+        }
+    }
+    
+    private static void reportProgress(String relativePath,
+                                       AtomicInteger processedFiles,
+                                       AtomicInteger totalFiles,
+                                       ManifestProgressCallback progressCallback) {
+        if (progressCallback == null) {
+            return;
+        }
+        int processed = processedFiles.incrementAndGet();
+        progressCallback.onProgress(processed, totalFiles.get());
+        progressCallback.onFileProcessed(relativePath, processed, totalFiles.get());
+    }
+    
+    private static FileManifest loadPersistedManifest(File manifestFile) {
+        if (manifestFile == null || !manifestFile.exists()) {
+            return null;
+        }
+        try {
+            String json = Files.readString(manifestFile.toPath());
+            return manifestFromJson(json);
+        } catch (IOException e) {
+            System.err.println("Failed to load persisted manifest: " + manifestFile.getAbsolutePath() + " - " + e.getMessage());
+            return null;
+        }
+    }
+    
+    private static void persistManifest(File manifestFile, FileManifest manifest) throws IOException {
+        if (manifestFile == null) {
+            return;
+        }
+        Path path = manifestFile.toPath();
+        Path parent = path.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Files.writeString(path, manifestToJson(manifest), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+    
+    private static void waitForHashes(List<Future<?>> hashTasks) throws IOException {
+        for (Future<?> future : hashTasks) {
+            try {
+                future.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Hash computation interrupted", e);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof IOException ioException) {
+                    throw ioException;
+                }
+                throw new IOException("Failed to compute file hash", cause);
+            }
+        }
     }
     
     /**
