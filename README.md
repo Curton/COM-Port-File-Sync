@@ -1,6 +1,6 @@
 # COM Port File Sync
 
-A cross-platform Java application for synchronizing files between two computers over a serial (COM) port connection using the XMODEM protocol.
+A cross-platform Java application for synchronizing files between two computers over a serial (COM) port connection using the XMODEM-like protocol.
 
 ## Overview
 
