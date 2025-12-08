@@ -687,6 +687,7 @@ public class FileSyncManager {
         String relativePath = msg.getParam(0);
         int size = msg.getParamAsInt(1);
         boolean compressed = msg.getParamAsBoolean(2);
+        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
 
         if (eventListener != null) {
             eventListener.onLog("Receiving file: " + relativePath);
@@ -695,7 +696,7 @@ public class FileSyncManager {
         // Send ACK to synchronize with sender
         protocol.sendAck();
 
-        protocol.receiveFile(syncFolder, relativePath, size, compressed);
+        protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
 
         if (eventListener != null) {
             eventListener.onLog("File received: " + relativePath);

@@ -173,6 +173,8 @@ public class SyncProtocol {
      * Send file data.
      * Performs limited retries around the underlying XMODEM transfer so that
      * transient handshake issues do not abort the entire sync.
+     * The sender includes its lastModified timestamp so the receiver can
+     * preserve it and avoid unnecessary re-syncs in fast mode.
      *
      * @return true if file was compressed, false otherwise
      */
@@ -189,6 +191,7 @@ public class SyncProtocol {
         // Smart compression based on content analysis
         CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfBeneficial(file.getName(), data);
         boolean wasCompressed = compressedData.isCompressed();
+        long lastModified = file.lastModified();
 
         // Try to send the file with limited retries in case of handshake issues
         final int maxAttempts = 3;
@@ -197,7 +200,8 @@ public class SyncProtocol {
             sendCommand(CMD_FILE_DATA,
                     relativePath,
                     String.valueOf(compressedData.getData().length),
-                    String.valueOf(wasCompressed));
+                    String.valueOf(wasCompressed),
+                    String.valueOf(lastModified));
 
             try {
                 // Wait for receiver ACK to ensure proper synchronization
@@ -249,7 +253,7 @@ public class SyncProtocol {
     /**
      * Receive file data and save to directory
      */
-    public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed) throws IOException {
+    public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed, long lastModified) throws IOException {
         xmodemInProgress.set(true);
         byte[] data;
         try {
@@ -287,6 +291,11 @@ public class SyncProtocol {
         // Write file
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(data);
+        }
+
+        // Preserve sender timestamp so subsequent manifest comparisons match
+        if (lastModified > 0) {
+            targetFile.setLastModified(lastModified);
         }
     }
 
