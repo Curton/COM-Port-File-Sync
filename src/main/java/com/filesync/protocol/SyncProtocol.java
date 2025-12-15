@@ -127,7 +127,7 @@ public class SyncProtocol {
         sendCommand(CMD_MANIFEST_DATA, String.valueOf(compressed.length));
 
         // Wait for receiver ACK to ensure proper synchronization
-        Message ackMsg = waitForCommand(CMD_ACK);
+        waitForCommand(CMD_ACK);
 
         // Send manifest data via XMODEM
         xmodemInProgress.set(true);
@@ -195,17 +195,18 @@ public class SyncProtocol {
 
         // Try to send the file with limited retries in case of handshake issues
         final int maxAttempts = 3;
+        IOException lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            // Send file header for this attempt
-            sendCommand(CMD_FILE_DATA,
-                    relativePath,
-                    String.valueOf(compressedData.getData().length),
-                    String.valueOf(wasCompressed),
-                    String.valueOf(lastModified));
-
             try {
+                // Send file header for this attempt
+                sendCommand(CMD_FILE_DATA,
+                        relativePath,
+                        String.valueOf(compressedData.getData().length),
+                        String.valueOf(wasCompressed),
+                        String.valueOf(lastModified));
+
                 // Wait for receiver ACK to ensure proper synchronization
-                Message ackMsg = waitForCommand(CMD_ACK);
+                waitForCommand(CMD_ACK);
 
                 // Send file data via XMODEM
                 xmodemInProgress.set(true);
@@ -221,7 +222,7 @@ public class SyncProtocol {
                 }
             } catch (IOException e) {
                 // Failed attempt - continue to cleanup and retry logic below
-                throw e;
+                lastFailure = e;
             }
 
             // Best-effort cleanup between attempts
@@ -246,8 +247,12 @@ public class SyncProtocol {
         if (detail == null || detail.isEmpty()) {
             detail = "unknown XMODEM error";
         }
-        throw new IOException("Failed to send file " + relativePath +
+        IOException finalEx = new IOException("Failed to send file " + relativePath +
                 " after " + maxAttempts + " attempts (" + detail + ")");
+        if (lastFailure != null) {
+            finalEx.addSuppressed(lastFailure);
+        }
+        throw finalEx;
     }
 
     /**

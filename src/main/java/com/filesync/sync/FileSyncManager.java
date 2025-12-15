@@ -246,6 +246,20 @@ public class FileSyncManager {
                     continue;
                 }
 
+                // Important: During an outgoing sync (this side is the sender), the sync thread
+                // synchronously waits for specific protocol messages (e.g. ACK / MANIFEST_DATA)
+                // using SyncProtocol.waitForCommand(), which reads from the same serial stream.
+                // If this listener loop also reads at the same time, it can "steal" those ACKs,
+                // causing the sender to never start XMODEM and the receiver to hit
+                // "no response from sender after 10 handshake attempts".
+                //
+                // To avoid concurrent consumption of the command stream, pause this listener
+                // while we are actively sending a sync.
+                if (syncCoordinator.isSyncing() && roleNegotiationService.isSender()) {
+                    Thread.sleep(50);
+                    continue;
+                }
+
                 if (protocol.hasData()) {
                     SyncProtocol.Message msg = protocol.receiveCommand();
                     if (msg != null) {
