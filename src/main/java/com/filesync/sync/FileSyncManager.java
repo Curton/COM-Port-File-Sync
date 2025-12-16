@@ -283,7 +283,14 @@ public class FileSyncManager {
     private void handleIncomingMessage(SyncProtocol.Message msg) throws IOException {
         switch (msg.getCommand()) {
             case SyncProtocol.CMD_MANIFEST_REQ:
-                syncCoordinator.handleManifestRequest();
+                // Extract sender's settings if provided (for consistent manifest generation)
+                Boolean senderRespectGitignore = null;
+                Boolean senderFastMode = null;
+                if (msg.getParams().length >= 2) {
+                    senderRespectGitignore = msg.getParamAsBoolean(0);
+                    senderFastMode = msg.getParamAsBoolean(1);
+                }
+                syncCoordinator.handleManifestRequest(senderRespectGitignore, senderFastMode);
                 break;
 
             case SyncProtocol.CMD_MANIFEST_DATA:

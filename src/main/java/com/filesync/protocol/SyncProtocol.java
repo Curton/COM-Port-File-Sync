@@ -115,6 +115,17 @@ public class SyncProtocol {
     public void requestManifest() throws IOException {
         sendCommand(CMD_MANIFEST_REQ);
     }
+    
+    /**
+     * Request manifest from remote with specific settings.
+     * This ensures the receiver uses the same manifest generation settings as the sender.
+     * 
+     * @param respectGitignore whether to respect .gitignore
+     * @param fastMode whether to use fast mode (skip MD5 computation)
+     */
+    public void requestManifest(boolean respectGitignore, boolean fastMode) throws IOException {
+        sendCommand(CMD_MANIFEST_REQ, String.valueOf(respectGitignore), String.valueOf(fastMode));
+    }
 
     /**
      * Send manifest data

@@ -35,6 +35,11 @@ import java.util.stream.Stream;
  */
 public class FileChangeDetector {
     
+    // Rsync-style timestamp tolerance (in milliseconds) to handle filesystem precision differences.
+    // NTFS has 100ns precision, FAT32 has 2-second precision, and setLastModified() may not
+    // preserve exact values across different filesystems. 3 seconds covers most cases.
+    private static final long MODIFY_WINDOW_MS = 3000;
+    
     /**
      * Callback interface for manifest generation progress.
      * Default methods allow callers to override only the hooks they need.
@@ -421,10 +426,12 @@ public class FileChangeDetector {
                     sameByChecksum = sourceInfo.getMd5().equals(targetInfo.getMd5());
                 }
                 
-                // Rsync-style quick check based on metadata only
+                // Rsync-style quick check based on metadata with timestamp tolerance.
+                // Uses MODIFY_WINDOW_MS to handle filesystem timestamp precision differences
+                // (similar to rsync's --modify-window option).
                 boolean sameByMetadata =
                         sourceInfo.getSize() == targetInfo.getSize() &&
-                                sourceInfo.getLastModified() == targetInfo.getLastModified();
+                                Math.abs(sourceInfo.getLastModified() - targetInfo.getLastModified()) <= MODIFY_WINDOW_MS;
                 
                 if (!(sameByChecksum || sameByMetadata)) {
                     // File exists but appears different

@@ -1,7 +1,5 @@
 package com.filesync.sync;
 
-import com.filesync.protocol.SyncProtocol;
-
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -11,6 +9,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+
+import com.filesync.protocol.SyncProtocol;
 
 /**
  * Coordinates sync operations, manifest exchange, and file transfers.
@@ -98,17 +98,30 @@ public class SyncCoordinator {
         syncing.set(false);
     }
 
-    public void handleManifestRequest() throws IOException {
+    /**
+     * Handle manifest request from sender.
+     * Uses sender's settings if provided, otherwise falls back to local settings.
+     * This ensures both sides generate manifests with the same options (especially fast mode).
+     * 
+     * @param senderRespectGitignore sender's respect gitignore setting, or null to use local
+     * @param senderFastMode sender's fast mode setting, or null to use local
+     */
+    public void handleManifestRequest(Boolean senderRespectGitignore, Boolean senderFastMode) throws IOException {
         File syncFolder = syncFolderSupplier.get();
         if (syncFolder == null || !syncFolder.exists()) {
             protocol.sendError("Sync folder not configured");
             return;
         }
+        
+        // Use sender's settings if provided, otherwise use local settings
+        boolean respectGitignore = senderRespectGitignore != null ? senderRespectGitignore : respectGitignoreModeSupplier.getAsBoolean();
+        boolean fastMode = senderFastMode != null ? senderFastMode : fastModeSupplier.getAsBoolean();
+        
         eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
         FileChangeDetector.FileManifest manifest = FileChangeDetector.generateManifest(
                 syncFolder,
-                respectGitignoreModeSupplier.getAsBoolean(),
-                fastModeSupplier.getAsBoolean());
+                respectGitignore,
+                fastMode);
         protocol.sendManifest(manifest);
         String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
         if (manifest.getEmptyDirectoryCount() > 0) {
@@ -209,13 +222,17 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.LogEvent("Generating local manifest..."));
 
             File syncFolder = syncFolderSupplier.get();
+            boolean respectGitignore = respectGitignoreModeSupplier.getAsBoolean();
+            boolean fastMode = fastModeSupplier.getAsBoolean();
+            
             FileChangeDetector.FileManifest localManifest = FileChangeDetector.generateManifest(
                     syncFolder,
-                    respectGitignoreModeSupplier.getAsBoolean(),
-                    fastModeSupplier.getAsBoolean());
+                    respectGitignore,
+                    fastMode);
 
             eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
-            protocol.requestManifest();
+            // Send our settings to the receiver so it generates manifest with the same options
+            protocol.requestManifest(respectGitignore, fastMode);
 
             protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
             protocol.sendAck();
