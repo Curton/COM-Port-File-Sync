@@ -365,8 +365,8 @@ public class MainFrame extends JFrame {
         JScrollPane sharedScroll = new JScrollPane(sharedTextArea);
         sharedScroll.setPreferredSize(new Dimension(0, 120));
         sharedPanel.add(sharedScroll, BorderLayout.CENTER);
-        Dimension sharedPreferred = sharedPanel.getPreferredSize();
-        sharedPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, sharedPreferred.height));
+        // Allow the shared text area to expand vertically when the window grows
+        sharedPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
         
         // Log panel
         JPanel logPanel = new JPanel(new BorderLayout());
@@ -385,7 +385,6 @@ public class MainFrame extends JFrame {
         bottomSection.add(sharedPanel);
         bottomSection.add(Box.createVerticalStrut(5));
         bottomSection.add(logPanel);
-        bottomSection.add(Box.createVerticalGlue());
         
         mainPanel.add(topSection, BorderLayout.NORTH);
         mainPanel.add(bottomSection, BorderLayout.CENTER);
