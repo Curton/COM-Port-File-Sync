@@ -56,6 +56,7 @@ public class FileSyncManager {
                 connectionAlive,
                 syncing::get,
                 protocol::isXmodemInProgress,
+                this::onConnectionLost,
                 this::onConnectionRestored);
 
         this.roleNegotiationService = new RoleNegotiationService(
@@ -82,6 +83,7 @@ public class FileSyncManager {
                 this::isFastMode,
                 connectionAlive::get,
                 roleNegotiationService::isSender,
+                roleNegotiationService::isRoleNegotiated,
                 syncing,
                 sharedTextService::onSyncIdle,
                 connectionService::recordMessageActivity);
@@ -155,6 +157,10 @@ public class FileSyncManager {
         return connectionService.isConnectionAlive();
     }
 
+    public boolean isRoleNegotiated() {
+        return roleNegotiationService.isRoleNegotiated();
+    }
+
     /**
      * Start listening for incoming sync requests.
      */
@@ -196,6 +202,7 @@ public class FileSyncManager {
         syncing.set(false);
         connectionService.stop();
         syncCoordinator.cancelOngoingSync();
+        sharedTextService.clearPendingSharedText();
 
         if (listenerFuture != null) {
             listenerFuture.cancel(true);
@@ -275,6 +282,8 @@ public class FileSyncManager {
             } catch (IOException e) {
                 if (running.get()) {
                     eventBus.post(new SyncEvent.ErrorEvent("Communication error: " + e.getMessage()));
+                    connectionService.reportCommunicationFailure(
+                            "Connection lost - communication error: " + e.getMessage());
                 }
             }
         }
@@ -376,9 +385,21 @@ public class FileSyncManager {
     }
 
     private void onConnectionRestored() {
+        resetSyncStateForLinkTransition(false);
+        roleNegotiationService.sendRoleNegotiation();
+    }
+
+    private void onConnectionLost() {
+        resetSyncStateForLinkTransition(true);
+    }
+
+    private void resetSyncStateForLinkTransition(boolean clearBufferedText) {
+        syncCoordinator.cancelOngoingSync();
         syncing.set(false);
         roleNegotiationService.resetForReconnect();
-        roleNegotiationService.sendRoleNegotiation();
+        if (clearBufferedText) {
+            sharedTextService.clearPendingSharedText();
+        }
     }
 }
 

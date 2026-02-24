@@ -817,7 +817,8 @@ public class MainFrame extends JFrame {
     
     private void updateSyncButtonState() {
         boolean canSync = isConnected && syncManager.getSyncFolder() != null && isSender
-                && syncManager.isConnectionAlive();
+                && syncManager.isConnectionAlive()
+                && syncManager.isRoleNegotiated();
         syncButton.setEnabled(canSync && !syncManager.isSyncing());
     }
     

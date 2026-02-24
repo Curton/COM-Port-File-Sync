@@ -30,6 +30,7 @@ public class ConnectionService {
     private final AtomicLong lastHeartbeatSent;
     private final BooleanSupplier syncingSupplier;
     private final BooleanSupplier transferBusySupplier;
+    private final Runnable onConnectionLost;
     private final Runnable onReconnect;
 
     private ScheduledExecutorService executor;
@@ -42,6 +43,7 @@ public class ConnectionService {
                              AtomicBoolean connectionAlive,
                              BooleanSupplier syncingSupplier,
                              BooleanSupplier transferBusySupplier,
+                             Runnable onConnectionLost,
                              Runnable onReconnect) {
         this.serialPort = serialPort;
         this.protocol = protocol;
@@ -52,6 +54,7 @@ public class ConnectionService {
         this.lastHeartbeatSent = new AtomicLong(0);
         this.syncingSupplier = syncingSupplier;
         this.transferBusySupplier = transferBusySupplier;
+        this.onConnectionLost = onConnectionLost;
         this.onReconnect = onReconnect;
     }
 
@@ -114,6 +117,10 @@ public class ConnectionService {
         return connectionAlive.get();
     }
 
+    public void reportCommunicationFailure(String reason) {
+        markLost(reason);
+    }
+
     private void heartbeatTick() {
         if (!running.get()) {
             return;
@@ -160,10 +167,22 @@ public class ConnectionService {
 
     private void markLost(String reason) {
         if (connectionAlive.getAndSet(false)) {
+            runCallback(onConnectionLost);
             eventBus.post(new SyncEvent.ConnectionEvent(false));
             if (reason != null && !reason.isEmpty()) {
                 eventBus.post(new SyncEvent.LogEvent(reason));
             }
+        }
+    }
+
+    private void runCallback(Runnable callback) {
+        if (callback == null) {
+            return;
+        }
+        try {
+            callback.run();
+        } catch (RuntimeException ignored) {
+            // Keep connection state transitions robust even if callback fails.
         }
     }
 

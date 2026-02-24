@@ -52,5 +52,4 @@ echo using JAR: !LATEST!
 java -jar "%TARGET_DIR%\!LATEST!"
 echo.
 echo JAR exited with code: !errorlevel!
-pause
 endlocal

@@ -25,6 +25,7 @@ public class SyncCoordinator {
     private final BooleanSupplier fastModeSupplier;
     private final BooleanSupplier connectionAliveSupplier;
     private final BooleanSupplier isSenderSupplier;
+    private final BooleanSupplier roleNegotiatedSupplier;
     private final AtomicBoolean syncing;
     private final Runnable onSyncIdle;
     private final Runnable heartbeatTouch;
@@ -40,6 +41,7 @@ public class SyncCoordinator {
                            BooleanSupplier fastModeSupplier,
                            BooleanSupplier connectionAliveSupplier,
                            BooleanSupplier isSenderSupplier,
+                           BooleanSupplier roleNegotiatedSupplier,
                            AtomicBoolean syncing,
                            Runnable onSyncIdle,
                            Runnable heartbeatTouch) {
@@ -51,6 +53,7 @@ public class SyncCoordinator {
         this.fastModeSupplier = fastModeSupplier;
         this.connectionAliveSupplier = connectionAliveSupplier;
         this.isSenderSupplier = isSenderSupplier;
+        this.roleNegotiatedSupplier = roleNegotiatedSupplier;
         this.syncing = syncing;
         this.onSyncIdle = onSyncIdle;
         this.heartbeatTouch = heartbeatTouch;
@@ -71,6 +74,10 @@ public class SyncCoordinator {
         }
         if (!connectionAliveSupplier.getAsBoolean()) {
             eventBus.post(new SyncEvent.ErrorEvent("Cannot initiate sync while disconnected"));
+            return;
+        }
+        if (!roleNegotiatedSupplier.getAsBoolean()) {
+            eventBus.post(new SyncEvent.ErrorEvent("Cannot initiate sync until role negotiation completes"));
             return;
         }
         if (syncing.get()) {

@@ -66,5 +66,9 @@ public class SharedTextService {
     public void onSyncIdle() {
         flushIfIdle();
     }
+
+    public void clearPendingSharedText() {
+        pendingSharedText.set(null);
+    }
 }
 
