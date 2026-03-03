@@ -9,7 +9,9 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Toolkit;
+import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
@@ -77,6 +79,8 @@ public class MainFrame extends JFrame {
     private JTextArea sharedTextArea;
     private Timer sharedTextSyncTimer;
     private boolean suppressSharedTextEvents = false;
+    private JButton overwriteFromClipboardButton;
+    private JButton appendFromClipboardButton;
     private JTextArea logTextArea;
     private JLabel statusLabel;
     private JLabel settingsLabel;
@@ -247,6 +251,10 @@ public class MainFrame extends JFrame {
         sharedTextSyncTimer = new Timer(2000, e -> pushSharedTextToRemote());
         sharedTextSyncTimer.setRepeats(false);
         
+        // Clipboard buttons
+        overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
+        appendFromClipboardButton = new JButton("Append from Clipboard");
+        
         // Log area
         logTextArea = new JTextArea();
         logTextArea.setEditable(false);
@@ -365,6 +373,13 @@ public class MainFrame extends JFrame {
         JScrollPane sharedScroll = new JScrollPane(sharedTextArea);
         sharedScroll.setPreferredSize(new Dimension(0, 120));
         sharedPanel.add(sharedScroll, BorderLayout.CENTER);
+        
+        // Clipboard buttons panel
+        JPanel clipboardButtonsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 5));
+        clipboardButtonsPanel.add(overwriteFromClipboardButton);
+        clipboardButtonsPanel.add(appendFromClipboardButton);
+        sharedPanel.add(clipboardButtonsPanel, BorderLayout.SOUTH);
+        
         // Allow the shared text area to expand vertically when the window grows
         sharedPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
         
@@ -469,6 +484,33 @@ public class MainFrame extends JFrame {
                     Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
                     log("Shared text copied to clipboard");
                 }
+            }
+        });
+
+        // Clipboard buttons
+        overwriteFromClipboardButton.addActionListener(e -> {
+            try {
+                String clipboardText = (String) Toolkit.getDefaultToolkit()
+                        .getSystemClipboard().getData(DataFlavor.stringFlavor);
+                sharedTextArea.setText(clipboardText);
+                log("Text overwritten from clipboard");
+            } catch (UnsupportedFlavorException ex) {
+                log("Clipboard does not contain text data");
+            } catch (java.io.IOException ex) {
+                log("Failed to read from clipboard: " + ex.getMessage());
+            }
+        });
+
+        appendFromClipboardButton.addActionListener(e -> {
+            try {
+                String clipboardText = (String) Toolkit.getDefaultToolkit()
+                        .getSystemClipboard().getData(DataFlavor.stringFlavor);
+                sharedTextArea.append(clipboardText);
+                log("Text appended from clipboard");
+            } catch (UnsupportedFlavorException ex) {
+                log("Clipboard does not contain text data");
+            } catch (java.io.IOException ex) {
+                log("Failed to read from clipboard: " + ex.getMessage());
             }
         });
         
@@ -786,6 +828,12 @@ public class MainFrame extends JFrame {
     }
     
     private void toggleDirection() {
+        if (syncManager.isTransferBusy()) {
+            log("Cannot change direction during data transfer");
+            JOptionPane.showMessageDialog(this, "Cannot change direction during data transfer",
+                    "Direction Change Blocked", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
         isSender = !isSender;
         updateDirectionButton();
         syncManager.setIsSender(isSender);
@@ -820,6 +868,7 @@ public class MainFrame extends JFrame {
                 && syncManager.isConnectionAlive()
                 && syncManager.isRoleNegotiated();
         syncButton.setEnabled(canSync && !syncManager.isSyncing());
+        directionButton.setEnabled(!syncManager.isTransferBusy());
     }
     
     private void log(String message) {
@@ -893,6 +942,7 @@ public class MainFrame extends JFrame {
     private void onSyncStarted() {
         SwingUtilities.invokeLater(() -> {
             syncButton.setEnabled(false);
+            directionButton.setEnabled(false);
             progressBar.setValue(0);
             progressBar.setString("Starting sync...");
         });
@@ -916,6 +966,7 @@ public class MainFrame extends JFrame {
     
     private void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
         SwingUtilities.invokeLater(() -> {
+            directionButton.setEnabled(false);
             String speedStr = formatSpeed(speedBytesPerSec);
             if (totalBlocks > 0) {
                 int percent = (int) ((double) currentBlock / totalBlocks * 100);

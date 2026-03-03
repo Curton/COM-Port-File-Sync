@@ -153,6 +153,14 @@ public class FileSyncManager {
         return syncCoordinator.isSyncing();
     }
 
+    /**
+     * Returns true when sync or XMODEM transfer is in progress.
+     * Direction change is not allowed during this time.
+     */
+    public boolean isTransferBusy() {
+        return syncCoordinator.isSyncing() || protocol.isXmodemInProgress();
+    }
+
     public boolean isConnectionAlive() {
         return connectionService.isConnectionAlive();
     }
@@ -315,6 +323,10 @@ public class FileSyncManager {
                 break;
 
             case SyncProtocol.CMD_DIRECTION_CHANGE:
+                if (syncCoordinator.isSyncing() || protocol.isXmodemInProgress()) {
+                    eventBus.post(new SyncEvent.LogEvent("Ignoring direction change during data transfer"));
+                    break;
+                }
                 roleNegotiationService.handleDirectionChange(msg.getParamAsBoolean(0));
                 break;
 
