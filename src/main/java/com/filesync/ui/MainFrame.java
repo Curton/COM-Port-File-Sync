@@ -505,6 +505,10 @@ public class MainFrame extends JFrame {
             try {
                 String clipboardText = (String) Toolkit.getDefaultToolkit()
                         .getSystemClipboard().getData(DataFlavor.stringFlavor);
+                // If text area is not empty, add a new line before appending
+                if (!sharedTextArea.getText().isEmpty()) {
+                    sharedTextArea.append("\n");
+                }
                 sharedTextArea.append(clipboardText);
                 log("Text appended from clipboard");
             } catch (UnsupportedFlavorException ex) {
