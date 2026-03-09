@@ -81,6 +81,7 @@ public class MainFrame extends JFrame {
     private boolean suppressSharedTextEvents = false;
     private JButton overwriteFromClipboardButton;
     private JButton appendFromClipboardButton;
+    private JButton copyFromClipboardButton;
     private JTextArea logTextArea;
     private JLabel statusLabel;
     private JLabel settingsLabel;
@@ -254,6 +255,7 @@ public class MainFrame extends JFrame {
         // Clipboard buttons
         overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
         appendFromClipboardButton = new JButton("Append from Clipboard");
+        copyFromClipboardButton = new JButton("Copy from Clipboard");
         
         // Log area
         logTextArea = new JTextArea();
@@ -378,6 +380,7 @@ public class MainFrame extends JFrame {
         JPanel clipboardButtonsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 5));
         clipboardButtonsPanel.add(overwriteFromClipboardButton);
         clipboardButtonsPanel.add(appendFromClipboardButton);
+        clipboardButtonsPanel.add(copyFromClipboardButton);
         sharedPanel.add(clipboardButtonsPanel, BorderLayout.SOUTH);
         
         // Allow the shared text area to expand vertically when the window grows
@@ -516,6 +519,13 @@ public class MainFrame extends JFrame {
             } catch (java.io.IOException ex) {
                 log("Failed to read from clipboard: " + ex.getMessage());
             }
+        });
+
+        copyFromClipboardButton.addActionListener(e -> {
+            String text = sharedTextArea.getText();
+            StringSelection selection = new StringSelection(text);
+            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+            log("Shared text copied to clipboard");
         });
         
         // Window close handler
