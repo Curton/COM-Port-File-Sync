@@ -38,6 +38,7 @@ public class SyncProtocol {
     public static final String CMD_MKDIR = "MKDIR";
     public static final String CMD_RMDIR = "RMDIR";
     public static final String CMD_SHARED_TEXT = "SHARED_TEXT";
+    public static final String CMD_SHARED_TEXT_DATA = "SHARED_TEXT_DATA";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -45,6 +46,9 @@ public class SyncProtocol {
     private static final String SEPARATOR = ":";
 
     private static final int DEFAULT_TIMEOUT_MS = 30000;
+    private static final int SHARED_TEXT_INLINE_BUDGET_MS = 5000;
+    private static final int MIN_SHARED_TEXT_INLINE_ENCODED_CHARS = 128;
+    private static final String SHARED_TEXT_TRANSFER_NAME = "shared-text.txt";
 
     private final SerialPortManager serialPort;
     private final XModemTransfer xmodem;
@@ -389,8 +393,37 @@ public class SyncProtocol {
      * Send shared text payload (Base64 encoded to protect delimiters)
      */
     public void sendSharedText(String text) throws IOException {
+        if (text == null) {
+            text = "";
+        }
         String encoded = encodeText(text);
-        sendCommand(CMD_SHARED_TEXT, encoded);
+        if (shouldSendSharedTextInline(encoded)) {
+            sendCommand(CMD_SHARED_TEXT, encoded);
+            return;
+        }
+        sendSharedTextData(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Receive shared text payload transferred via XMODEM.
+     */
+    public String receiveSharedTextData(boolean wasCompressed) throws IOException {
+        xmodemInProgress.set(true);
+        try {
+            sendAck();
+            byte[] payload = xmodem.receive();
+            if (payload == null) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to receive shared text (" + detail + ")");
+            }
+            byte[] decoded = CompressionUtil.decompressIfNeeded(payload, wasCompressed);
+            return new String(decoded, StandardCharsets.UTF_8);
+        } finally {
+            xmodemInProgress.set(false);
+        }
     }
 
     /**
@@ -410,6 +443,38 @@ public class SyncProtocol {
         }
         byte[] data = text.getBytes(StandardCharsets.UTF_8);
         return BASE64_ENCODER.encodeToString(data);
+    }
+
+    private void sendSharedTextData(byte[] textBytes) throws IOException {
+        CompressionUtil.CompressedData payload =
+                CompressionUtil.compressIfBeneficial(SHARED_TEXT_TRANSFER_NAME, textBytes);
+        xmodemInProgress.set(true);
+        try {
+            sendCommand(CMD_SHARED_TEXT_DATA, String.valueOf(payload.isCompressed()));
+            waitForCommand(CMD_ACK);
+            boolean success = xmodem.send(payload.getData());
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to send shared text (" + detail + ")");
+            }
+        } finally {
+            xmodemInProgress.set(false);
+        }
+    }
+
+    private boolean shouldSendSharedTextInline(String encodedPayload) {
+        return encodedPayload.length() <= getSharedTextInlineEncodedLimit();
+    }
+
+    private int getSharedTextInlineEncodedLimit() {
+        long bytesPerSecond = Math.max(serialPort.getBaudRate() / 10L, 1L);
+        long budgetBytes = (bytesPerSecond * SHARED_TEXT_INLINE_BUDGET_MS) / 1000L;
+        long framingBytes = START_MARKER.length() + CMD_SHARED_TEXT.length() + END_MARKER.length() + 2L;
+        long limit = budgetBytes - framingBytes;
+        return (int) Math.max(limit, MIN_SHARED_TEXT_INLINE_ENCODED_CHARS);
     }
 
     /**

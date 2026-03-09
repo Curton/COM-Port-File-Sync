@@ -91,12 +91,20 @@ public class FileSyncManager {
         protocol.setProgressListener(new XModemTransfer.TransferProgressListener() {
             @Override
             public void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
-                eventBus.post(new SyncEvent.TransferProgressEvent(currentBlock, totalBlocks, bytesTransferred, speedBytesPerSec));
+                if (syncCoordinator.isSyncing()) {
+                    eventBus.post(new SyncEvent.TransferProgressEvent(
+                            currentBlock,
+                            totalBlocks,
+                            bytesTransferred,
+                            speedBytesPerSec));
+                }
             }
 
             @Override
             public void onError(String message) {
-                eventBus.post(new SyncEvent.ErrorEvent(message));
+                if (syncCoordinator.isSyncing()) {
+                    eventBus.post(new SyncEvent.ErrorEvent(message));
+                }
             }
         });
     }
@@ -364,6 +372,10 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_SHARED_TEXT:
                 sharedTextService.handleIncomingSharedText(msg.getParam(0));
+                break;
+
+            case SyncProtocol.CMD_SHARED_TEXT_DATA:
+                sharedTextService.handleIncomingSharedTextData(msg.getParamAsBoolean(0));
                 break;
 
             default:

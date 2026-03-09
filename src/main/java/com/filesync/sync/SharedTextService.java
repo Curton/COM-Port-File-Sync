@@ -39,28 +39,46 @@ public class SharedTextService {
     }
 
     public void flushIfIdle() {
-        String textToSend = pendingSharedText.get();
-        if (textToSend == null) {
-            return;
-        }
-        if (!runningSupplier.getAsBoolean() || !connectionAliveSupplier.getAsBoolean()) {
-            eventBus.post(new SyncEvent.ErrorEvent("Cannot send shared text - not connected"));
-            return;
-        }
-        if (syncingSupplier.getAsBoolean() || transferBusySupplier.getAsBoolean()) {
-            return;
-        }
-        try {
-            protocol.sendSharedText(textToSend);
-            pendingSharedText.compareAndSet(textToSend, null);
-        } catch (IOException e) {
-            eventBus.post(new SyncEvent.ErrorEvent("Failed to send shared text: " + e.getMessage()));
+        while (true) {
+            String textToSend = pendingSharedText.get();
+            if (textToSend == null) {
+                return;
+            }
+            if (!runningSupplier.getAsBoolean() || !connectionAliveSupplier.getAsBoolean()) {
+                eventBus.post(new SyncEvent.ErrorEvent("Cannot send shared text - not connected"));
+                return;
+            }
+            if (syncingSupplier.getAsBoolean() || transferBusySupplier.getAsBoolean()) {
+                return;
+            }
+            try {
+                protocol.sendSharedText(textToSend);
+                if (pendingSharedText.compareAndSet(textToSend, null)) {
+                    return;
+                }
+            } catch (IOException e) {
+                eventBus.post(new SyncEvent.ErrorEvent("Failed to send shared text: " + e.getMessage()));
+                return;
+            }
         }
     }
 
     public void handleIncomingSharedText(String encodedPayload) {
-        String text = protocol.decodeSharedText(encodedPayload);
-        eventBus.post(new SyncEvent.SharedTextReceivedEvent(text));
+        try {
+            String text = protocol.decodeSharedText(encodedPayload);
+            eventBus.post(new SyncEvent.SharedTextReceivedEvent(text));
+        } catch (IllegalArgumentException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Failed to decode shared text: " + e.getMessage()));
+        }
+    }
+
+    public void handleIncomingSharedTextData(boolean wasCompressed) {
+        try {
+            String text = protocol.receiveSharedTextData(wasCompressed);
+            eventBus.post(new SyncEvent.SharedTextReceivedEvent(text));
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));
+        }
     }
 
     public void onSyncIdle() {
