@@ -255,7 +255,7 @@ public class MainFrame extends JFrame {
         // Clipboard buttons
         overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
         appendFromClipboardButton = new JButton("Append from Clipboard");
-        copyFromClipboardButton = new JButton("Copy from Clipboard");
+        copyFromClipboardButton = new JButton("Copy to Clipboard");
         
         // Log area
         logTextArea = new JTextArea();
