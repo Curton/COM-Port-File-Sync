@@ -50,6 +50,15 @@ public class RoleNegotiationService {
         return roleNegotiated.get();
     }
 
+    public synchronized boolean confirmCurrentRoleIfNeeded(boolean sender) {
+        if (roleNegotiated.get()) {
+            return false;
+        }
+        isSender.set(sender);
+        roleNegotiated.set(true);
+        return true;
+    }
+
     public void resetForReconnect() {
         roleNegotiated.set(false);
         refreshPriority();
@@ -92,6 +101,7 @@ public class RoleNegotiationService {
 
     public void handleDirectionChange(boolean remoteSender) {
         isSender.set(!remoteSender);
+        roleNegotiated.set(true);
         eventBus.post(new SyncEvent.DirectionEvent(isSender.get()));
     }
 

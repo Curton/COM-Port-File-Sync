@@ -162,6 +162,32 @@ class ReconnectRecoveryTest {
         }
     }
 
+    @Test
+    void directionChangeMarksRoleNegotiated() {
+        AtomicBoolean isSender = new AtomicBoolean(true);
+        AtomicBoolean roleNegotiated = new AtomicBoolean(false);
+        List<Boolean> directionStates = new ArrayList<>();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.DirectionEvent directionEvent) {
+                directionStates.add(directionEvent.isSender());
+            }
+        });
+
+        RoleNegotiationService service = new RoleNegotiationService(
+                new NoOpSyncProtocol(),
+                eventBus,
+                isSender,
+                roleNegotiated,
+                () -> true);
+
+        service.handleDirectionChange(true);
+
+        assertFalse(service.isSender(), "Remote sender announcement should switch this side to receiver");
+        assertTrue(service.isRoleNegotiated(), "Direction changes should finalize the local role");
+        assertEquals(List.of(false), directionStates, "Direction change event should reflect the new local role");
+    }
+
     private static void waitUntil(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {

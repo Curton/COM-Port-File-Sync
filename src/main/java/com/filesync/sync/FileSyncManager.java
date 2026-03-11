@@ -186,6 +186,10 @@ public class FileSyncManager {
         return roleNegotiationService.isRoleNegotiated();
     }
 
+    public boolean confirmCurrentRoleIfNeeded(boolean isSender) {
+        return roleNegotiationService.confirmCurrentRoleIfNeeded(isSender);
+    }
+
     /**
      * Start listening for incoming sync requests.
      */
@@ -253,6 +257,29 @@ public class FileSyncManager {
      */
     public void initiateSync() {
         syncCoordinator.startSync();
+    }
+
+    public SyncPreviewPlan previewSync() {
+        if (!isSender()) {
+            throw new IllegalStateException("Cannot initiate sync preview as receiver. Change direction first.");
+        }
+        if (!connectionAlive.get()) {
+            throw new IllegalStateException("Cannot preview sync while disconnected");
+        }
+        if (!roleNegotiated.get()) {
+            throw new IllegalStateException("Cannot preview sync until role negotiation completes");
+        }
+        if (syncing.get()) {
+            throw new IllegalStateException("Sync already in progress");
+        }
+        if (getSyncFolder() == null || !getSyncFolder().exists()) {
+            throw new IllegalStateException("Please select a sync folder first");
+        }
+        try {
+            return syncCoordinator.createSyncPreviewPlan();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to build sync preview: " + e.getMessage(), e);
+        }
     }
 
     /**

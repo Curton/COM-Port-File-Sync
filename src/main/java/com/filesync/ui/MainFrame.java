@@ -29,19 +29,20 @@ import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
-import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
-import javax.swing.TransferHandler;
+import javax.swing.SwingWorker;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.TransferHandler;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import javax.swing.event.DocumentEvent;
@@ -50,6 +51,7 @@ import javax.swing.event.DocumentListener;
 import com.filesync.config.SettingsManager;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
+import com.filesync.sync.SyncPreviewPlan;
 import com.filesync.sync.SyncEvent;
 import com.filesync.sync.SyncEventBus;
 import com.filesync.sync.SyncEventListener;
@@ -73,6 +75,7 @@ public class MainFrame extends JFrame {
     private JButton browseFolderButton;
     private JButton directionButton;
     private JButton syncButton;
+    private JButton previewSyncButton;
     private JCheckBox respectGitignoreCheckBox;
     private JCheckBox strictSyncCheckBox;
     private JCheckBox fastModeCheckBox;
@@ -97,6 +100,7 @@ public class MainFrame extends JFrame {
     private SettingsManager settings;
     private boolean isSender = true;
     private boolean isConnected = false;
+    private boolean isPreviewInProgress = false;
     
     public MainFrame() {
         initSettings();
@@ -283,22 +287,32 @@ public class MainFrame extends JFrame {
         // Direction button
         directionButton = new JButton("A -> B (Sender)");
         directionButton.setFont(directionButton.getFont().deriveFont(Font.BOLD));
+        directionButton.setMargin(new Insets(2, 8, 2, 8));
         
         // Sync button
         syncButton = new JButton("Start Sync");
         syncButton.setEnabled(false);
+        syncButton.setMargin(new Insets(2, 8, 2, 8));
+
+        // Preview button
+        previewSyncButton = new JButton("Sync Preview");
+        previewSyncButton.setEnabled(false);
+        previewSyncButton.setMargin(new Insets(2, 8, 2, 8));
         
         // Respect .gitignore checkbox
-        respectGitignoreCheckBox = new JCheckBox("Respect .gitignore");
+        respectGitignoreCheckBox = new JCheckBox(".gitignore");
         respectGitignoreCheckBox.setToolTipText("When enabled, files matching .gitignore patterns will be excluded from sync");
+        respectGitignoreCheckBox.setMargin(new Insets(2, 4, 2, 4));
         
         // Strict sync checkbox
-        strictSyncCheckBox = new JCheckBox("Strict Sync");
+        strictSyncCheckBox = new JCheckBox("Mirror Mode");
         strictSyncCheckBox.setToolTipText("When enabled, files that exist on the remote but not locally will be deleted");
+        strictSyncCheckBox.setMargin(new Insets(2, 4, 2, 4));
         
         // Fast mode checkbox
         fastModeCheckBox = new JCheckBox("Fast Mode");
         fastModeCheckBox.setToolTipText("When enabled, uses quick hashing for faster manifest generation (may miss some changes)");
+        fastModeCheckBox.setMargin(new Insets(2, 4, 2, 4));
         
         // Progress bar
         progressBar = new JProgressBar(0, 100);
@@ -405,10 +419,11 @@ public class MainFrame extends JFrame {
         folderPanel.add(browseFolderButton, gbc);
         
         // Control panel
-        JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 20, 10));
+        JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
         controlPanel.setBorder(new TitledBorder("Sync Control"));
         controlPanel.add(directionButton);
         controlPanel.add(syncButton);
+        controlPanel.add(previewSyncButton);
         controlPanel.add(respectGitignoreCheckBox);
         controlPanel.add(strictSyncCheckBox);
         controlPanel.add(fastModeCheckBox);
@@ -500,6 +515,9 @@ public class MainFrame extends JFrame {
         
         // Sync button
         syncButton.addActionListener(e -> startSync());
+
+        // Preview button
+        previewSyncButton.addActionListener(e -> previewSync());
         
         // Respect .gitignore checkbox
         respectGitignoreCheckBox.addActionListener(e -> {
@@ -1034,22 +1052,189 @@ public class MainFrame extends JFrame {
     }
     
     private void startSync() {
-        if (!isSender) {
+        if (!ensureSenderRoleReady()) {
             log("Waiting for sync from sender...");
             return;
         }
-        
-        syncButton.setEnabled(false);
-        progressBar.setValue(0);
+
         syncManager.initiateSync();
+    }
+
+    private void previewSync() {
+        if (!ensureSenderRoleReady()) {
+            log("Waiting for sync from sender...");
+            return;
+        }
+
+        runSyncPreview();
+    }
+
+    private boolean ensureSenderRoleReady() {
+        if (!isSender) {
+            return false;
+        }
+        if (syncManager.confirmCurrentRoleIfNeeded(isSender)) {
+            log("Role negotiation pending; using selected sender mode");
+        }
+        return true;
+    }
+
+    private void runSyncPreview() {
+        if (isPreviewInProgress) {
+            return;
+        }
+
+        isPreviewInProgress = true;
+        updateSyncButtonState();
+
+        SwingWorker<SyncPreviewPlan, Void> previewWorker = new SwingWorker<SyncPreviewPlan, Void>() {
+            @Override
+            protected SyncPreviewPlan doInBackground() {
+                return syncManager.previewSync();
+            }
+
+            @Override
+            protected void done() {
+                isPreviewInProgress = false;
+                updateSyncButtonState();
+
+                try {
+                    SyncPreviewPlan syncPreview = get();
+                    if (syncPreview == null) {
+                        showNoChangesPreview("Sync preview could not be computed.");
+                        return;
+                    }
+
+                    if (syncPreview.getTotalOperations() == 0) {
+                        showSyncPreviewDialog(syncPreview, false);
+                        return;
+                    }
+
+                    if (!showSyncPreviewDialog(syncPreview, true)) {
+                        return;
+                    }
+
+                    syncButton.setEnabled(false);
+                    previewSyncButton.setEnabled(false);
+                    progressBar.setValue(0);
+                    syncManager.initiateSync();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    String message = "Sync preview was interrupted";
+                    JOptionPane.showMessageDialog(
+                            MainFrame.this,
+                            "Could not prepare sync preview.\n" + message,
+                            "Sync Preview Failed",
+                            JOptionPane.ERROR_MESSAGE);
+                    log("Sync preview failed: " + message);
+                } catch (java.util.concurrent.ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    String message = cause != null ? cause.getMessage() : e.getMessage();
+                    if (message == null || message.isEmpty()) {
+                        message = "Failed to generate sync preview";
+                    }
+                    JOptionPane.showMessageDialog(
+                            MainFrame.this,
+                            "Could not prepare sync preview.\n" + message,
+                            "Sync Preview Failed",
+                            JOptionPane.ERROR_MESSAGE);
+                    log("Sync preview failed: " + message);
+                }
+            }
+        };
+        previewWorker.execute();
+    }
+
+    private void showNoChangesPreview(String message) {
+        JOptionPane.showMessageDialog(
+                this,
+                message,
+                "Sync Preview",
+                JOptionPane.INFORMATION_MESSAGE);
     }
     
     private void updateSyncButtonState() {
         boolean canSync = isConnected && syncManager.getSyncFolder() != null && isSender
-                && syncManager.isConnectionAlive()
-                && syncManager.isRoleNegotiated();
-        syncButton.setEnabled(canSync && !syncManager.isSyncing());
-        directionButton.setEnabled(!syncManager.isTransferBusy());
+                && syncManager.isConnectionAlive();
+        boolean canOperate = canSync && !syncManager.isSyncing() && !isPreviewInProgress;
+        syncButton.setEnabled(canOperate);
+        previewSyncButton.setEnabled(canOperate);
+        directionButton.setEnabled(!syncManager.isTransferBusy() && !isPreviewInProgress);
+    }
+
+    private boolean showSyncPreviewDialog(SyncPreviewPlan syncPreview, boolean requireConfirmation) {
+        StringBuilder previewText = new StringBuilder();
+        previewText.append("Sync Preview\n\n");
+
+        previewText.append("Total size to transfer: ")
+                .append(formatBytes(syncPreview.getTotalBytesToTransfer()))
+                .append("\n\n");
+
+        previewText.append("Files to transfer (")
+                .append(syncPreview.getFilesToTransfer().size())
+                .append("):\n");
+        for (com.filesync.sync.FileChangeDetector.FileInfo fileInfo : syncPreview.getFilesToTransfer()) {
+            previewText.append("  ")
+                    .append(fileInfo.getPath())
+                    .append(" (")
+                    .append(formatBytes(fileInfo.getSize()))
+                    .append(")")
+                    .append("\n");
+        }
+        if (syncPreview.getFilesToTransfer().isEmpty()) {
+            previewText.append("  (none)\n");
+        }
+
+        previewText.append("\nFiles to delete (Strict Mode, ")
+                .append(syncPreview.getFilesToDelete().size())
+                .append("):\n");
+        for (String path : syncPreview.getFilesToDelete()) {
+            previewText.append("  ").append(path).append("\n");
+        }
+        if (!syncPreview.isStrictSyncMode()) {
+            previewText.append("  (strict mode disabled; no remote-only files will be deleted)\n");
+        } else if (syncPreview.getFilesToDelete().isEmpty()) {
+            previewText.append("  (none)\n");
+        }
+
+        JTextArea previewArea = new JTextArea(previewText.toString(), 24, 100);
+        previewArea.setEditable(false);
+        previewArea.setLineWrap(true);
+        previewArea.setWrapStyleWord(true);
+        previewArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        JScrollPane previewScroll = new JScrollPane(previewArea);
+        previewScroll.setPreferredSize(new Dimension(700, 500));
+
+        if (!requireConfirmation) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    previewScroll,
+                    "Sync Preview",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return false;
+        }
+
+        int response = JOptionPane.showOptionDialog(
+                this,
+                previewScroll,
+                "Confirm Sync",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                new Object[] {"Start Sync", "Cancel"},
+                "Start Sync");
+        return response == 0;
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        } else if (bytes < 1024 * 1024) {
+            return String.format("%.1f KB", bytes / 1024.0);
+        } else if (bytes < 1024 * 1024 * 1024L) {
+            return String.format("%.2f MB", bytes / (1024.0 * 1024.0));
+        }
+        return String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
     
     private void log(String message) {
@@ -1127,6 +1312,7 @@ public class MainFrame extends JFrame {
     private void onSyncStarted() {
         SwingUtilities.invokeLater(() -> {
             syncButton.setEnabled(false);
+            previewSyncButton.setEnabled(false);
             directionButton.setEnabled(false);
             progressBar.setValue(0);
             progressBar.setString("Starting sync...");

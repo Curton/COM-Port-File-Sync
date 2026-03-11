@@ -3,6 +3,7 @@ package com.filesync.sync;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -95,6 +96,68 @@ public class SyncCoordinator {
         } else {
             performSync();
         }
+    }
+
+    public SyncPreviewPlan createSyncPreviewPlan() throws IOException {
+        eventBus.post(new SyncEvent.LogEvent("Generating local manifest..."));
+
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null || !syncFolder.exists()) {
+            throw new IOException("Please select a sync folder first");
+        }
+
+        boolean respectGitignore = respectGitignoreModeSupplier.getAsBoolean();
+        boolean fastMode = fastModeSupplier.getAsBoolean();
+
+        FileChangeDetector.FileManifest localManifest = FileChangeDetector.generateManifest(
+                syncFolder,
+                respectGitignore,
+                fastMode);
+
+        eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
+        // Send our settings to the receiver so it generates manifest with the same options
+        protocol.requestManifest(respectGitignore, fastMode);
+
+        protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
+        protocol.sendAck();
+        FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest();
+
+        String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
+        if (remoteManifest.getEmptyDirectoryCount() > 0) {
+            logMsg += ", " + remoteManifest.getEmptyDirectoryCount() + " empty dirs";
+        }
+        logMsg += ")";
+        eventBus.post(new SyncEvent.LogEvent(logMsg));
+
+        List<FileChangeDetector.FileInfo> filesToSync =
+                FileChangeDetector.getChangedFiles(localManifest, remoteManifest);
+        filesToSync.sort(Comparator.comparing(FileChangeDetector.FileInfo::getPath));
+
+        List<String> emptyDirsToCreate =
+                FileChangeDetector.getEmptyDirectoriesToCreate(localManifest, remoteManifest);
+        emptyDirsToCreate.sort(Comparator.naturalOrder());
+
+        boolean strictMode = strictSyncModeSupplier.getAsBoolean();
+        List<String> filesToDelete = strictMode
+                ? FileChangeDetector.getFilesToDelete(localManifest, remoteManifest)
+                : new ArrayList<>();
+        filesToDelete.sort(Comparator.naturalOrder());
+
+        List<String> emptyDirsToDelete = strictMode
+                ? FileChangeDetector.getEmptyDirectoriesToDelete(localManifest, remoteManifest)
+                : new ArrayList<>();
+
+        long totalBytesToTransfer = filesToSync.stream()
+                .mapToLong(FileChangeDetector.FileInfo::getSize)
+                .sum();
+
+        return new SyncPreviewPlan(
+                filesToSync,
+                emptyDirsToCreate,
+                filesToDelete,
+                emptyDirsToDelete,
+                totalBytesToTransfer,
+                strictMode);
     }
 
     public void cancelOngoingSync() {
@@ -226,46 +289,8 @@ public class SyncCoordinator {
     private void performSync() {
         try {
             eventBus.post(new SyncEvent.SyncStartedEvent());
-            eventBus.post(new SyncEvent.LogEvent("Generating local manifest..."));
-
-            File syncFolder = syncFolderSupplier.get();
-            boolean respectGitignore = respectGitignoreModeSupplier.getAsBoolean();
-            boolean fastMode = fastModeSupplier.getAsBoolean();
-            
-            FileChangeDetector.FileManifest localManifest = FileChangeDetector.generateManifest(
-                    syncFolder,
-                    respectGitignore,
-                    fastMode);
-
-            eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
-            // Send our settings to the receiver so it generates manifest with the same options
-            protocol.requestManifest(respectGitignore, fastMode);
-
-            protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
-            protocol.sendAck();
-            FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest();
-
-            String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
-            if (remoteManifest.getEmptyDirectoryCount() > 0) {
-                logMsg += ", " + remoteManifest.getEmptyDirectoryCount() + " empty dirs";
-            }
-            logMsg += ")";
-            eventBus.post(new SyncEvent.LogEvent(logMsg));
-
-            List<FileChangeDetector.FileInfo> filesToSync =
-                    FileChangeDetector.getChangedFiles(localManifest, remoteManifest);
-            List<String> emptyDirsToCreate =
-                    FileChangeDetector.getEmptyDirectoriesToCreate(localManifest, remoteManifest);
-
-            List<String> filesToDelete = strictSyncModeSupplier.getAsBoolean()
-                    ? FileChangeDetector.getFilesToDelete(localManifest, remoteManifest)
-                    : new ArrayList<>();
-            List<String> emptyDirsToDelete = strictSyncModeSupplier.getAsBoolean()
-                    ? FileChangeDetector.getEmptyDirectoriesToDelete(localManifest, remoteManifest)
-                    : new ArrayList<>();
-
-            int totalOperations = filesToSync.size() + emptyDirsToCreate.size()
-                    + filesToDelete.size() + emptyDirsToDelete.size();
+            SyncPreviewPlan syncPlan = createSyncPreviewPlan();
+            int totalOperations = syncPlan.getTotalOperations();
 
             if (totalOperations == 0) {
                 eventBus.post(new SyncEvent.LogEvent("No files need to be synced or deleted"));
@@ -275,10 +300,11 @@ public class SyncCoordinator {
                 return;
             }
 
-            logSyncSummary(filesToSync, emptyDirsToCreate, filesToDelete, emptyDirsToDelete);
+            logSyncSummary(syncPlan);
 
             int operationIndex = 0;
-            for (FileChangeDetector.FileInfo fileInfo : filesToSync) {
+            File syncFolder = syncFolderSupplier.get();
+            for (FileChangeDetector.FileInfo fileInfo : syncPlan.getFilesToTransfer()) {
                 operationIndex++;
                 boolean wasCompressed = protocol.sendFile(syncFolder, fileInfo.getPath());
                 String message = "Syncing [" + operationIndex + "/" + totalOperations + "]: "
@@ -290,21 +316,21 @@ public class SyncCoordinator {
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, fileInfo.getPath()));
             }
 
-            for (String dirPath : emptyDirsToCreate) {
+            for (String dirPath : syncPlan.getEmptyDirectoriesToCreate()) {
                 operationIndex++;
                 eventBus.post(new SyncEvent.LogEvent("Creating dir [" + operationIndex + "/" + totalOperations + "]: " + dirPath));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[DIR] " + dirPath));
                 protocol.sendMkdir(dirPath);
             }
 
-            for (String pathToDelete : filesToDelete) {
+            for (String pathToDelete : syncPlan.getFilesToDelete()) {
                 operationIndex++;
                 eventBus.post(new SyncEvent.LogEvent("Deleting [" + operationIndex + "/" + totalOperations + "]: " + pathToDelete));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[DEL] " + pathToDelete));
                 protocol.sendFileDelete(pathToDelete);
             }
 
-            for (String dirToDelete : emptyDirsToDelete) {
+            for (String dirToDelete : syncPlan.getEmptyDirectoriesToDelete()) {
                 operationIndex++;
                 eventBus.post(new SyncEvent.LogEvent("Deleting dir [" + operationIndex + "/" + totalOperations + "]: " + dirToDelete));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[RMDIR] " + dirToDelete));
@@ -324,19 +350,16 @@ public class SyncCoordinator {
         }
     }
 
-    private void logSyncSummary(List<FileChangeDetector.FileInfo> filesToSync,
-                                List<String> emptyDirsToCreate,
-                                List<String> filesToDelete,
-                                List<String> emptyDirsToDelete) {
+    private void logSyncSummary(SyncPreviewPlan syncPlan) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Files to sync: ").append(filesToSync.size());
-        if (!emptyDirsToCreate.isEmpty()) {
-            sb.append(", Empty dirs to create: ").append(emptyDirsToCreate.size());
+        sb.append("Files to sync: ").append(syncPlan.getFilesToTransfer().size());
+        if (!syncPlan.getEmptyDirectoriesToCreate().isEmpty()) {
+            sb.append(", Empty dirs to create: ").append(syncPlan.getEmptyDirectoriesToCreate().size());
         }
-        if (strictSyncModeSupplier.getAsBoolean()) {
-            sb.append(", Files to delete: ").append(filesToDelete.size());
-            if (!emptyDirsToDelete.isEmpty()) {
-                sb.append(", Empty dirs to delete: ").append(emptyDirsToDelete.size());
+        if (syncPlan.isStrictSyncMode()) {
+            sb.append(", Files to delete: ").append(syncPlan.getFilesToDelete().size());
+            if (!syncPlan.getEmptyDirectoriesToDelete().isEmpty()) {
+                sb.append(", Empty dirs to delete: ").append(syncPlan.getEmptyDirectoriesToDelete().size());
             }
         }
         eventBus.post(new SyncEvent.LogEvent(sb.toString()));
