@@ -1199,8 +1199,7 @@ public class MainFrame extends JFrame {
 
         JTextArea previewArea = new JTextArea(previewText.toString(), 24, 100);
         previewArea.setEditable(false);
-        previewArea.setLineWrap(true);
-        previewArea.setWrapStyleWord(true);
+        previewArea.setLineWrap(false);
         previewArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         JScrollPane previewScroll = new JScrollPane(previewArea);
         previewScroll.setPreferredSize(new Dimension(700, 500));
@@ -1219,7 +1218,7 @@ public class MainFrame extends JFrame {
                 previewScroll,
                 "Confirm Sync",
                 JOptionPane.OK_CANCEL_OPTION,
-                JOptionPane.QUESTION_MESSAGE,
+                JOptionPane.PLAIN_MESSAGE,
                 null,
                 new Object[] {"Start Sync", "Cancel"},
                 "Start Sync");
