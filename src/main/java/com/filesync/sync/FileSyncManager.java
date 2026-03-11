@@ -39,6 +39,7 @@ public class FileSyncManager {
     private final RoleNegotiationService roleNegotiationService;
     private final SharedTextService sharedTextService;
     private final SyncCoordinator syncCoordinator;
+    private final FileDropService fileDropService;
 
     private ScheduledExecutorService executor;
     private Future<?> listenerFuture;
@@ -74,6 +75,14 @@ public class FileSyncManager {
                 syncing::get,
                 protocol::isXmodemInProgress);
 
+        this.fileDropService = new FileDropService(
+                protocol,
+                eventBus,
+                running::get,
+                connectionAlive::get,
+                syncing::get,
+                protocol::isXmodemInProgress);
+
         this.syncCoordinator = new SyncCoordinator(
                 protocol,
                 eventBus,
@@ -91,7 +100,7 @@ public class FileSyncManager {
         protocol.setProgressListener(new XModemTransfer.TransferProgressListener() {
             @Override
             public void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
-                if (syncCoordinator.isSyncing()) {
+                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress()) {
                     eventBus.post(new SyncEvent.TransferProgressEvent(
                             currentBlock,
                             totalBlocks,
@@ -102,7 +111,7 @@ public class FileSyncManager {
 
             @Override
             public void onError(String message) {
-                if (syncCoordinator.isSyncing()) {
+                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress()) {
                     eventBus.post(new SyncEvent.ErrorEvent(message));
                 }
             }
@@ -233,6 +242,10 @@ public class FileSyncManager {
      */
     public void sendSharedText(String text) {
         sharedTextService.queueSharedText(text);
+    }
+
+    public void sendDropFile(File file) {
+        fileDropService.sendDropFile(file);
     }
 
     /**
@@ -376,6 +389,10 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_SHARED_TEXT_DATA:
                 sharedTextService.handleIncomingSharedTextData(msg.getParamAsBoolean(0));
+                break;
+
+            case SyncProtocol.CMD_DROP_FILE:
+                fileDropService.handleIncomingDropFile(msg);
                 break;
 
             default:

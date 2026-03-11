@@ -39,6 +39,7 @@ public class SyncProtocol {
     public static final String CMD_RMDIR = "RMDIR";
     public static final String CMD_SHARED_TEXT = "SHARED_TEXT";
     public static final String CMD_SHARED_TEXT_DATA = "SHARED_TEXT_DATA";
+    public static final String CMD_DROP_FILE = "DROP_FILE";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -271,6 +272,41 @@ public class SyncProtocol {
     }
 
     /**
+     * Send a single dropped file to the peer.
+     */
+    public void sendDropFile(File file) throws IOException {
+        if (file == null) {
+            throw new IOException("Cannot send a null file");
+        }
+        if (!file.exists() || !file.isFile()) {
+            throw new IOException("Drop file not found or not a file: " + file.getAbsolutePath());
+        }
+
+        String fileName = sanitizeDropFileName(file.getName());
+        byte[] data = readFileContent(file);
+        CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfBeneficial(fileName, data);
+        sendCommand(CMD_DROP_FILE,
+                fileName,
+                String.valueOf(compressedData.getData().length),
+                String.valueOf(compressedData.isCompressed()));
+        waitForCommand(CMD_ACK);
+
+        xmodemInProgress.set(true);
+        try {
+            boolean success = xmodem.send(compressedData.getData());
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to send dropped file " + fileName + " (" + detail + ")");
+            }
+        } finally {
+            xmodemInProgress.set(false);
+        }
+    }
+
+    /**
      * Receive file data and save to directory
      */
     public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed, long lastModified) throws IOException {
@@ -317,6 +353,48 @@ public class SyncProtocol {
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);
         }
+    }
+
+    /**
+     * Receive a dropped file and save it to the Downloads directory.
+     */
+    public File receiveDropFile(File downloadsDir, String originalFileName, boolean compressed) throws IOException {
+        if (downloadsDir == null) {
+            throw new IOException("Downloads folder is not configured");
+        }
+        if (!downloadsDir.exists() && !downloadsDir.mkdirs()) {
+            throw new IOException("Failed to create Downloads directory: " + downloadsDir.getAbsolutePath());
+        }
+        if (!downloadsDir.isDirectory()) {
+            throw new IOException("Downloads path is not a directory: " + downloadsDir.getAbsolutePath());
+        }
+
+        String fileName = sanitizeDropFileName(originalFileName);
+        File targetFile = resolveDropFileDestination(downloadsDir, fileName);
+        xmodemInProgress.set(true);
+        byte[] data;
+        try {
+            data = xmodem.receive();
+        } finally {
+            xmodemInProgress.set(false);
+        }
+        if (data == null) {
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException("Failed to receive dropped file " + fileName + " (" + detail + ")");
+        }
+
+        if (compressed) {
+            data = CompressionUtil.decompress(data);
+        }
+
+        try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+            fos.write(data);
+        }
+
+        return targetFile;
     }
 
     /**
@@ -588,6 +666,42 @@ public class SyncProtocol {
         @Override
         public String toString() {
             return "Message{command='" + command + "', params=" + String.join(", ", params) + "}";
+        }
+    }
+
+    private String sanitizeDropFileName(String fileName) {
+        if (fileName == null || fileName.trim().isEmpty()) {
+            return "file";
+        }
+        String name = new File(fileName).getName().trim();
+        name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        name = name.replaceAll("\\s+", " ");
+        return name.isBlank() ? "file" : name;
+    }
+
+    private File resolveDropFileDestination(File downloadsDir, String requestedFileName) {
+        String fileName = requestedFileName == null || requestedFileName.trim().isEmpty()
+                ? "file" : requestedFileName.trim();
+        File target = new File(downloadsDir, fileName);
+        if (!target.exists()) {
+            return target;
+        }
+
+        String base = fileName;
+        String extension = "";
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex > 0) {
+            base = fileName.substring(0, dotIndex);
+            extension = fileName.substring(dotIndex);
+        }
+
+        int index = 1;
+        while (true) {
+            File candidate = new File(downloadsDir, base + " (" + index + ")" + extension);
+            if (!candidate.exists()) {
+                return candidate;
+            }
+            index++;
         }
     }
 }

@@ -2,6 +2,8 @@ package com.filesync.config;
 
 import com.fazecast.jSerialComm.SerialPort;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.prefs.Preferences;
 
 /**
@@ -16,9 +18,13 @@ public class SettingsManager {
     private static final String PREF_PARITY = "parity";
     private static final String PREF_LAST_PORT = "lastPort";
     private static final String PREF_LAST_FOLDER = "lastFolder";
+    private static final String PREF_FOLDER_HISTORY_SIZE = "folderHistorySize";
+    private static final String PREF_FOLDER_HISTORY_PREFIX = "folderHistory.";
     private static final String PREF_STRICT_SYNC = "strictSync";
     private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
     private static final String PREF_FAST_MODE = "fastMode";
+
+    public static final int MAX_RECENT_FOLDERS = 10;
     
     // Default values
     public static final int DEFAULT_BAUD_RATE = 115200;
@@ -61,6 +67,7 @@ public class SettingsManager {
     private int parity;
     private String lastPort;
     private String lastFolder;
+    private List<String> recentFolders;
     private boolean strictSync;
     private boolean respectGitignore;
     private boolean fastMode;
@@ -80,6 +87,7 @@ public class SettingsManager {
         parity = prefs.getInt(PREF_PARITY, DEFAULT_PARITY);
         lastPort = prefs.get(PREF_LAST_PORT, "");
         lastFolder = prefs.get(PREF_LAST_FOLDER, "");
+        loadRecentFolders();
         strictSync = prefs.getBoolean(PREF_STRICT_SYNC, false);
         respectGitignore = prefs.getBoolean(PREF_RESPECT_GITIGNORE, false);
         fastMode = prefs.getBoolean(PREF_FAST_MODE, true);
@@ -95,6 +103,7 @@ public class SettingsManager {
         prefs.putInt(PREF_PARITY, parity);
         prefs.put(PREF_LAST_PORT, lastPort != null ? lastPort : "");
         prefs.put(PREF_LAST_FOLDER, lastFolder != null ? lastFolder : "");
+        saveRecentFolders();
         prefs.putBoolean(PREF_STRICT_SYNC, strictSync);
         prefs.putBoolean(PREF_RESPECT_GITIGNORE, respectGitignore);
         prefs.putBoolean(PREF_FAST_MODE, fastMode);
@@ -148,6 +157,24 @@ public class SettingsManager {
     
     public void setLastFolder(String lastFolder) {
         this.lastFolder = lastFolder;
+    }
+
+    public List<String> getRecentFolders() {
+        return new ArrayList<>(recentFolders);
+    }
+
+    public void addRecentFolder(String folderPath) {
+        if (folderPath == null || folderPath.trim().isEmpty()) {
+            return;
+        }
+
+        recentFolders.remove(folderPath);
+        recentFolders.add(0, folderPath);
+        while (recentFolders.size() > MAX_RECENT_FOLDERS) {
+            recentFolders.remove(recentFolders.size() - 1);
+        }
+        setLastFolder(folderPath);
+        save();
     }
     
     public boolean isStrictSync() {
@@ -220,5 +247,51 @@ public class SettingsManager {
             }
         }
         return 3; // Default to 8 bits index
+    }
+
+    private void loadRecentFolders() {
+        recentFolders = new ArrayList<>();
+        int size = Math.min(MAX_RECENT_FOLDERS, Math.max(0, prefs.getInt(PREF_FOLDER_HISTORY_SIZE, 0)));
+        for (int i = 0; i < size; i++) {
+            String folderPath = prefs.get(PREF_FOLDER_HISTORY_PREFIX + i, "");
+            if (folderPath != null && !folderPath.trim().isEmpty()) {
+                recentFolders.add(folderPath.trim());
+            }
+        }
+
+        if (recentFolders.isEmpty() && lastFolder != null && !lastFolder.trim().isEmpty()) {
+            recentFolders.add(lastFolder.trim());
+        }
+
+        dedupeAndCapRecentFolders();
+    }
+
+    private void saveRecentFolders() {
+        dedupeAndCapRecentFolders();
+        prefs.putInt(PREF_FOLDER_HISTORY_SIZE, recentFolders.size());
+        for (int i = 0; i < recentFolders.size(); i++) {
+            prefs.put(PREF_FOLDER_HISTORY_PREFIX + i, recentFolders.get(i));
+        }
+        for (int i = recentFolders.size(); i < MAX_RECENT_FOLDERS; i++) {
+            prefs.remove(PREF_FOLDER_HISTORY_PREFIX + i);
+        }
+    }
+
+    private void dedupeAndCapRecentFolders() {
+        List<String> unique = new ArrayList<>();
+        for (String folderPath : recentFolders) {
+            if (folderPath == null || folderPath.trim().isEmpty()) {
+                continue;
+            }
+
+            String normalized = folderPath.trim();
+            unique.remove(normalized);
+            unique.add(normalized);
+        }
+
+        while (unique.size() > MAX_RECENT_FOLDERS) {
+            unique.remove(unique.size() - 1);
+        }
+        recentFolders = unique;
     }
 }

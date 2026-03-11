@@ -34,11 +34,12 @@ import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
-import javax.swing.JTextField;
+import javax.swing.TransferHandler;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
@@ -68,7 +69,7 @@ public class MainFrame extends JFrame {
     private JButton refreshPortsButton;
     private JButton settingsButton;
     private JButton connectButton;
-    private JTextField folderTextField;
+    private JComboBox<String> folderComboBox;
     private JButton browseFolderButton;
     private JButton directionButton;
     private JButton syncButton;
@@ -85,6 +86,8 @@ public class MainFrame extends JFrame {
     private JTextArea logTextArea;
     private JLabel statusLabel;
     private JLabel settingsLabel;
+    private boolean suppressFolderSelectionEvents = false;
+    private String progressBarTextBeforeDrop;
     
     // Application state
     private SerialPortManager serialPort;
@@ -101,6 +104,7 @@ public class MainFrame extends JFrame {
         initSerialPort();
         layoutComponents();
         setupEventHandlers();
+        setupDragAndDrop();
         refreshPorts();
         loadSavedState();
         attemptAutoConnectOnStartup();
@@ -145,15 +149,12 @@ public class MainFrame extends JFrame {
             }
         }
         
-        // Restore last folder
-        String lastFolder = settings.getLastFolder();
-        if (lastFolder != null && !lastFolder.isEmpty()) {
-            File folder = new File(lastFolder);
-            if (folder.exists() && folder.isDirectory()) {
-                folderTextField.setText(lastFolder);
-                syncManager.setSyncFolder(folder);
-                updateSyncButtonState();
-            }
+        // Restore folder history and selected folder
+        loadFolderHistory();
+        if (folderComboBox.getItemCount() > 0) {
+            applyFolderSelection((String) folderComboBox.getItemAt(0), false);
+        } else {
+            applyFolderSelection(settings.getLastFolder(), false);
         }
         
         // Restore strict sync mode setting
@@ -176,6 +177,65 @@ public class MainFrame extends JFrame {
         
         // Update settings label
         updateSettingsLabel();
+    }
+
+    private void loadFolderHistory() {
+        folderComboBox.removeAllItems();
+        for (String folderPath : settings.getRecentFolders()) {
+            if (folderPath == null || folderPath.isEmpty()) {
+                continue;
+            }
+
+            File folder = new File(folderPath);
+            if (folder.exists() && folder.isDirectory()) {
+                folderComboBox.addItem(folderPath);
+            }
+        }
+
+        while (folderComboBox.getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
+            folderComboBox.removeItemAt(folderComboBox.getItemCount() - 1);
+        }
+    }
+
+    private void applyFolderSelection(String folderPath, boolean rememberFolder) {
+        if (folderPath == null || folderPath.isBlank()) {
+            return;
+        }
+
+        String normalizedFolderPath = folderPath.strip();
+        File folder = new File(normalizedFolderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            folderComboBox.removeItem(normalizedFolderPath);
+            syncManager.setSyncFolder(null);
+            updateSyncButtonState();
+            return;
+        }
+
+        syncManager.setSyncFolder(folder);
+        updateSyncButtonState();
+
+        if (rememberFolder) {
+            try {
+                suppressFolderSelectionEvents = true;
+                folderComboBox.removeItem(normalizedFolderPath);
+                folderComboBox.insertItemAt(normalizedFolderPath, 0);
+                while (folderComboBox.getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
+                    folderComboBox.removeItemAt(folderComboBox.getItemCount() - 1);
+                }
+                folderComboBox.setSelectedItem(normalizedFolderPath);
+            } finally {
+                suppressFolderSelectionEvents = false;
+            }
+            settings.addRecentFolder(normalizedFolderPath);
+        } else if (folderComboBox.getItemCount() == 0) {
+            try {
+                suppressFolderSelectionEvents = true;
+                folderComboBox.addItem(normalizedFolderPath);
+                folderComboBox.setSelectedItem(normalizedFolderPath);
+            } finally {
+                suppressFolderSelectionEvents = false;
+            }
+        }
     }
     
     /**
@@ -216,8 +276,8 @@ public class MainFrame extends JFrame {
         settingsLabel.setForeground(Color.GRAY);
         
         // Folder selection components
-        folderTextField = new JTextField();
-        folderTextField.setEditable(false);
+        folderComboBox = new JComboBox<>();
+        folderComboBox.setEditable(false);
         browseFolderButton = new JButton("Browse...");
         
         // Direction button
@@ -337,7 +397,7 @@ public class MainFrame extends JFrame {
         gbc.gridx = 1;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.weightx = 1.0;
-        folderPanel.add(folderTextField, gbc);
+        folderPanel.add(folderComboBox, gbc);
         
         gbc.gridx = 2;
         gbc.fill = GridBagConstraints.NONE;
@@ -422,6 +482,18 @@ public class MainFrame extends JFrame {
         
         // Browse folder button
         browseFolderButton.addActionListener(e -> browseFolder());
+
+        // Folder dropdown selection
+        folderComboBox.addActionListener(e -> {
+            if (suppressFolderSelectionEvents) {
+                return;
+            }
+            String selectedFolder = (String) folderComboBox.getSelectedItem();
+            if (selectedFolder != null && !selectedFolder.isBlank()) {
+                applyFolderSelection(selectedFolder, true);
+                log("Selected folder: " + selectedFolder);
+            }
+        });
         
         // Direction button
         directionButton.addActionListener(e -> toggleDirection());
@@ -533,6 +605,91 @@ public class MainFrame extends JFrame {
             @Override
             public void windowClosing(WindowEvent e) {
                 cleanup();
+            }
+        });
+    }
+
+    private void setupDragAndDrop() {
+        ((JComponent) getContentPane()).setTransferHandler(new TransferHandler() {
+            @Override
+            public boolean canImport(TransferSupport support) {
+                boolean canImport = support.isDataFlavorSupported(DataFlavor.javaFileListFlavor);
+                setDropHint(canImport);
+                return canImport;
+            }
+
+            @SuppressWarnings("unchecked")
+            @Override
+            public boolean importData(TransferSupport support) {
+                clearDropHint();
+                if (!canImport(support)) {
+                    log("Please drop one file to send.");
+                    return false;
+                }
+
+                try {
+                    List<File> droppedFiles = (List<File>) support.getTransferable()
+                            .getTransferData(DataFlavor.javaFileListFlavor);
+                    return handleDroppedFiles(droppedFiles);
+                } catch (UnsupportedFlavorException ex) {
+                    log("Cannot handle dropped item: unsupported data flavor");
+                    return false;
+                } catch (java.io.IOException ex) {
+                    log("Failed to process dropped item: " + ex.getMessage());
+                    return false;
+                }
+            }
+        });
+    }
+
+    private boolean handleDroppedFiles(List<File> droppedFiles) {
+        if (droppedFiles == null || droppedFiles.isEmpty()) {
+            log("No dropped files found");
+            return false;
+        }
+        if (droppedFiles.size() != 1) {
+            log("Only one file is supported for drag-and-drop");
+            return false;
+        }
+
+        File droppedFile = droppedFiles.get(0);
+        if (droppedFile == null || !droppedFile.isFile()) {
+            log("Only files can be dropped (folders are not supported)");
+            return false;
+        }
+
+        if (!isConnected || !syncManager.isConnectionAlive()) {
+            log("Cannot send dropped file: not connected");
+            return false;
+        }
+        if (syncManager.isTransferBusy()) {
+            log("Cannot send dropped file while a transfer is in progress");
+            return false;
+        }
+
+        new Thread(() -> syncManager.sendDropFile(droppedFile), "DroppedFileSender").start();
+        log("Sending dropped file: " + droppedFile.getAbsolutePath());
+        return true;
+    }
+
+    private void setDropHint(boolean active) {
+        SwingUtilities.invokeLater(() -> {
+            if (active) {
+                if (progressBarTextBeforeDrop == null) {
+                    progressBarTextBeforeDrop = progressBar.getString();
+                }
+                progressBar.setString("Drop a file to send to remote");
+            } else {
+                clearDropHint();
+            }
+        });
+    }
+
+    private void clearDropHint() {
+        SwingUtilities.invokeLater(() -> {
+            if (progressBarTextBeforeDrop != null) {
+                progressBar.setString(progressBarTextBeforeDrop);
+                progressBarTextBeforeDrop = null;
             }
         });
     }
@@ -706,19 +863,29 @@ public class MainFrame extends JFrame {
                 fileChooser.setCurrentDirectory(lastDir);
             }
         }
+
+        File currentFolder = getCurrentFolderFromSelection();
+        if (currentFolder != null && currentFolder.exists()) {
+            fileChooser.setCurrentDirectory(currentFolder);
+        }
         
         if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             File selectedFolder = fileChooser.getSelectedFile();
-            folderTextField.setText(selectedFolder.getAbsolutePath());
-            syncManager.setSyncFolder(selectedFolder);
-            updateSyncButtonState();
-            
-            // Save the selected folder
-            settings.setLastFolder(selectedFolder.getAbsolutePath());
-            settings.save();
-            
+            applyFolderSelection(selectedFolder.getAbsolutePath(), true);
             log("Selected folder: " + selectedFolder.getAbsolutePath());
         }
+    }
+
+    private File getCurrentFolderFromSelection() {
+        String selectedFolder = (String) folderComboBox.getSelectedItem();
+        if (selectedFolder != null && !selectedFolder.isBlank()) {
+            File selectedFolderFile = new File(selectedFolder);
+            if (selectedFolderFile.exists() && selectedFolderFile.isDirectory()) {
+                return selectedFolderFile;
+            }
+        }
+
+        return null;
     }
     
     private void showSettingsDialog() {
@@ -948,6 +1115,10 @@ public class MainFrame extends JFrame {
                 SyncEvent.SharedTextReceivedEvent sharedTextEvent = (SyncEvent.SharedTextReceivedEvent) event;
                 onSharedTextReceived(sharedTextEvent.getText());
                 break;
+            case DROP_FILE_RECEIVED:
+                SyncEvent.DropFileReceivedEvent dropFileEvent = (SyncEvent.DropFileReceivedEvent) event;
+                onDropFileReceived(dropFileEvent.getFileName(), dropFileEvent.getFilePath());
+                break;
             default:
                 break;
         }
@@ -1056,6 +1227,10 @@ public class MainFrame extends JFrame {
                 suppressSharedTextEvents = false;
             }
         });
+    }
+
+    private void onDropFileReceived(String fileName, String filePath) {
+        SwingUtilities.invokeLater(() -> log("Received dropped file: " + fileName + " -> " + filePath));
     }
 
     /**

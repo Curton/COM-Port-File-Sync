@@ -13,6 +13,7 @@ public enum SyncEventType {
     TRANSFER_PROGRESS,
     LOG,
     ERROR,
-    SHARED_TEXT_RECEIVED
+    SHARED_TEXT_RECEIVED,
+    DROP_FILE_RECEIVED
 }
 

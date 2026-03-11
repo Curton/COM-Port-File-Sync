@@ -54,14 +54,14 @@ mvn clean package
 
 **Windows:**
 ```batch
-java -jar target/com-file-sync-1.3.0.jar
+java -jar target/com-file-sync-1.4.4.jar
 ```
 
 Or use the included `run.bat` script which automatically finds the latest JAR in the target directory.
 
 **Linux/macOS:**
 ```bash
-java -jar target/com-file-sync-1.3.0.jar
+java -jar target/com-file-sync-1.4.4.jar
 ```
 
 ## Usage
@@ -72,8 +72,10 @@ java -jar target/com-file-sync-1.3.0.jar
 2. **Launch the application** on both machines
 3. **Select the COM port** from the dropdown on each machine
 4. **Click "Connect"** on both sides - they will auto-negotiate roles
-5. **Select sync folders** on both machines using the "Browse..." button
+5. **Select sync folders** on both machines using the folder dropdown for quick-recent picks or the "Browse..." button
 6. **Click "Start Sync"** on the sender side
+
+The folder dropdown keeps up to the 10 most recently used valid folders for quick switching.
 
 ### Connection Settings
 

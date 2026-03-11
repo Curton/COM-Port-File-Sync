@@ -176,5 +176,28 @@ public interface SyncEvent {
             return SyncEventType.SHARED_TEXT_RECEIVED;
         }
     }
+
+    final class DropFileReceivedEvent implements SyncEvent {
+        private final String fileName;
+        private final String filePath;
+
+        public DropFileReceivedEvent(String fileName, String filePath) {
+            this.fileName = fileName;
+            this.filePath = filePath;
+        }
+
+        public String getFileName() {
+            return fileName;
+        }
+
+        public String getFilePath() {
+            return filePath;
+        }
+
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.DROP_FILE_RECEIVED;
+        }
+    }
 }
 
