@@ -54,14 +54,14 @@ mvn clean package
 
 **Windows:**
 ```batch
-java -jar target/com-file-sync-1.4.4.jar
+java -jar target/com-file-sync-*.jar
 ```
 
 Or use the included `run.bat` script which automatically finds the latest JAR in the target directory.
 
 **Linux/macOS:**
 ```bash
-java -jar target/com-file-sync-1.4.4.jar
+java -jar target/com-file-sync-*.jar
 ```
 
 ## Usage
@@ -160,7 +160,7 @@ com.filesync/
 |------------|---------|---------|
 | [jSerialComm](https://fazecast.github.io/jSerialComm/) | 2.11.4 | Cross-platform serial port communication |
 | [Gson](https://github.com/google/gson) | 2.13.2 | JSON serialization for file manifests |
-| [JUnit 5](https://junit.org/junit5/) | 5.11.0 | Unit testing |
+| [JUnit 5 (Jupiter)](https://junit.org/junit5/) | 5.11.0 | Unit testing |
 
 ## Troubleshooting
 
