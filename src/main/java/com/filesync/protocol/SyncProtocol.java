@@ -332,6 +332,9 @@ public class SyncProtocol {
             throw new IOException("Failed to receive file data for " + relativePath + " (" + detail + ")");
         }
 
+        // Verify sender-reported size before any transformation or disk write
+        validateReceivedSize("file", relativePath, expectedSize, data);
+
         // Decompress if needed
         if (compressed) {
             data = CompressionUtil.decompress(data);
@@ -358,7 +361,7 @@ public class SyncProtocol {
     /**
      * Receive a dropped file and save it to the Downloads directory.
      */
-    public File receiveDropFile(File downloadsDir, String originalFileName, boolean compressed) throws IOException {
+    public File receiveDropFile(File downloadsDir, String originalFileName, int expectedSize, boolean compressed) throws IOException {
         if (downloadsDir == null) {
             throw new IOException("Downloads folder is not configured");
         }
@@ -385,6 +388,9 @@ public class SyncProtocol {
             }
             throw new IOException("Failed to receive dropped file " + fileName + " (" + detail + ")");
         }
+
+        // Verify sender-reported size before any transformation or disk write
+        validateReceivedSize("dropped file", fileName, expectedSize, data);
 
         if (compressed) {
             data = CompressionUtil.decompress(data);
@@ -545,6 +551,16 @@ public class SyncProtocol {
 
     private boolean shouldSendSharedTextInline(String encodedPayload) {
         return encodedPayload.length() <= getSharedTextInlineEncodedLimit();
+    }
+
+    private void validateReceivedSize(String transferType, String targetName, int expectedSize, byte[] actualData) throws IOException {
+        if (expectedSize < 0 || actualData == null) {
+            return;
+        }
+        if (actualData.length != expectedSize) {
+            throw new IOException("Size mismatch while receiving " + transferType + " '" + targetName
+                    + "': expected " + expectedSize + " bytes, received " + actualData.length + " bytes");
+        }
     }
 
     private int getSharedTextInlineEncodedLimit() {

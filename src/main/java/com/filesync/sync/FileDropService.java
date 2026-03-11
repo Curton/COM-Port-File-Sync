@@ -85,6 +85,22 @@ public class FileDropService {
         }
 
         String fileName = msg.getParam(0);
+        int expectedSize = -1;
+        if (msg.getParams().length > 1) {
+            String expectedSizeParam = msg.getParam(1);
+            if (expectedSizeParam != null && !expectedSizeParam.isBlank()) {
+                try {
+                    expectedSize = Integer.parseInt(expectedSizeParam);
+                } catch (NumberFormatException e) {
+                    eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer failed: invalid size header '" + expectedSizeParam + "'"));
+                    return;
+                }
+            }
+            if (expectedSizeParam != null && !expectedSizeParam.isBlank() && expectedSize < 0) {
+                eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer failed: negative size header " + expectedSizeParam));
+                return;
+            }
+        }
         boolean compressed = msg.getParamAsBoolean(2);
         if (fileName == null || fileName.trim().isEmpty()) {
             eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer failed: missing file name"));
@@ -104,7 +120,7 @@ public class FileDropService {
 
         try {
             protocol.sendAck();
-            File savedFile = protocol.receiveDropFile(downloadsDir, fileName, compressed);
+            File savedFile = protocol.receiveDropFile(downloadsDir, fileName, expectedSize, compressed);
             eventBus.post(new SyncEvent.DropFileReceivedEvent(savedFile.getName(), savedFile.getAbsolutePath()));
             eventBus.post(new SyncEvent.LogEvent("Dropped file received: " + savedFile.getAbsolutePath()));
         } catch (IOException e) {
