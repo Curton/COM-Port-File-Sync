@@ -39,6 +39,7 @@ import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.text.BadLocationException;
 import javax.swing.SwingWorker;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -65,6 +66,7 @@ public class MainFrame extends JFrame {
     
     private static final int WINDOW_WIDTH = 700;
     private static final int WINDOW_HEIGHT = 600;
+    private static final int MAX_LOG_LINES = 10_000;
     
     // UI Components
     private JComboBox<String> portComboBox;
@@ -1236,11 +1238,27 @@ public class MainFrame extends JFrame {
         return String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
     
+    private void trimLogLinesIfNeeded() {
+        try {
+            int lineCount = logTextArea.getLineCount();
+            if (lineCount <= MAX_LOG_LINES) {
+                return;
+            }
+
+            int linesToTrim = lineCount - MAX_LOG_LINES;
+            int endOffset = logTextArea.getLineEndOffset(linesToTrim - 1);
+            logTextArea.getDocument().remove(0, endOffset);
+        } catch (BadLocationException ex) {
+            // Ignore trimming failure and keep all log lines.
+        }
+    }
+    
     private void log(String message) {
         SwingUtilities.invokeLater(() -> {
             SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
             String timestamp = sdf.format(new Date());
             logTextArea.append("[" + timestamp + "] " + message + "\n");
+            trimLogLinesIfNeeded();
             logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
         });
     }
