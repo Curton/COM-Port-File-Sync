@@ -118,9 +118,12 @@ public class SyncCoordinator {
         // Send our settings to the receiver so it generates manifest with the same options
         protocol.requestManifest(respectGitignore, fastMode);
 
-        protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
+        SyncProtocol.Message manifestMessage = protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
         protocol.sendAck();
-        FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest();
+        int expectedManifestSize = manifestMessage != null && manifestMessage.getParams().length > 0
+                ? manifestMessage.getParamAsInt(0)
+                : -1;
+        FileChangeDetector.FileManifest remoteManifest = protocol.receiveManifest(expectedManifestSize);
 
         String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
         if (remoteManifest.getEmptyDirectoryCount() > 0) {

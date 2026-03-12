@@ -113,6 +113,16 @@ public class XModemTransfer {
      * Receive data using XMODEM protocol (supports 4096, 1024 and 128-byte blocks)
      */
     public byte[] receive() throws IOException {
+        return receive(-1);
+    }
+
+    /**
+     * Receive data using XMODEM protocol.
+     *
+     * @param expectedDataLength expected compressed payload length in bytes, or -1 if unknown
+     * @return received bytes with padding removed
+     */
+    public byte[] receive(int expectedDataLength) throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
 
         // Initiate transfer by sending 'C' for CRC mode
@@ -144,6 +154,7 @@ public class XModemTransfer {
         // Initialize transfer tracking
         transferStartTime = System.currentTimeMillis();
         totalBytesTransferred = 0;
+        int expectedTotalBlocks = expectedDataLength > 0 ? estimateTotalBlocks(expectedDataLength) : -1;
 
         int expectedBlockNumber = 1;
         int retryCount = 0;
@@ -218,7 +229,7 @@ public class XModemTransfer {
                 retryCount = 0;
                 serialPort.write(ACK);
                 totalBytesTransferred += blockSize;
-                reportProgress(expectedBlockNumber - 1, -1, totalBytesTransferred);  // -1 means unknown total
+                reportProgress(expectedBlockNumber - 1, expectedTotalBlocks, totalBytesTransferred);
             } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
                 // Duplicate block, ACK but don't save
                 serialPort.write(ACK);

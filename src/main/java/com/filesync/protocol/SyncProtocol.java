@@ -158,10 +158,17 @@ public class SyncProtocol {
      * Receive manifest data
      */
     public FileChangeDetector.FileManifest receiveManifest() throws IOException {
+        return receiveManifest(-1);
+    }
+
+    /**
+     * Receive manifest data with optional expected payload length.
+     */
+    public FileChangeDetector.FileManifest receiveManifest(int expectedCompressedLength) throws IOException {
         xmodemInProgress.set(true);
         byte[] compressed;
         try {
-            compressed = xmodem.receive();
+            compressed = xmodem.receive(expectedCompressedLength);
         } finally {
             xmodemInProgress.set(false);
         }
@@ -313,7 +320,7 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] data;
         try {
-            data = xmodem.receive();
+            data = xmodem.receive(expectedSize);
         } finally {
             xmodemInProgress.set(false);
         }
@@ -377,7 +384,7 @@ public class SyncProtocol {
         xmodemInProgress.set(true);
         byte[] data;
         try {
-            data = xmodem.receive();
+            data = xmodem.receive(expectedSize);
         } finally {
             xmodemInProgress.set(false);
         }
