@@ -484,15 +484,22 @@ public class SyncProtocol {
      * Send shared text payload (Base64 encoded to protect delimiters)
      */
     public void sendSharedText(String text) throws IOException {
+        sendSharedText(System.currentTimeMillis(), text);
+    }
+
+    /**
+     * Send shared text payload with a last-changed timestamp.
+     */
+    public void sendSharedText(long timestamp, String text) throws IOException {
         if (text == null) {
             text = "";
         }
         String encoded = encodeText(text);
         if (shouldSendSharedTextInline(encoded)) {
-            sendCommand(CMD_SHARED_TEXT, encoded);
+            sendCommand(CMD_SHARED_TEXT, String.valueOf(timestamp), encoded);
             return;
         }
-        sendSharedTextData(text.getBytes(StandardCharsets.UTF_8));
+        sendSharedTextData(timestamp, text.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -537,11 +544,18 @@ public class SyncProtocol {
     }
 
     private void sendSharedTextData(byte[] textBytes) throws IOException {
+        sendSharedTextData(System.currentTimeMillis(), textBytes);
+    }
+
+    /**
+     * Send shared text via XMODEM with a last-changed timestamp.
+     */
+    private void sendSharedTextData(long timestamp, byte[] textBytes) throws IOException {
         CompressionUtil.CompressedData payload =
                 CompressionUtil.compressIfBeneficial(SHARED_TEXT_TRANSFER_NAME, textBytes);
         xmodemInProgress.set(true);
         try {
-            sendCommand(CMD_SHARED_TEXT_DATA, String.valueOf(payload.isCompressed()));
+            sendCommand(CMD_SHARED_TEXT_DATA, String.valueOf(timestamp), String.valueOf(payload.isCompressed()));
             waitForCommand(CMD_ACK);
             boolean success = xmodem.send(payload.getData());
             if (!success) {

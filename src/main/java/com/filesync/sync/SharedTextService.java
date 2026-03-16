@@ -3,6 +3,8 @@ package com.filesync.sync;
 import com.filesync.protocol.SyncProtocol;
 
 import java.io.IOException;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -17,7 +19,9 @@ public class SharedTextService {
     private final BooleanSupplier connectionAliveSupplier;
     private final BooleanSupplier syncingSupplier;
     private final BooleanSupplier transferBusySupplier;
-    private final AtomicReference<String> pendingSharedText = new AtomicReference<>();
+    private final AtomicReference<SharedTextPayload> pendingSharedText = new AtomicReference<>();
+    private final AtomicReference<SharedTextPayload> latestSharedText = new AtomicReference<>();
+    private final AtomicLong latestAcceptedTimestamp = new AtomicLong(0);
 
     public SharedTextService(SyncProtocol protocol,
                              SyncEventBus eventBus,
@@ -34,13 +38,25 @@ public class SharedTextService {
     }
 
     public void queueSharedText(String text) {
-        pendingSharedText.set(text);
+        String normalizedText = normalizeText(text);
+        SharedTextPayload payload = new SharedTextPayload(System.currentTimeMillis(), normalizedText);
+        latestSharedText.set(payload);
+        pendingSharedText.set(payload);
+        flushIfIdle();
+    }
+
+    public void resendLatestSharedText() {
+        SharedTextPayload latestText = latestSharedText.get();
+        if (latestText == null) {
+            return;
+        }
+        pendingSharedText.set(latestText);
         flushIfIdle();
     }
 
     public void flushIfIdle() {
         while (true) {
-            String textToSend = pendingSharedText.get();
+            SharedTextPayload textToSend = pendingSharedText.get();
             if (textToSend == null) {
                 return;
             }
@@ -52,7 +68,7 @@ public class SharedTextService {
                 return;
             }
             try {
-                protocol.sendSharedText(textToSend);
+                protocol.sendSharedText(textToSend.timestamp, textToSend.text);
                 if (pendingSharedText.compareAndSet(textToSend, null)) {
                     return;
                 }
@@ -64,18 +80,40 @@ public class SharedTextService {
     }
 
     public void handleIncomingSharedText(String encodedPayload) {
+        handleIncomingSharedText(System.currentTimeMillis(), encodedPayload);
+    }
+
+    public void handleIncomingSharedText(long remoteTimestamp, String encodedPayload) {
         try {
-            String text = protocol.decodeSharedText(encodedPayload);
-            eventBus.post(new SyncEvent.SharedTextReceivedEvent(text));
+            SharedTextPayload incoming = decodeSharedTextPayload(remoteTimestamp, encodedPayload);
+            if (incoming == null) {
+                return;
+            }
+            if (!isNewerThanLatest(incoming.timestamp)) {
+                return;
+            }
+            markTimestampIfNewer(incoming.timestamp);
+            latestSharedText.set(incoming);
+            eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
         } catch (IllegalArgumentException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Failed to decode shared text: " + e.getMessage()));
         }
     }
 
     public void handleIncomingSharedTextData(boolean wasCompressed) {
+        handleIncomingSharedTextData(System.currentTimeMillis(), wasCompressed);
+    }
+
+    public void handleIncomingSharedTextData(long remoteTimestamp, boolean wasCompressed) {
         try {
             String text = protocol.receiveSharedTextData(wasCompressed);
-            eventBus.post(new SyncEvent.SharedTextReceivedEvent(text));
+            SharedTextPayload incoming = new SharedTextPayload(remoteTimestamp, normalizeText(text));
+            if (!isNewerThanLatest(incoming.timestamp)) {
+                return;
+            }
+            markTimestampIfNewer(incoming.timestamp);
+            latestSharedText.set(incoming);
+            eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
         } catch (IOException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));
         }
@@ -87,6 +125,40 @@ public class SharedTextService {
 
     public void clearPendingSharedText() {
         pendingSharedText.set(null);
+        latestSharedText.set(null);
+        latestAcceptedTimestamp.set(0);
+    }
+
+    private SharedTextPayload decodeSharedTextPayload(long remoteTimestamp, String encodedPayload) {
+        try {
+            String text = protocol.decodeSharedText(encodedPayload);
+            return new SharedTextPayload(remoteTimestamp, normalizeText(text));
+        } catch (IllegalArgumentException e) {
+            throw e;
+        }
+    }
+
+    private boolean isNewerThanLatest(long remoteTimestamp) {
+        return remoteTimestamp > latestAcceptedTimestamp.get();
+    }
+
+    private void markTimestampIfNewer(long remoteTimestamp) {
+        while (true) {
+            long current = latestAcceptedTimestamp.get();
+            if (remoteTimestamp <= current) {
+                return;
+            }
+            if (latestAcceptedTimestamp.compareAndSet(current, remoteTimestamp)) {
+                return;
+            }
+        }
+    }
+
+    private String normalizeText(String text) {
+        return Objects.requireNonNullElse(text, "");
+    }
+
+    private record SharedTextPayload(long timestamp, String text) {
     }
 }
 

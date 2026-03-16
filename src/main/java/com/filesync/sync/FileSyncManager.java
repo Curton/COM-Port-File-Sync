@@ -396,6 +396,7 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_ROLE_NEGOTIATE:
                 roleNegotiationService.handleRoleNegotiate(msg.getParamAsLong(0));
+                sharedTextService.resendLatestSharedText();
                 break;
 
             case SyncProtocol.CMD_FILE_DELETE:
@@ -411,11 +412,19 @@ public class FileSyncManager {
                 break;
 
             case SyncProtocol.CMD_SHARED_TEXT:
-                sharedTextService.handleIncomingSharedText(msg.getParam(0));
+                if (msg.getParams().length >= 2) {
+                    sharedTextService.handleIncomingSharedText(msg.getParamAsLong(0), msg.getParam(1));
+                } else {
+                    sharedTextService.handleIncomingSharedText(msg.getParam(0));
+                }
                 break;
 
             case SyncProtocol.CMD_SHARED_TEXT_DATA:
-                sharedTextService.handleIncomingSharedTextData(msg.getParamAsBoolean(0));
+                if (msg.getParams().length >= 2) {
+                    sharedTextService.handleIncomingSharedTextData(msg.getParamAsLong(0), msg.getParamAsBoolean(1));
+                } else {
+                    sharedTextService.handleIncomingSharedTextData(msg.getParamAsBoolean(0));
+                }
                 break;
 
             case SyncProtocol.CMD_DROP_FILE:
@@ -455,10 +464,12 @@ public class FileSyncManager {
     private void onConnectionRestored() {
         resetSyncStateForLinkTransition(false);
         roleNegotiationService.sendRoleNegotiation();
+        sharedTextService.resendLatestSharedText();
     }
 
     private void onConnectionLost() {
-        resetSyncStateForLinkTransition(true);
+        // Keep any pending shared text so it can be re-sent when connectivity returns.
+        resetSyncStateForLinkTransition(false);
     }
 
     private void resetSyncStateForLinkTransition(boolean clearBufferedText) {

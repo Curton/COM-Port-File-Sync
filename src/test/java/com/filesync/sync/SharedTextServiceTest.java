@@ -102,6 +102,51 @@ class SharedTextServiceTest {
                 "Expected malformed shared text to be reported as an error");
     }
 
+    @Test
+    void handleIncomingSharedTextIgnoresOlderTimestamps() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        List<String> receivedText = new ArrayList<>();
+
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                receivedText.add(sharedTextEvent.getText());
+            }
+        });
+
+        SharedTextService service = new SharedTextService(
+                protocol,
+                eventBus,
+                () -> true,
+                () -> true,
+                () -> false,
+                () -> false);
+
+        service.handleIncomingSharedText(200L, "newer");
+        service.handleIncomingSharedText(100L, "older");
+
+        assertEquals(List.of("newer"), receivedText);
+    }
+
+    @Test
+    void resendUsesMostRecentIncomingText() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+
+        SharedTextService service = new SharedTextService(
+                protocol,
+                eventBus,
+                () -> true,
+                () -> true,
+                () -> false,
+                () -> false);
+
+        service.handleIncomingSharedText(300L, "newer");
+        service.resendLatestSharedText();
+
+        assertEquals(List.of("newer"), protocol.getSentTexts());
+    }
+
     private static final class TestSharedTextProtocol extends SyncProtocol {
         private final AtomicBoolean sending = new AtomicBoolean(false);
         private final List<String> sentTexts = new ArrayList<>();
@@ -115,7 +160,7 @@ class SharedTextServiceTest {
         }
 
         @Override
-        public void sendSharedText(String text) throws IOException {
+        public void sendSharedText(long timestamp, String text) throws IOException {
             sending.set(true);
             try {
                 sentTexts.add(text);
@@ -125,6 +170,11 @@ class SharedTextServiceTest {
             } finally {
                 sending.set(false);
             }
+        }
+
+        @Override
+        public void sendSharedText(String text) throws IOException {
+            sendSharedText(System.currentTimeMillis(), text);
         }
 
         @Override

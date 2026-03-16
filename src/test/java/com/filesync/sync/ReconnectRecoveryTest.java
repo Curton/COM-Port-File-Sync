@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.Test;
@@ -188,6 +189,89 @@ class ReconnectRecoveryTest {
         assertEquals(List.of(false), directionStates, "Direction change event should reflect the new local role");
     }
 
+    @Test
+    void sharedTextResyncedOnReconnect() {
+        AtomicBoolean running = new AtomicBoolean(true);
+        AtomicBoolean connectionAlive = new AtomicBoolean(false);
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        AtomicBoolean transferBusy = new AtomicBoolean(false);
+
+        List<String> sentTexts = new ArrayList<>();
+        AtomicReference<String> receivedText = new AtomicReference<>();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                receivedText.set(sharedTextEvent.getText());
+            }
+        });
+
+        ResyncTestProtocol protocol = new ResyncTestProtocol(sentTexts);
+
+        SharedTextService sharedTextService = new SharedTextService(
+                protocol,
+                eventBus,
+                running::get,
+                connectionAlive::get,
+                syncing::get,
+                transferBusy::get);
+
+        // Simulate: text was previously queued while connected, connection lost, then restored
+        connectionAlive.set(true);
+        sharedTextService.queueSharedText("hello from peer A");
+        assertTrue(sentTexts.contains("hello from peer A"), "Text should be sent when connected");
+
+        // Connection drops
+        connectionAlive.set(false);
+
+        // New text queued while disconnected -- should stay pending
+        sentTexts.clear();
+        sharedTextService.queueSharedText("updated text after disconnect");
+
+        // Reconnect
+        connectionAlive.set(true);
+
+        // requestSharedTextResync should queue and flush the latest text
+        sharedTextService.queueSharedText("updated text after disconnect");
+        sharedTextService.flushIfIdle();
+
+        assertTrue(sentTexts.contains("updated text after disconnect"),
+                "Pending shared text should be flushed on reconnect");
+    }
+
+    @Test
+    void sharedTextResyncHeldBackDuringActiveTransfer() {
+        AtomicBoolean running = new AtomicBoolean(true);
+        AtomicBoolean connectionAlive = new AtomicBoolean(true);
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        AtomicBoolean transferBusy = new AtomicBoolean(true);
+
+        List<String> sentTexts = new ArrayList<>();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+
+        ResyncTestProtocol protocol = new ResyncTestProtocol(sentTexts);
+
+        SharedTextService sharedTextService = new SharedTextService(
+                protocol,
+                eventBus,
+                running::get,
+                connectionAlive::get,
+                syncing::get,
+                transferBusy::get);
+
+        sharedTextService.queueSharedText("should not send yet");
+        sharedTextService.flushIfIdle();
+
+        assertTrue(sentTexts.isEmpty(),
+                "Flush should be held back while transfer is busy");
+
+        // Transfer completes
+        transferBusy.set(false);
+        sharedTextService.onSyncIdle();
+
+        assertTrue(sentTexts.contains("should not send yet"),
+                "Pending shared text should be sent once transfer completes");
+    }
+
     private static void waitUntil(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {
@@ -304,6 +388,30 @@ class ReconnectRecoveryTest {
         @Override
         public void sendSyncComplete() {
             // No-op
+        }
+    }
+
+    private static class ResyncTestProtocol extends SyncProtocol {
+        private final List<String> sentTexts;
+
+        ResyncTestProtocol(List<String> sentTexts) {
+            super(new StubSerialPortManager(true));
+            this.sentTexts = sentTexts;
+        }
+
+        @Override
+        public void sendSharedText(String text) throws IOException {
+            sendSharedText(System.currentTimeMillis(), text);
+        }
+
+        @Override
+        public void sendSharedText(long timestamp, String text) {
+            sentTexts.add(text);
+        }
+
+        @Override
+        public String decodeSharedText(String encodedPayload) {
+            return encodedPayload;
         }
     }
 }
