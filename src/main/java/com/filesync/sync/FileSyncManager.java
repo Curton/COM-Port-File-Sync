@@ -262,12 +262,16 @@ public class FileSyncManager {
         syncCoordinator.startSync();
     }
 
+    public void initiateSync(SyncPreviewPlan plan) {
+        syncCoordinator.startSync(plan);
+    }
+
     /**
      * Initiate synchronization using a pre-computed preview plan.
      * Skips manifest roundtrip when plan is valid for current state.
      */
     public void initiateSyncWithPlan(SyncPreviewPlan plan) {
-        syncCoordinator.startSyncWithPlan(plan);
+        initiateSync(plan);
     }
 
     private static final int FOLDER_CONTEXT_TIMEOUT_MS = 5000;
@@ -525,6 +529,7 @@ public class FileSyncManager {
     private void onConnectionLost() {
         // Keep any pending shared text so it can be re-sent when connectivity returns.
         resetSyncStateForLinkTransition(false);
+        stopListening();
     }
 
     private void resetSyncStateForLinkTransition(boolean clearBufferedText) {

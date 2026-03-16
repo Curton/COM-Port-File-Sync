@@ -126,52 +126,41 @@ public class SerialPortManager {
      * Write data to the serial port
      */
     public void write(byte[] data) throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-        outputStream.write(data);
-        outputStream.flush();
+        OutputStream out = requireOutputStream();
+        out.write(data);
+        out.flush();
     }
 
     /**
      * Write a single byte to the serial port
      */
     public void write(int b) throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-        outputStream.write(b);
-        outputStream.flush();
+        OutputStream out = requireOutputStream();
+        out.write(b);
+        out.flush();
     }
 
     /**
      * Read data from the serial port
      */
     public int read(byte[] buffer) throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-        return inputStream.read(buffer);
+        InputStream in = requireInputStream();
+        return in.read(buffer);
     }
 
     /**
      * Read a single byte from the serial port with timeout
      */
     public int read() throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-        return inputStream.read();
+        InputStream in = requireInputStream();
+        return in.read();
     }
 
     /**
      * Read exact number of bytes with timeout
      */
     public byte[] readExact(int length, int timeoutMs) throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-
+        InputStream in = requireInputStream();
         byte[] buffer = new byte[length];
         int bytesRead = 0;
         long startTime = System.currentTimeMillis();
@@ -181,10 +170,10 @@ public class SerialPortManager {
                 throw new IOException("Read timeout: expected " + length + " bytes, got " + bytesRead);
             }
 
-            int available = inputStream.available();
+            int available = in.available();
             if (available > 0) {
                 int toRead = Math.min(available, length - bytesRead);
-                int read = inputStream.read(buffer, bytesRead, toRead);
+                int read = in.read(buffer, bytesRead, toRead);
                 if (read > 0) {
                     bytesRead += read;
                 }
@@ -204,10 +193,7 @@ public class SerialPortManager {
      * Read a line (until newline character) with UTF-8 encoding
      */
     public String readLine(int timeoutMs) throws IOException {
-        if (!isOpen()) {
-            throw new IOException("Serial port is not open");
-        }
-
+        InputStream in = requireInputStream();
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         long startTime = System.currentTimeMillis();
 
@@ -219,7 +205,7 @@ public class SerialPortManager {
                 throw new IOException("Read timeout");
             }
 
-            int b = inputStream.read();
+            int b = in.read();
             if (b == -1) {
                 try {
                     Thread.sleep(POLL_INTERVAL_MS);
@@ -250,21 +236,23 @@ public class SerialPortManager {
      * Get the number of bytes available to read
      */
     public int available() throws IOException {
-        if (!isOpen()) {
+        InputStream in = inputStream;
+        if (!isOpen() || in == null) {
             return 0;
         }
-        return inputStream.available();
+        return in.available();
     }
 
     /**
      * Clear the input buffer
      */
     public void clearInputBuffer() throws IOException {
-        if (!isOpen()) {
+        InputStream in = inputStream;
+        if (!isOpen() || in == null) {
             return;
         }
-        while (inputStream.available() > 0) {
-            inputStream.read();
+        while (in.available() > 0) {
+            in.read();
         }
     }
 
@@ -275,6 +263,28 @@ public class SerialPortManager {
         if (serialPort != null) {
             serialPort.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, timeoutMs, timeoutMs);
         }
+    }
+
+    private InputStream requireInputStream() throws IOException {
+        if (!isOpen()) {
+            throw new IOException("Serial port is not open");
+        }
+        InputStream in = inputStream;
+        if (in == null) {
+            throw new IOException("Serial port input stream is not available");
+        }
+        return in;
+    }
+
+    private OutputStream requireOutputStream() throws IOException {
+        if (!isOpen()) {
+            throw new IOException("Serial port is not open");
+        }
+        OutputStream out = outputStream;
+        if (out == null) {
+            throw new IOException("Serial port output stream is not available");
+        }
+        return out;
     }
 
     public int getBaudRate() {

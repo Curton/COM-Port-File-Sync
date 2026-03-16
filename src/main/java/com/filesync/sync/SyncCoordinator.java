@@ -69,7 +69,11 @@ public class SyncCoordinator {
     }
 
     public void startSync() {
-        startSyncWithPlan(null);
+        startSync(null);
+    }
+
+    public void startSync(SyncPreviewPlan plan) {
+        startSyncWithPlan(plan);
     }
 
     /**

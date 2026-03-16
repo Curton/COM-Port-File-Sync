@@ -680,6 +680,7 @@ public class SyncProtocol {
     /**
      * Wait for specific command.
      * Handles HEARTBEAT and HEARTBEAT_ACK to keep liveness active during long waits.
+     * Throws IOException when CMD_ERROR is received.
      */
     public Message waitForCommand(String expectedCommand) throws IOException {
         long startTime = System.currentTimeMillis();
@@ -691,6 +692,10 @@ public class SyncProtocol {
             String cmd = msg.getCommand();
             if (cmd.equals(expectedCommand)) {
                 return msg;
+            }
+            if (CMD_ERROR.equals(cmd)) {
+                String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                throw new IOException("Remote error: " + errMsg);
             }
             if (CMD_HEARTBEAT.equals(cmd)) {
                 sendHeartbeatAck();

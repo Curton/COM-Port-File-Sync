@@ -2,9 +2,11 @@ package com.filesync.ui;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -20,9 +22,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Date;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -35,11 +40,16 @@ import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JTable;
 import javax.swing.JPanel;
+import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.TableCellRenderer;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.event.TableModelListener;
 import javax.swing.text.BadLocationException;
+import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -48,8 +58,10 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.table.DefaultTableModel;
 
 import com.filesync.config.SettingsManager;
+import com.filesync.sync.FileChangeDetector;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncPreviewPlan;
@@ -1180,19 +1192,15 @@ public class MainFrame extends JFrame {
                         return;
                     }
 
-                    if (syncPreview.getTotalOperations() == 0) {
-                        showSyncPreviewDialog(syncPreview, false);
-                        return;
-                    }
-
-                    if (!showSyncPreviewDialog(syncPreview, true)) {
+                    SyncPreviewPlan selectedPlan = showSyncPreviewDialog(syncPreview, true);
+                    if (selectedPlan == null) {
                         return;
                     }
 
                     syncButton.setEnabled(false);
                     previewSyncButton.setEnabled(false);
                     progressBar.setValue(0);
-                    syncManager.initiateSyncWithPlan(syncPreview);
+                    syncManager.initiateSync(selectedPlan);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     String message = "Sync preview was interrupted";
@@ -1237,7 +1245,7 @@ public class MainFrame extends JFrame {
         directionButton.setEnabled(!syncManager.isTransferBusy() && !isPreviewInProgress);
     }
 
-    private boolean showSyncPreviewDialog(SyncPreviewPlan syncPreview, boolean requireConfirmation) {
+    private JTextArea createSyncPreviewTextArea(SyncPreviewPlan syncPreview) {
         StringBuilder previewText = new StringBuilder();
         previewText.append("Sync Preview\n\n");
 
@@ -1276,28 +1284,273 @@ public class MainFrame extends JFrame {
         previewArea.setEditable(false);
         previewArea.setLineWrap(false);
         previewArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        JScrollPane previewScroll = new JScrollPane(previewArea);
-        previewScroll.setPreferredSize(new Dimension(700, 500));
+        return previewArea;
+    }
+
+    private SyncPreviewPlan showSyncPreviewDialog(SyncPreviewPlan syncPreview, boolean requireConfirmation) {
+        JTextArea previewArea = createSyncPreviewTextArea(syncPreview);
 
         if (!requireConfirmation) {
             JOptionPane.showMessageDialog(
                     this,
-                    previewScroll,
+                    previewArea,
                     "Sync Preview",
                     JOptionPane.INFORMATION_MESSAGE);
-            return false;
+            return syncPreview;
         }
+
+        List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
+        DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
+        JTable previewTable = new JTable(previewModel);
+        previewTable.setFillsViewportHeight(true);
+        previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
+        previewTable.getColumnModel().getColumn(0).setPreferredWidth(25);
+        previewTable.getColumnModel().getColumn(1).setPreferredWidth(80);
+        previewTable.getColumnModel().getColumn(2).setPreferredWidth(50);
+        previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
+        previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
+
+        JLabel selectionSummary = new JLabel();
+        updateSyncPreviewSummary(selectionSummary, previewModel, rows);
+        previewModel.addTableModelListener(
+                (TableModelListener) event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
+
+        JButton selectAllButton = new JButton("Select All");
+        selectAllButton.addActionListener(event -> setPreviewSelection(previewModel, true));
+
+        JButton deselectAllButton = new JButton("Deselect All");
+        deselectAllButton.addActionListener(event -> setPreviewSelection(previewModel, false));
+
+        JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        controlPanel.add(selectAllButton);
+        controlPanel.add(deselectAllButton);
+        controlPanel.add(selectionSummary);
+
+        JScrollPane previewScroll = new JScrollPane(previewTable);
+        previewScroll.setPreferredSize(new Dimension(720, 480));
+
+        JPanel previewPanel = new JPanel(new BorderLayout(0, 8));
+        previewPanel.add(controlPanel, BorderLayout.NORTH);
+        previewPanel.add(previewScroll, BorderLayout.CENTER);
 
         int response = JOptionPane.showOptionDialog(
                 this,
-                previewScroll,
-                "Confirm Sync",
+                previewPanel,
+                "Sync Preview - Select Files",
                 JOptionPane.OK_CANCEL_OPTION,
                 JOptionPane.PLAIN_MESSAGE,
                 null,
                 new Object[] {"Start Sync", "Cancel"},
                 "Start Sync");
-        return response == 0;
+        if (response != 0) {
+            return null;
+        }
+
+        SyncPreviewPlan selectedPlan = createFilteredSyncPlan(syncPreview, previewModel, rows);
+        if (selectedPlan.getTotalOperations() == 0) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "No operations selected. Select at least one file or directory to sync.",
+                    "No Operations Selected",
+                    JOptionPane.WARNING_MESSAGE);
+            return null;
+        }
+        return selectedPlan;
+    }
+
+    private List<SyncPreviewRow> buildSyncPreviewRows(SyncPreviewPlan syncPreview) {
+        List<SyncPreviewRow> rows = new ArrayList<>();
+
+        for (FileChangeDetector.FileInfo fileInfo : syncPreview.getFilesToTransfer()) {
+            rows.add(new SyncPreviewRow(
+                    SyncPreviewOperationType.TRANSFER_FILE,
+                    fileInfo.getPath(),
+                    formatBytes(fileInfo.getSize()),
+                    fileInfo.getSize()));
+        }
+
+        for (String path : syncPreview.getEmptyDirectoriesToCreate()) {
+            rows.add(new SyncPreviewRow(
+                    SyncPreviewOperationType.CREATE_DIR,
+                    path,
+                    "-",
+                    0L));
+        }
+
+        for (String path : syncPreview.getFilesToDelete()) {
+            rows.add(new SyncPreviewRow(
+                    SyncPreviewOperationType.DELETE_FILE,
+                    path,
+                    "-",
+                    0L));
+        }
+
+        for (String path : syncPreview.getEmptyDirectoriesToDelete()) {
+            rows.add(new SyncPreviewRow(
+                    SyncPreviewOperationType.DELETE_DIR,
+                    path,
+                    "-",
+                    0L));
+        }
+
+        return rows;
+    }
+
+    private DefaultTableModel createSyncPreviewTableModel(List<SyncPreviewRow> rows) {
+        DefaultTableModel model = new DefaultTableModel(new String[] {"Sync", "Type", "Size", "Path"}, 0) {
+            @Override
+            public Class<?> getColumnClass(int columnIndex) {
+                return columnIndex == 0 ? Boolean.class : String.class;
+            }
+
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return column == 0;
+            }
+        };
+        for (SyncPreviewRow row : rows) {
+            model.addRow(new Object[] {
+                    Boolean.TRUE,
+                    row.getTypeLabel(),
+                    row.getSizeText(),
+                    row.getPath()
+            });
+        }
+        return model;
+    }
+
+    private TableCellRenderer createPathTailRenderer() {
+        return new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean isSelected, boolean hasFocus, int row, int column) {
+                super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                setHorizontalAlignment(SwingConstants.TRAILING);
+                String path = value != null ? value.toString() : "";
+                setToolTipText(path.isEmpty() ? null : path);
+                int cellWidth = table.getColumnModel().getColumn(column).getWidth();
+                int avail = Math.max(cellWidth - 8, 50);
+                FontMetrics fm = getFontMetrics(getFont());
+                String display = path;
+                if (path.length() > 0 && fm.stringWidth(path) > avail) {
+                    String ellipsis = "...";
+                    for (int i = 0; i < path.length(); i++) {
+                        String tail = path.substring(i);
+                        if (fm.stringWidth(ellipsis + tail) <= avail) {
+                            display = ellipsis + tail;
+                            break;
+                        }
+                    }
+                }
+                setText(display);
+                return this;
+            }
+        };
+    }
+
+    private void setPreviewSelection(DefaultTableModel previewModel, boolean selected) {
+        for (int i = 0; i < previewModel.getRowCount(); i++) {
+            previewModel.setValueAt(selected, i, 0);
+        }
+    }
+
+    private void updateSyncPreviewSummary(JLabel summaryLabel, DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
+        int selectedCount = 0;
+        long selectedBytes = 0L;
+        for (int i = 0; i < previewModel.getRowCount(); i++) {
+            if (!Boolean.TRUE.equals(previewModel.getValueAt(i, 0))) {
+                continue;
+            }
+            SyncPreviewRow row = rows.get(i);
+            selectedCount++;
+            selectedBytes += row.getSizeBytes();
+        }
+        summaryLabel.setText("Selected " + selectedCount + " of " + rows.size()
+                + " operations, " + formatBytes(selectedBytes) + " transfer");
+    }
+
+    private SyncPreviewPlan createFilteredSyncPlan(
+            SyncPreviewPlan syncPreview,
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows) {
+        Set<String> selectedTransferFiles = new HashSet<>();
+        Set<String> selectedCreateDirs = new HashSet<>();
+        Set<String> selectedDeleteFiles = new HashSet<>();
+        Set<String> selectedDeleteDirs = new HashSet<>();
+
+        for (int i = 0; i < previewModel.getRowCount(); i++) {
+            if (!Boolean.TRUE.equals(previewModel.getValueAt(i, 0))) {
+                continue;
+            }
+            SyncPreviewRow row = rows.get(i);
+            if (row.getOperationType() == SyncPreviewOperationType.TRANSFER_FILE) {
+                selectedTransferFiles.add(row.getPath());
+            } else if (row.getOperationType() == SyncPreviewOperationType.CREATE_DIR) {
+                selectedCreateDirs.add(row.getPath());
+            } else if (row.getOperationType() == SyncPreviewOperationType.DELETE_FILE) {
+                selectedDeleteFiles.add(row.getPath());
+            } else if (row.getOperationType() == SyncPreviewOperationType.DELETE_DIR) {
+                selectedDeleteDirs.add(row.getPath());
+            }
+        }
+
+        return syncPreview.createFilteredPlan(
+                selectedTransferFiles,
+                selectedCreateDirs,
+                selectedDeleteFiles,
+                selectedDeleteDirs);
+    }
+
+    private enum SyncPreviewOperationType {
+        TRANSFER_FILE,
+        CREATE_DIR,
+        DELETE_FILE,
+        DELETE_DIR
+    }
+
+    private static final class SyncPreviewRow {
+        private final SyncPreviewOperationType operationType;
+        private final String path;
+        private final String sizeText;
+        private final long sizeBytes;
+
+        private SyncPreviewRow(SyncPreviewOperationType operationType, String path, String sizeText, long sizeBytes) {
+            this.operationType = operationType;
+            this.path = path;
+            this.sizeText = sizeText;
+            this.sizeBytes = sizeBytes;
+        }
+
+        private SyncPreviewOperationType getOperationType() {
+            return operationType;
+        }
+
+        private String getPath() {
+            return path;
+        }
+
+        private String getSizeText() {
+            return sizeText;
+        }
+
+        private long getSizeBytes() {
+            return sizeBytes;
+        }
+
+        private String getTypeLabel() {
+            switch (operationType) {
+                case TRANSFER_FILE:
+                    return "Transfer File";
+                case CREATE_DIR:
+                    return "Create Dir";
+                case DELETE_FILE:
+                    return "Delete File";
+                case DELETE_DIR:
+                    return "Delete Dir";
+                default:
+                    return "Unknown";
+            }
+        }
     }
 
     private String formatBytes(long bytes) {
@@ -1411,11 +1664,11 @@ public class MainFrame extends JFrame {
     
     private void onSyncComplete() {
         SwingUtilities.invokeLater(() -> {
+            String port = (String) portComboBox.getSelectedItem();
             String remote = pendingMappingRemotePath;
             if (remote != null && !remote.isEmpty()) {
                 File localFolder = syncManager.getSyncFolder();
                 if (localFolder != null && localFolder.exists()) {
-                    String port = (String) portComboBox.getSelectedItem();
                     settings.setRememberedFolderMapping(port,
                             SettingsManager.normalizeFolderPath(localFolder.getAbsolutePath()),
                             SettingsManager.normalizeFolderPath(remote));
@@ -1481,12 +1734,21 @@ public class MainFrame extends JFrame {
     
     private void onConnectionStatusChanged(boolean isAlive) {
         SwingUtilities.invokeLater(() -> {
+            isConnected = isAlive;
             if (isAlive) {
                 statusLabel.setText("Connected");
                 statusLabel.setForeground(new Color(0, 128, 0));
+                connectButton.setText("Disconnect");
+                portComboBox.setEnabled(false);
+                refreshPortsButton.setEnabled(false);
+                settingsButton.setEnabled(false);
             } else {
                 statusLabel.setText("Connection Lost");
                 statusLabel.setForeground(Color.ORANGE);
+                connectButton.setText("Connect");
+                portComboBox.setEnabled(true);
+                refreshPortsButton.setEnabled(true);
+                settingsButton.setEnabled(true);
             }
             updateSyncButtonState();
         });

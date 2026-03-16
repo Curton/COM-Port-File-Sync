@@ -2,6 +2,8 @@ package com.filesync.sync;
 
 import java.util.List;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.Set;
 
 /**
  * Immutable result of a sync pre-check that shows all planned operations.
@@ -32,6 +34,63 @@ public final class SyncPreviewPlan {
                 + this.emptyDirectoriesToCreate.size()
                 + this.filesToDelete.size()
                 + this.emptyDirectoriesToDelete.size();
+    }
+
+    public SyncPreviewPlan createFilteredPlan(Set<String> selectedFilesToTransfer,
+                                             Set<String> selectedEmptyDirectoriesToCreate,
+                                             Set<String> selectedFilesToDelete,
+                                             Set<String> selectedEmptyDirectoriesToDelete) {
+        List<FileChangeDetector.FileInfo> filteredFilesToTransfer =
+                filterFilesBySelection(filesToTransfer, selectedFilesToTransfer);
+
+        List<String> filteredEmptyDirectoriesToCreate =
+                filterPathsBySelection(emptyDirectoriesToCreate, selectedEmptyDirectoriesToCreate);
+
+        List<String> filteredFilesToDelete =
+                filterPathsBySelection(filesToDelete, selectedFilesToDelete);
+
+        List<String> filteredEmptyDirectoriesToDelete =
+                filterPathsBySelection(emptyDirectoriesToDelete, selectedEmptyDirectoriesToDelete);
+
+        long filteredTotalBytesToTransfer = filteredFilesToTransfer.stream()
+                .mapToLong(FileChangeDetector.FileInfo::getSize)
+                .sum();
+
+        return new SyncPreviewPlan(
+                filteredFilesToTransfer,
+                filteredEmptyDirectoriesToCreate,
+                filteredFilesToDelete,
+                filteredEmptyDirectoriesToDelete,
+                filteredTotalBytesToTransfer,
+                strictSyncMode);
+    }
+
+    private static List<FileChangeDetector.FileInfo> filterFilesBySelection(List<FileChangeDetector.FileInfo> source,
+                                                                         Set<String> selectedPaths) {
+        if (selectedPaths == null) {
+            return copyFiles(source);
+        }
+        List<FileChangeDetector.FileInfo> result = new ArrayList<>();
+        for (FileChangeDetector.FileInfo fileInfo : source) {
+            if (selectedPaths.contains(fileInfo.getPath())) {
+                result.add(fileInfo);
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static List<String> filterPathsBySelection(List<String> source,
+                                                      Set<String> selectedPaths) {
+        if (selectedPaths == null) {
+            return copyPaths(source);
+        }
+        List<String> result = new ArrayList<>();
+        for (String path : source) {
+            if (selectedPaths.contains(path)) {
+                result.add(path);
+            }
+        }
+        return List.copyOf(result);
     }
 
     private static List<FileChangeDetector.FileInfo> copyFiles(List<FileChangeDetector.FileInfo> files) {
