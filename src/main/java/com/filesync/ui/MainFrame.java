@@ -1119,7 +1119,7 @@ public class MainFrame extends JFrame {
                     syncButton.setEnabled(false);
                     previewSyncButton.setEnabled(false);
                     progressBar.setValue(0);
-                    syncManager.initiateSync();
+                    syncManager.initiateSyncWithPlan(syncPreview);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     String message = "Sync preview was interrupted";

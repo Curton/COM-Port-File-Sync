@@ -54,6 +54,8 @@ public class SyncProtocol {
     private final SerialPortManager serialPort;
     private final XModemTransfer xmodem;
     private int timeoutMs;
+    private Runnable messageActivityCallback;
+
     private static final java.util.Base64.Encoder BASE64_ENCODER = java.util.Base64.getEncoder();
     private static final java.util.Base64.Decoder BASE64_DECODER = java.util.Base64.getDecoder();
 
@@ -69,6 +71,14 @@ public class SyncProtocol {
 
     public void setTimeout(int timeoutMs) {
         this.timeoutMs = timeoutMs;
+    }
+
+    /**
+     * Set callback invoked when HEARTBEAT or HEARTBEAT_ACK is received during command waits.
+     * Used to refresh liveness so long protocol waits do not trigger false connection loss.
+     */
+    public void setMessageActivityCallback(Runnable callback) {
+        this.messageActivityCallback = callback;
     }
 
     /**
@@ -268,7 +278,7 @@ public class SyncProtocol {
 
         String detail = xmodem.getLastErrorMessage();
         if (detail == null || detail.isEmpty()) {
-            detail = "unknown XMODEM error";
+            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
         }
         IOException finalEx = new IOException("Failed to send file " + relativePath +
                 " after " + maxAttempts + " attempts (" + detail + ")");
@@ -611,17 +621,42 @@ public class SyncProtocol {
     }
 
     /**
-     * Wait for specific command
+     * Wait for specific command.
+     * Handles HEARTBEAT and HEARTBEAT_ACK to keep liveness active during long waits.
      */
     public Message waitForCommand(String expectedCommand) throws IOException {
         long startTime = System.currentTimeMillis();
         while (System.currentTimeMillis() - startTime < timeoutMs) {
             Message msg = receiveCommand();
-            if (msg != null && msg.getCommand().equals(expectedCommand)) {
+            if (msg == null) {
+                continue;
+            }
+            String cmd = msg.getCommand();
+            if (cmd.equals(expectedCommand)) {
                 return msg;
+            }
+            if (CMD_HEARTBEAT.equals(cmd)) {
+                sendHeartbeatAck();
+                runMessageActivityCallback();
+            } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
+                runMessageActivityCallback();
             }
         }
         throw new IOException("Timeout waiting for command: " + expectedCommand);
+    }
+
+    private void runMessageActivityCallback() {
+        if (messageActivityCallback != null) {
+            messageActivityCallback.run();
+        }
+    }
+
+    /**
+     * For testing: invoke the message activity callback.
+     * Used by protocol subclasses to simulate heartbeat handling.
+     */
+    protected void notifyMessageActivity() {
+        runMessageActivityCallback();
     }
 
     /**

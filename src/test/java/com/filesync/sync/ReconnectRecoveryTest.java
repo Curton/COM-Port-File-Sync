@@ -272,6 +272,78 @@ class ReconnectRecoveryTest {
                 "Pending shared text should be sent once transfer completes");
     }
 
+    @Test
+    void startSyncWithPlanUsesProvidedPlanWithoutManifestRoundtrip() throws IOException, InterruptedException {
+        Files.writeString(tempDir.resolve("test.txt"), "payload");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        AtomicBoolean requestManifestCalled = new AtomicBoolean(false);
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+
+        SyncProtocol protocol = new NoOpSyncProtocol() {
+            @Override
+            public void requestManifest(boolean respectGitignore, boolean fastMode) {
+                requestManifestCalled.set(true);
+                throw new RuntimeException("Should not call requestManifest when plan is provided");
+            }
+        };
+
+        SyncCoordinator coordinator = new SyncCoordinator(
+                protocol,
+                eventBus,
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                syncing,
+                () -> {},
+                () -> {});
+
+        SyncPreviewPlan plan = new SyncPreviewPlan(
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                0L,
+                false);
+
+        coordinator.startSyncWithPlan(plan);
+        waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(2));
+
+        assertFalse(requestManifestCalled.get(),
+                "requestManifest should not be called when using provided plan");
+    }
+
+    @Test
+    void waitForCommandInvokesActivityCallbackWhenHeartbeatReceived() throws IOException {
+        AtomicInteger activityCallbackCount = new AtomicInteger(0);
+        SyncProtocol protocol = new HeartbeatSimulatingProtocol();
+        protocol.setMessageActivityCallback(activityCallbackCount::incrementAndGet);
+
+        SyncProtocol.Message result = protocol.waitForCommand(SyncProtocol.CMD_ACK);
+
+        assertTrue(result != null && SyncProtocol.CMD_ACK.equals(result.getCommand()));
+        assertEquals(1, activityCallbackCount.get(),
+                "Activity callback should be invoked when HEARTBEAT is simulated before expected command");
+    }
+
+    @Test
+    void sendFileFailurePreservesRealErrorDetail() throws IOException {
+        File testFile = tempDir.resolve("test.txt").toFile();
+        Files.writeString(testFile.toPath(), "content");
+
+        SyncProtocol protocol = new AckTimeoutProtocol();
+
+        IOException thrown = org.junit.jupiter.api.Assertions.assertThrows(IOException.class, () ->
+                protocol.sendFile(tempDir.toFile(), "test.txt"));
+
+        assertTrue(thrown.getMessage().contains("Timeout waiting for command"),
+                "Error message should preserve ACK timeout detail, not 'unknown XMODEM error'");
+    }
+
     private static void waitUntil(BooleanSupplier condition, Duration timeout) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {
@@ -293,6 +365,11 @@ class ReconnectRecoveryTest {
         @Override
         public boolean isOpen() {
             return open;
+        }
+
+        @Override
+        public void clearInputBuffer() {
+            // No-op for tests that do not use real serial I/O
         }
     }
 
@@ -412,6 +489,39 @@ class ReconnectRecoveryTest {
         @Override
         public String decodeSharedText(String encodedPayload) {
             return encodedPayload;
+        }
+    }
+
+    private static class HeartbeatSimulatingProtocol extends SyncProtocol {
+        HeartbeatSimulatingProtocol() {
+            super(new StubSerialPortManager(true));
+        }
+
+        @Override
+        public void sendHeartbeatAck() {
+            // No-op to avoid serial port write
+        }
+
+        @Override
+        public Message waitForCommand(String expectedCommand) throws IOException {
+            notifyMessageActivity();
+            return new Message(expectedCommand, new String[0]);
+        }
+    }
+
+    private static class AckTimeoutProtocol extends SyncProtocol {
+        AckTimeoutProtocol() {
+            super(new StubSerialPortManager(true));
+        }
+
+        @Override
+        public void sendCommand(String command, String... params) {
+            // No-op to avoid serial port write
+        }
+
+        @Override
+        public Message waitForCommand(String expectedCommand) throws IOException {
+            throw new IOException("Timeout waiting for command: " + expectedCommand);
         }
     }
 }

@@ -97,6 +97,8 @@ public class FileSyncManager {
                 sharedTextService::onSyncIdle,
                 connectionService::recordMessageActivity);
 
+        protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
+
         protocol.setProgressListener(new XModemTransfer.TransferProgressListener() {
             @Override
             public void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
@@ -257,6 +259,14 @@ public class FileSyncManager {
      */
     public void initiateSync() {
         syncCoordinator.startSync();
+    }
+
+    /**
+     * Initiate synchronization using a pre-computed preview plan.
+     * Skips manifest roundtrip when plan is valid for current state.
+     */
+    public void initiateSyncWithPlan(SyncPreviewPlan plan) {
+        syncCoordinator.startSyncWithPlan(plan);
     }
 
     public SyncPreviewPlan previewSync() {

@@ -69,6 +69,15 @@ public class SyncCoordinator {
     }
 
     public void startSync() {
+        startSyncWithPlan(null);
+    }
+
+    /**
+     * Start sync, optionally using a pre-computed preview plan.
+     * When plan is non-null and matches current sync options, skips manifest roundtrip.
+     * Plan is ignored if strict mode has changed since it was created.
+     */
+    public void startSyncWithPlan(SyncPreviewPlan plan) {
         if (!isSenderSupplier.getAsBoolean()) {
             eventBus.post(new SyncEvent.ErrorEvent("Cannot initiate sync as receiver. Change direction first."));
             return;
@@ -90,11 +99,14 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.ErrorEvent("Please select a sync folder first"));
             return;
         }
+        final SyncPreviewPlan planToUse = (plan != null && plan.isStrictSyncMode() != strictSyncModeSupplier.getAsBoolean())
+                ? null
+                : plan;
         syncing.set(true);
         if (executor != null) {
-            syncFuture = executor.submit(this::performSync);
+            syncFuture = executor.submit(() -> performSync(planToUse));
         } else {
-            performSync();
+            performSync(planToUse);
         }
     }
 
@@ -289,10 +301,10 @@ public class SyncCoordinator {
         }
     }
 
-    private void performSync() {
+    private void performSync(SyncPreviewPlan providedPlan) {
         try {
             eventBus.post(new SyncEvent.SyncStartedEvent());
-            SyncPreviewPlan syncPlan = createSyncPreviewPlan();
+            SyncPreviewPlan syncPlan = providedPlan != null ? providedPlan : createSyncPreviewPlan();
             int totalOperations = syncPlan.getTotalOperations();
 
             if (totalOperations == 0) {
