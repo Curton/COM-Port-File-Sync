@@ -40,6 +40,8 @@ public class SyncProtocol {
     public static final String CMD_SHARED_TEXT = "SHARED_TEXT";
     public static final String CMD_SHARED_TEXT_DATA = "SHARED_TEXT_DATA";
     public static final String CMD_DROP_FILE = "DROP_FILE";
+    public static final String CMD_FOLDER_CONTEXT_REQ = "FOLDER_CONTEXT_REQ";
+    public static final String CMD_FOLDER_CONTEXT_DATA = "FOLDER_CONTEXT_DATA";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -71,6 +73,10 @@ public class SyncProtocol {
 
     public void setTimeout(int timeoutMs) {
         this.timeoutMs = timeoutMs;
+    }
+
+    public int getTimeout() {
+        return timeoutMs;
     }
 
     /**
@@ -425,6 +431,57 @@ public class SyncProtocol {
      */
     public void sendSyncComplete() throws IOException {
         sendCommand(CMD_SYNC_COMPLETE);
+    }
+
+    /**
+     * Encode a folder path for protocol transmission (Base64) so colons and separators do not break framing.
+     */
+    public static String encodePathForProtocol(String path) {
+        if (path == null || path.isEmpty()) {
+            return "";
+        }
+        return new String(BASE64_ENCODER.encode(path.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Decode a folder path from protocol transmission.
+     */
+    public static String decodePathFromProtocol(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return "";
+        }
+        try {
+            return new String(BASE64_DECODER.decode(encoded), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
+    }
+
+    /**
+     * Request folder context from remote (sender asks receiver for its sync folder path).
+     */
+    public void sendFolderContextRequest() throws IOException {
+        sendCommand(CMD_FOLDER_CONTEXT_REQ);
+    }
+
+    /**
+     * Send folder context response (receiver replies with its sync folder path, Base64 encoded).
+     */
+    public void sendFolderContextResponse(String folderPath) throws IOException {
+        String encoded = encodePathForProtocol(folderPath != null ? folderPath : "");
+        sendCommand(CMD_FOLDER_CONTEXT_DATA, encoded);
+    }
+
+    /**
+     * Wait for folder context response and return decoded remote folder path.
+     * Call after sendFolderContextRequest().
+     */
+    public String receiveFolderContextResponse() throws IOException {
+        Message msg = waitForCommand(CMD_FOLDER_CONTEXT_DATA);
+        if (msg == null || msg.getParams().length == 0) {
+            return "";
+        }
+        return decodePathFromProtocol(msg.getParam(0));
     }
 
     /**

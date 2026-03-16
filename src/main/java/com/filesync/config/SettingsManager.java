@@ -23,6 +23,9 @@ public class SettingsManager {
     private static final String PREF_STRICT_SYNC = "strictSync";
     private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
     private static final String PREF_FAST_MODE = "fastMode";
+    private static final String PREF_FOLDER_MAPPING_PREFIX = "folderMapping.";
+    private static final String PREF_FOLDER_MAPPING_SENDER = "sender";
+    private static final String PREF_FOLDER_MAPPING_RECEIVER = "receiver";
 
     public static final int MAX_RECENT_FOLDERS = 10;
     
@@ -200,7 +203,69 @@ public class SettingsManager {
     public void setFastMode(boolean fastMode) {
         this.fastMode = fastMode;
     }
-    
+
+    /**
+     * Normalize a folder path for consistent comparison and storage.
+     * Trims whitespace and normalizes path separators to forward slash.
+     */
+    public static String normalizeFolderPath(String path) {
+        if (path == null || path.isEmpty()) {
+            return "";
+        }
+        return path.trim().replace('\\', '/');
+    }
+
+    /**
+     * Get remembered folder mapping for the given port context.
+     * Returns a two-element array [senderPath, receiverPath], or null if no mapping stored.
+     */
+    public String[] getRememberedFolderMapping(String port) {
+        String key = keyForPort(port);
+        String sender = prefs.get(key + PREF_FOLDER_MAPPING_SENDER, "");
+        String receiver = prefs.get(key + PREF_FOLDER_MAPPING_RECEIVER, "");
+        if ((sender == null || sender.isEmpty()) && (receiver == null || receiver.isEmpty())) {
+            return null;
+        }
+        return new String[]{
+                sender != null ? sender : "",
+                receiver != null ? receiver : ""
+        };
+    }
+
+    /**
+     * Set remembered folder mapping for the given port context.
+     * Call after successful sync completion.
+     */
+    public void setRememberedFolderMapping(String port, String senderPath, String receiverPath) {
+        String key = keyForPort(port);
+        prefs.put(key + PREF_FOLDER_MAPPING_SENDER, senderPath != null ? senderPath : "");
+        prefs.put(key + PREF_FOLDER_MAPPING_RECEIVER, receiverPath != null ? receiverPath : "");
+        try {
+            prefs.flush();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String keyForPort(String port) {
+        return PREF_FOLDER_MAPPING_PREFIX + (port != null && !port.isEmpty() ? port + "." : "default.");
+    }
+
+    /**
+     * Check if current mapping matches remembered mapping.
+     * Both paths should be normalized before calling.
+     */
+    public static boolean isMappingMatch(String localPath, String remotePath,
+                                        String rememberedSender, String rememberedReceiver) {
+        String nLocal = normalizeFolderPath(localPath);
+        String nRemote = normalizeFolderPath(remotePath);
+        String nSender = normalizeFolderPath(rememberedSender);
+        String nReceiver = normalizeFolderPath(rememberedReceiver);
+        if (nSender.isEmpty() && nReceiver.isEmpty()) {
+            return true;
+        }
+        return nLocal.equals(nSender) && nRemote.equals(nReceiver);
+    }
+
     /**
      * Get the index of a stop bits value in STOP_BITS_VALUES array
      */

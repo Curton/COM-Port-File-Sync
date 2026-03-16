@@ -30,6 +30,7 @@ public class FileSyncManager {
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean syncing = new AtomicBoolean(false);
+    private final AtomicBoolean senderBlockingProtocolExchange = new AtomicBoolean(false);
     private final AtomicBoolean connectionAlive = new AtomicBoolean(false);
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
@@ -269,6 +270,45 @@ public class FileSyncManager {
         syncCoordinator.startSyncWithPlan(plan);
     }
 
+    private static final int FOLDER_CONTEXT_TIMEOUT_MS = 5000;
+
+    /**
+     * Request remote folder context from the peer (receiver).
+     * Call only when this side is sender. Pauses listener during exchange to avoid message stealing.
+     *
+     * @return remote sync folder path (normalized), or empty string on timeout/error
+     */
+    public String requestRemoteFolderContext() {
+        if (!roleNegotiationService.isSender()) {
+            return "";
+        }
+        File folder = getSyncFolder();
+        if (folder == null || !folder.exists()) {
+            return "";
+        }
+        senderBlockingProtocolExchange.set(true);
+        try {
+            int savedTimeout = protocol.getTimeout();
+            protocol.setTimeout(FOLDER_CONTEXT_TIMEOUT_MS);
+            try {
+                protocol.sendFolderContextRequest();
+                return protocol.receiveFolderContextResponse();
+            } finally {
+                protocol.setTimeout(savedTimeout);
+            }
+        } catch (IOException e) {
+            return "";
+        } finally {
+            senderBlockingProtocolExchange.set(false);
+        }
+    }
+
+    private void handleFolderContextRequest() throws IOException {
+        File folder = getSyncFolder();
+        String path = (folder != null && folder.exists()) ? folder.getAbsolutePath() : "";
+        protocol.sendFolderContextResponse(path);
+    }
+
     public SyncPreviewPlan previewSync() {
         if (!isSender()) {
             throw new IllegalStateException("Cannot initiate sync preview as receiver. Change direction first.");
@@ -327,8 +367,9 @@ public class FileSyncManager {
                 // "no response from sender after 10 handshake attempts".
                 //
                 // To avoid concurrent consumption of the command stream, pause this listener
-                // while we are actively sending a sync.
-                if (syncCoordinator.isSyncing() && roleNegotiationService.isSender()) {
+                // while we are actively sending a sync or doing a blocking protocol exchange (e.g. folder context).
+                if ((syncCoordinator.isSyncing() || senderBlockingProtocolExchange.get())
+                        && roleNegotiationService.isSender()) {
                     Thread.sleep(50);
                     continue;
                 }
@@ -366,6 +407,10 @@ public class FileSyncManager {
                     senderFastMode = msg.getParamAsBoolean(1);
                 }
                 syncCoordinator.handleManifestRequest(senderRespectGitignore, senderFastMode);
+                break;
+
+            case SyncProtocol.CMD_FOLDER_CONTEXT_REQ:
+                handleFolderContextRequest();
                 break;
 
             case SyncProtocol.CMD_MANIFEST_DATA:

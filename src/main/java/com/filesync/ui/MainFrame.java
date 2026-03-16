@@ -103,6 +103,7 @@ public class MainFrame extends JFrame {
     private boolean isSender = true;
     private boolean isConnected = false;
     private boolean isPreviewInProgress = false;
+    private volatile String pendingMappingRemotePath;
     
     public MainFrame() {
         initSettings();
@@ -1059,7 +1060,7 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        syncManager.initiateSync();
+        runSyncWithPreflight(this::doStartSync);
     }
 
     private void previewSync() {
@@ -1068,7 +1069,79 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        runSyncPreview();
+        runSyncWithPreflight(this::runSyncPreview);
+    }
+
+    private void doStartSync() {
+        syncManager.initiateSync();
+    }
+
+    /**
+     * Run preflight folder mapping check, then invoke onProceed if allowed.
+     * Shows confirmation dialog when current mapping differs from remembered one.
+     */
+    private void runSyncWithPreflight(Runnable onProceed) {
+        File localFolder = syncManager.getSyncFolder();
+        if (localFolder == null || !localFolder.exists()) {
+            return;
+        }
+        String port = (String) portComboBox.getSelectedItem();
+        String localPath = localFolder.getAbsolutePath();
+
+        SwingWorker<String, Void> preflightWorker = new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() {
+                return syncManager.requestRemoteFolderContext();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    String remotePath = get();
+                    String nLocal = SettingsManager.normalizeFolderPath(localPath);
+                    String nRemote = SettingsManager.normalizeFolderPath(remotePath);
+                    String[] remembered = settings.getRememberedFolderMapping(port);
+
+                    boolean match = SettingsManager.isMappingMatch(
+                            nLocal, nRemote,
+                            remembered != null ? remembered[0] : "",
+                            remembered != null ? remembered[1] : "");
+
+                    if (match) {
+                        pendingMappingRemotePath = nRemote;
+                        onProceed.run();
+                        return;
+                    }
+
+                    StringBuilder msg = new StringBuilder();
+                    msg.append("Folder mapping differs from last successful sync.\n\n");
+                    msg.append("Remembered: ").append(remembered != null && !remembered[0].isEmpty() ? remembered[0] : "(none)");
+                    msg.append(" -> ").append(remembered != null && !remembered[1].isEmpty() ? remembered[1] : "(none)");
+                    msg.append("\n\nCurrent: ").append(nLocal);
+                    msg.append(" -> ").append(nRemote.isEmpty() ? "(unknown)" : nRemote);
+                    msg.append("\n\nProceed? The new mapping will be remembered after successful sync.");
+
+                    int response = JOptionPane.showOptionDialog(
+                            MainFrame.this,
+                            msg.toString(),
+                            "Confirm Folder Mapping Change",
+                            JOptionPane.OK_CANCEL_OPTION,
+                            JOptionPane.WARNING_MESSAGE,
+                            null,
+                            new Object[] {"Continue", "Cancel"},
+                            "Cancel");
+                    if (response == 0) {
+                        pendingMappingRemotePath = nRemote;
+                        onProceed.run();
+                    }
+                } catch (Exception e) {
+                    log("Preflight check failed: " + (e.getCause() != null ? e.getCause().getMessage() : e.getMessage()));
+                    pendingMappingRemotePath = null;
+                    onProceed.run();
+                }
+            }
+        };
+        preflightWorker.execute();
     }
 
     private boolean ensureSenderRoleReady() {
@@ -1338,6 +1411,17 @@ public class MainFrame extends JFrame {
     
     private void onSyncComplete() {
         SwingUtilities.invokeLater(() -> {
+            String remote = pendingMappingRemotePath;
+            if (remote != null && !remote.isEmpty()) {
+                File localFolder = syncManager.getSyncFolder();
+                if (localFolder != null && localFolder.exists()) {
+                    String port = (String) portComboBox.getSelectedItem();
+                    settings.setRememberedFolderMapping(port,
+                            SettingsManager.normalizeFolderPath(localFolder.getAbsolutePath()),
+                            SettingsManager.normalizeFolderPath(remote));
+                }
+                pendingMappingRemotePath = null;
+            }
             progressBar.setValue(100);
             progressBar.setString("Sync complete");
             updateSyncButtonState();
