@@ -217,7 +217,8 @@ class ReconnectRecoveryTest {
                 running::get,
                 connectionAlive::get,
                 syncing::get,
-                transferBusy::get);
+                transferBusy::get,
+                () -> true);
 
         // Simulate: text was previously queued while connected, connection lost, then restored
         connectionAlive.set(true);
@@ -260,7 +261,8 @@ class ReconnectRecoveryTest {
                 running::get,
                 connectionAlive::get,
                 syncing::get,
-                transferBusy::get);
+                transferBusy::get,
+                () -> true);
 
         sharedTextService.queueSharedText("should not send yet");
         sharedTextService.flushIfIdle();
@@ -298,7 +300,8 @@ class ReconnectRecoveryTest {
                 running::get,
                 connectionAlive::get,
                 syncing::get,
-                transferBusy::get);
+                transferBusy::get,
+                () -> true);
 
         SyncCoordinator coordinator = new SyncCoordinator(
                 protocol,

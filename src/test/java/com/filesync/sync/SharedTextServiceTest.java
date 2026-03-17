@@ -34,7 +34,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                protocol::isSending);
+                protocol::isSending,
+                () -> true);
 
         protocol.setBeforeSendHook(text -> {
             if ("first".equals(text)) {
@@ -67,7 +68,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                () -> false);
+                () -> false,
+                () -> true);
 
         service.handleIncomingSharedTextData(123L, true, 17);
 
@@ -95,7 +97,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                () -> false);
+                () -> false,
+                () -> true);
 
         service.handleIncomingSharedTextData(777L, true, 17);
 
@@ -123,7 +126,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                () -> false);
+                () -> false,
+                () -> true);
 
         service.handleIncomingSharedText("bad-payload");
 
@@ -149,7 +153,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                () -> false);
+                () -> false,
+                () -> true);
 
         service.handleIncomingSharedText(200L, "newer");
         service.handleIncomingSharedText(100L, "older");
@@ -168,7 +173,8 @@ class SharedTextServiceTest {
                 () -> true,
                 () -> true,
                 () -> false,
-                () -> false);
+                () -> false,
+                () -> true);
 
         service.handleIncomingSharedText(300L, "newer");
         service.resendLatestSharedText();

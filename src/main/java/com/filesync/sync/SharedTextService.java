@@ -19,6 +19,7 @@ public class SharedTextService {
     private final BooleanSupplier connectionAliveSupplier;
     private final BooleanSupplier syncingSupplier;
     private final BooleanSupplier transferBusySupplier;
+    private final BooleanSupplier roleNegotiatedSupplier;
     private final AtomicReference<SharedTextPayload> pendingSharedText = new AtomicReference<>();
     private final AtomicReference<SharedTextPayload> latestSharedText = new AtomicReference<>();
     private final AtomicLong latestAcceptedTimestamp = new AtomicLong(0);
@@ -28,13 +29,15 @@ public class SharedTextService {
                              BooleanSupplier runningSupplier,
                              BooleanSupplier connectionAliveSupplier,
                              BooleanSupplier syncingSupplier,
-                             BooleanSupplier transferBusySupplier) {
+                             BooleanSupplier transferBusySupplier,
+                             BooleanSupplier roleNegotiatedSupplier) {
         this.protocol = protocol;
         this.eventBus = eventBus;
         this.runningSupplier = runningSupplier;
         this.connectionAliveSupplier = connectionAliveSupplier;
         this.syncingSupplier = syncingSupplier;
         this.transferBusySupplier = transferBusySupplier;
+        this.roleNegotiatedSupplier = roleNegotiatedSupplier;
     }
 
     public void queueSharedText(String text) {
@@ -70,6 +73,9 @@ public class SharedTextService {
             }
             if (!runningSupplier.getAsBoolean() || !connectionAliveSupplier.getAsBoolean()) {
                 eventBus.post(new SyncEvent.ErrorEvent("Cannot send shared text - not connected"));
+                return;
+            }
+            if (!roleNegotiatedSupplier.getAsBoolean()) {
                 return;
             }
             if (!allowWhileSyncing && syncingSupplier.getAsBoolean()) {

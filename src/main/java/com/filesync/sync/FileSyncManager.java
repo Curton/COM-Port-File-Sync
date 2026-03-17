@@ -74,7 +74,8 @@ public class FileSyncManager {
                 running::get,
                 connectionAlive::get,
                 syncing::get,
-                protocol::isXmodemInProgress);
+                protocol::isXmodemInProgress,
+                roleNegotiationService::isRoleNegotiated);
 
         this.fileDropService = new FileDropService(
                 protocol,
