@@ -520,10 +520,17 @@ public class SyncProtocol {
     }
 
     /**
-     * Send role negotiation with priority value
+     * Send role negotiation with priority and tie-breaker values
      */
     public void sendRoleNegotiate(long priority) throws IOException {
-        sendCommand(CMD_ROLE_NEGOTIATE, String.valueOf(priority));
+        sendRoleNegotiate(priority, 0L);
+    }
+
+    /**
+     * Send role negotiation with priority and tie-breaker values
+     */
+    public void sendRoleNegotiate(long priority, long tieBreaker) throws IOException {
+        sendCommand(CMD_ROLE_NEGOTIATE, String.valueOf(priority), String.valueOf(tieBreaker));
     }
 
     /**

@@ -460,7 +460,9 @@ public class FileSyncManager {
                 break;
 
             case SyncProtocol.CMD_ROLE_NEGOTIATE:
-                roleNegotiationService.handleRoleNegotiate(msg.getParamAsLong(0));
+                long remotePriority = msg.getParamAsLong(0);
+                long remoteTieBreaker = msg.getParamAsLong(1);
+                roleNegotiationService.handleRoleNegotiate(remotePriority, remoteTieBreaker);
                 sharedTextService.resendLatestSharedText();
                 break;
 

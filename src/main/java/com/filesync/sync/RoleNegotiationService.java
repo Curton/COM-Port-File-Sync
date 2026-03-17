@@ -18,6 +18,7 @@ public class RoleNegotiationService {
     private final AtomicBoolean isSender;
     private final AtomicBoolean roleNegotiated;
     private final AtomicLong localPriority;
+    private final AtomicLong localTieBreaker;
     private final Random random;
     private final BooleanSupplier connectionAliveSupplier;
 
@@ -33,7 +34,9 @@ public class RoleNegotiationService {
         this.connectionAliveSupplier = connectionAliveSupplier;
         this.random = new Random();
         this.localPriority = new AtomicLong();
+        this.localTieBreaker = new AtomicLong();
         refreshPriority();
+        refreshTieBreaker();
     }
 
     public boolean isSender() {
@@ -62,6 +65,7 @@ public class RoleNegotiationService {
     public void resetForReconnect() {
         roleNegotiated.set(false);
         refreshPriority();
+        refreshTieBreaker();
     }
 
     public void sendRoleNegotiation() {
@@ -69,19 +73,22 @@ public class RoleNegotiationService {
             return;
         }
         try {
-            protocol.sendRoleNegotiate(localPriority.get());
+            protocol.sendRoleNegotiate(localPriority.get(), localTieBreaker.get());
         } catch (IOException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Failed to send role negotiation: " + e.getMessage()));
         }
     }
 
     public void handleRoleNegotiate(long remotePriority) {
+        handleRoleNegotiate(remotePriority, 0L);
+    }
+
+    public void handleRoleNegotiate(long remotePriority, long remoteTieBreaker) {
         if (roleNegotiated.get()) {
             return;
         }
 
-        long myPriority = localPriority.get();
-        boolean shouldBeSender = myPriority > remotePriority;
+        boolean shouldBeSender = shouldBeSenderForNegotiation(remotePriority, remoteTieBreaker);
 
         if (isSender.get() != shouldBeSender) {
             isSender.set(shouldBeSender);
@@ -93,7 +100,7 @@ public class RoleNegotiationService {
         eventBus.post(new SyncEvent.LogEvent("Role negotiated: " + (isSender.get() ? "Sender" : "Receiver")));
 
         try {
-            protocol.sendRoleNegotiate(myPriority);
+            protocol.sendRoleNegotiate(localPriority.get(), localTieBreaker.get());
         } catch (IOException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Failed to respond to role negotiation: " + e.getMessage()));
         }
@@ -115,6 +122,25 @@ public class RoleNegotiationService {
 
     private void refreshPriority() {
         localPriority.set(System.currentTimeMillis() * 1000 + random.nextInt(1000));
+    }
+
+    private void refreshTieBreaker() {
+        long tieBreaker = random.nextLong(Long.MAX_VALUE);
+        localTieBreaker.set(tieBreaker == 0L ? 1L : tieBreaker);
+    }
+
+    private boolean shouldBeSenderForNegotiation(long remotePriority, long remoteTieBreaker) {
+        int priorityCompare = Long.compare(localPriority.get(), remotePriority);
+        if (priorityCompare != 0) {
+            return priorityCompare > 0;
+        }
+
+        int tieCompare = Long.compare(localTieBreaker.get(), remoteTieBreaker);
+        if (tieCompare != 0) {
+            return tieCompare > 0;
+        }
+
+        return true;
     }
 }
 
