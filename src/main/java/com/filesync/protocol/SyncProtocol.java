@@ -571,12 +571,13 @@ public class SyncProtocol {
 
     /**
      * Receive shared text payload transferred via XMODEM.
+     * @param expectedDataLength expected payload size in bytes
      */
-    public String receiveSharedTextData(boolean wasCompressed) throws IOException {
+    public String receiveSharedTextData(boolean wasCompressed, int expectedDataLength) throws IOException {
         xmodemInProgress.set(true);
         try {
             sendAck();
-            byte[] payload = xmodem.receive();
+            byte[] payload = xmodem.receive(expectedDataLength);
             if (payload == null) {
                 String detail = xmodem.getLastErrorMessage();
                 if (detail == null || detail.isEmpty()) {
@@ -622,7 +623,10 @@ public class SyncProtocol {
                 CompressionUtil.compressIfBeneficial(SHARED_TEXT_TRANSFER_NAME, textBytes);
         xmodemInProgress.set(true);
         try {
-            sendCommand(CMD_SHARED_TEXT_DATA, String.valueOf(timestamp), String.valueOf(payload.isCompressed()));
+            sendCommand(CMD_SHARED_TEXT_DATA,
+                    String.valueOf(timestamp),
+                    String.valueOf(payload.isCompressed()),
+                    String.valueOf(payload.getData().length));
             waitForCommand(CMD_ACK);
             boolean success = xmodem.send(payload.getData());
             if (!success) {

@@ -2,6 +2,7 @@ package com.filesync.serial;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 
 /**
  * Implements XMODEM protocol for reliable file transfer over serial port.
@@ -120,7 +121,7 @@ public class XModemTransfer {
      * Receive data using XMODEM protocol.
      *
      * @param expectedDataLength expected compressed payload length in bytes, or -1 if unknown
-     * @return received bytes with padding removed
+     * @return received bytes, with padding removed only when expectedDataLength is unknown
      */
     public byte[] receive(int expectedDataLength) throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -239,8 +240,11 @@ public class XModemTransfer {
             }
         }
 
-        // Remove padding from the last block
+        // Normalize received bytes based on expected length expectations
         byte[] result = outputStream.toByteArray();
+        if (expectedDataLength > 0) {
+            return enforceExpectedLength(result, expectedDataLength);
+        }
         return removePadding(result);
     }
 
@@ -412,6 +416,24 @@ public class XModemTransfer {
         byte[] result = new byte[endIndex];
         System.arraycopy(data, 0, result, 0, endIndex);
         return result;
+    }
+
+    private byte[] enforceExpectedLength(byte[] data, int expectedDataLength) {
+        if (data == null) {
+            return null;
+        }
+
+        if (data.length < expectedDataLength) {
+            reportError("Received data length " + data.length
+                    + " bytes is shorter than expected " + expectedDataLength + " bytes");
+            return null;
+        }
+
+        if (data.length == expectedDataLength) {
+            return data;
+        }
+
+        return Arrays.copyOf(data, expectedDataLength);
     }
 
     private void reportProgress(int currentBlock, int totalBlocks, long bytesTransferred) {

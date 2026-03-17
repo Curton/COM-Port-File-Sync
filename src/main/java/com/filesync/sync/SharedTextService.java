@@ -100,13 +100,9 @@ public class SharedTextService {
         }
     }
 
-    public void handleIncomingSharedTextData(boolean wasCompressed) {
-        handleIncomingSharedTextData(System.currentTimeMillis(), wasCompressed);
-    }
-
-    public void handleIncomingSharedTextData(long remoteTimestamp, boolean wasCompressed) {
+    public void handleIncomingSharedTextData(long remoteTimestamp, boolean wasCompressed, int expectedSize) {
         try {
-            String text = protocol.receiveSharedTextData(wasCompressed);
+            String text = protocol.receiveSharedTextData(wasCompressed, expectedSize);
             SharedTextPayload incoming = new SharedTextPayload(remoteTimestamp, normalizeText(text));
             if (!isNewerThanLatest(incoming.timestamp)) {
                 return;

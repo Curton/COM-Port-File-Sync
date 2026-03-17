@@ -69,10 +69,39 @@ class SharedTextServiceTest {
                 () -> false,
                 () -> false);
 
-        service.handleIncomingSharedTextData(true);
+        service.handleIncomingSharedTextData(123L, true, 17);
 
         assertEquals("large shared text", receivedText.get());
-        assertTrue(protocol.wasReceiveSharedTextDataCalled(), "Expected bulk shared text receive path");
+        assertTrue(protocol.wasReceiveSharedTextDataCalled(), "Expected shared text receive path");
+        assertEquals(17, protocol.getReceivedSharedTextLength());
+    }
+
+    @Test
+    void handleIncomingSharedTextDataUsesExpectedLength() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        protocol.setReceivedSharedText("with explicit length");
+
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        AtomicReference<String> receivedText = new AtomicReference<>();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                receivedText.set(sharedTextEvent.getText());
+            }
+        });
+
+        SharedTextService service = new SharedTextService(
+                protocol,
+                eventBus,
+                () -> true,
+                () -> true,
+                () -> false,
+                () -> false);
+
+        service.handleIncomingSharedTextData(777L, true, 17);
+
+        assertEquals("with explicit length", receivedText.get());
+        assertEquals(17, protocol.getReceivedSharedTextLength());
+        assertTrue(protocol.wasReceiveSharedTextDataWithLengthCalled(), "Expected length-aware receive path");
     }
 
     @Test
@@ -153,7 +182,8 @@ class SharedTextServiceTest {
         private Consumer<String> beforeSendHook;
         private String receivedSharedText = "";
         private IllegalArgumentException decodeFailure;
-        private boolean receiveSharedTextDataCalled;
+        private boolean receiveSharedTextDataWithLengthCalled;
+        private int receivedSharedTextLength = -1;
 
         private TestSharedTextProtocol() {
             super(new SerialPortManager());
@@ -178,8 +208,9 @@ class SharedTextServiceTest {
         }
 
         @Override
-        public String receiveSharedTextData(boolean wasCompressed) {
-            receiveSharedTextDataCalled = true;
+        public String receiveSharedTextData(boolean wasCompressed, int expectedDataLength) {
+            receiveSharedTextDataWithLengthCalled = true;
+            receivedSharedTextLength = expectedDataLength;
             return receivedSharedText;
         }
 
@@ -212,7 +243,15 @@ class SharedTextServiceTest {
         }
 
         private boolean wasReceiveSharedTextDataCalled() {
-            return receiveSharedTextDataCalled;
+            return receiveSharedTextDataWithLengthCalled;
+        }
+
+        private boolean wasReceiveSharedTextDataWithLengthCalled() {
+            return receiveSharedTextDataWithLengthCalled;
+        }
+
+        private int getReceivedSharedTextLength() {
+            return receivedSharedTextLength;
         }
     }
 }

@@ -485,10 +485,10 @@ public class FileSyncManager {
                 break;
 
             case SyncProtocol.CMD_SHARED_TEXT_DATA:
-                if (msg.getParams().length >= 2) {
-                    sharedTextService.handleIncomingSharedTextData(msg.getParamAsLong(0), msg.getParamAsBoolean(1));
+                if (msg.getParams().length >= 3) {
+                    sharedTextService.handleIncomingSharedTextData(msg.getParamAsLong(0), msg.getParamAsBoolean(1), msg.getParamAsInt(2));
                 } else {
-                    sharedTextService.handleIncomingSharedTextData(msg.getParamAsBoolean(0));
+                    eventBus.post(new SyncEvent.ErrorEvent("Invalid shared text data message"));
                 }
                 break;
 
