@@ -24,10 +24,12 @@ public class SettingsManager {
     private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
     private static final String PREF_FAST_MODE = "fastMode";
     private static final String PREF_FOLDER_MAPPING_PREFIX = "folderMapping.";
+    private static final String PREF_FOLDER_MAPPING_COUNT = "count";
     private static final String PREF_FOLDER_MAPPING_SENDER = "sender";
     private static final String PREF_FOLDER_MAPPING_RECEIVER = "receiver";
 
     public static final int MAX_RECENT_FOLDERS = 10;
+    public static final int MAX_REMEMBERED_FOLDER_MAPPINGS = MAX_RECENT_FOLDERS;
     
     // Default values
     public static final int DEFAULT_BAUD_RATE = 115200;
@@ -217,37 +219,153 @@ public class SettingsManager {
 
     /**
      * Get remembered folder mapping for the given port context.
-     * Returns a two-element array [senderPath, receiverPath], or null if no mapping stored.
+     * Returns the most recent two-element array [senderPath, receiverPath], or null if no mapping stored.
      */
     public String[] getRememberedFolderMapping(String port) {
-        String key = keyForPort(port);
-        String sender = prefs.get(key + PREF_FOLDER_MAPPING_SENDER, "");
-        String receiver = prefs.get(key + PREF_FOLDER_MAPPING_RECEIVER, "");
-        if ((sender == null || sender.isEmpty()) && (receiver == null || receiver.isEmpty())) {
+        List<String[]> mappings = getRememberedFolderMappings(port);
+        if (mappings.isEmpty()) {
             return null;
         }
-        return new String[]{
-                sender != null ? sender : "",
-                receiver != null ? receiver : ""
-        };
+        return mappings.get(0);
+    }
+
+    /**
+     * Get remembered folder mappings for the given port context.
+     * Entry 0 is the most recent mapping.
+     */
+    public List<String[]> getRememberedFolderMappings(String port) {
+        return new ArrayList<>(loadRememberedFolderMappings(port));
     }
 
     /**
      * Set remembered folder mapping for the given port context.
+     * Keeps up to {@link #MAX_REMEMBERED_FOLDER_MAPPINGS} entries in MRU order.
      * Call after successful sync completion.
      */
     public void setRememberedFolderMapping(String port, String senderPath, String receiverPath) {
+        String normalizedSender = normalizeFolderPath(senderPath);
+        String normalizedReceiver = normalizeFolderPath(receiverPath);
+        if (normalizedSender.isEmpty() || normalizedReceiver.isEmpty()) {
+            return;
+        }
+
+        List<String[]> mappings = loadRememberedFolderMappings(port);
+        mappings.removeIf(mapping ->
+                normalizedSender.equals(mapping[0]) && normalizedReceiver.equals(mapping[1]));
+        mappings.add(0, new String[]{normalizedSender, normalizedReceiver});
+        saveRememberedFolderMappings(port, mappings);
+    }
+
+    private static String keyForPort(String port) {
+        return PREF_FOLDER_MAPPING_PREFIX + (port != null && !port.isEmpty() ? port + "." : "default.");
+    }
+
+    private List<String[]> loadRememberedFolderMappings(String port) {
         String key = keyForPort(port);
-        prefs.put(key + PREF_FOLDER_MAPPING_SENDER, senderPath != null ? senderPath : "");
-        prefs.put(key + PREF_FOLDER_MAPPING_RECEIVER, receiverPath != null ? receiverPath : "");
+        int storedSize = Math.max(0, prefs.getInt(key + PREF_FOLDER_MAPPING_COUNT, 0));
+        int size = Math.min(storedSize, MAX_REMEMBERED_FOLDER_MAPPINGS);
+
+        List<String[]> mappings = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            String sender = normalizeFolderPath(prefs.get(key + i + "." + PREF_FOLDER_MAPPING_SENDER, ""));
+            String receiver = normalizeFolderPath(prefs.get(key + i + "." + PREF_FOLDER_MAPPING_RECEIVER, ""));
+            if (!sender.isEmpty() && !receiver.isEmpty()) {
+                mappings.add(new String[]{sender, receiver});
+            }
+        }
+
+        String legacySender = normalizeFolderPath(prefs.get(key + PREF_FOLDER_MAPPING_SENDER, ""));
+        String legacyReceiver = normalizeFolderPath(prefs.get(key + PREF_FOLDER_MAPPING_RECEIVER, ""));
+        boolean hasLegacyMapping = !legacySender.isEmpty() && !legacyReceiver.isEmpty();
+        boolean hasStoredMappings = !mappings.isEmpty();
+
+        if (hasLegacyMapping) {
+            mappings.removeIf(mapping ->
+                    legacySender.equals(mapping[0]) && legacyReceiver.equals(mapping[1]));
+            mappings.add(0, new String[]{legacySender, legacyReceiver});
+            prefs.remove(key + PREF_FOLDER_MAPPING_SENDER);
+            prefs.remove(key + PREF_FOLDER_MAPPING_RECEIVER);
+        }
+
+        List<String[]> normalizedMappings = dedupeAndCapRememberedFolderMappings(mappings);
+        boolean mappingsChanged = storedSize != normalizedMappings.size();
+        if (!mappingsChanged && hasStoredMappings) {
+            for (int i = 0; i < mappings.size() && i < normalizedMappings.size(); i++) {
+                String[] existing = mappings.get(i);
+                String[] normalized = normalizedMappings.get(i);
+                if (!existing[0].equals(normalized[0]) || !existing[1].equals(normalized[1])) {
+                    mappingsChanged = true;
+                    break;
+                }
+            }
+            if (!mappingsChanged && mappings.size() != normalizedMappings.size()) {
+                mappingsChanged = true;
+            }
+        } else if (!hasStoredMappings && hasLegacyMapping) {
+            mappingsChanged = true;
+        }
+
+        if (mappingsChanged || hasLegacyMapping) {
+            saveRememberedFolderMappings(port, normalizedMappings);
+        }
+        return normalizedMappings;
+    }
+
+    private void saveRememberedFolderMappings(String port, List<String[]> mappings) {
+        List<String[]> normalizedMappings = dedupeAndCapRememberedFolderMappings(mappings);
+        String key = keyForPort(port);
+        prefs.putInt(key + PREF_FOLDER_MAPPING_COUNT, normalizedMappings.size());
+        for (int i = 0; i < normalizedMappings.size(); i++) {
+            prefs.put(key + i + "." + PREF_FOLDER_MAPPING_SENDER, normalizedMappings.get(i)[0]);
+            prefs.put(key + i + "." + PREF_FOLDER_MAPPING_RECEIVER, normalizedMappings.get(i)[1]);
+        }
+
+        for (int i = normalizedMappings.size(); i < MAX_REMEMBERED_FOLDER_MAPPINGS; i++) {
+            prefs.remove(key + i + "." + PREF_FOLDER_MAPPING_SENDER);
+            prefs.remove(key + i + "." + PREF_FOLDER_MAPPING_RECEIVER);
+        }
+
+        prefs.remove(key + PREF_FOLDER_MAPPING_SENDER);
+        prefs.remove(key + PREF_FOLDER_MAPPING_RECEIVER);
         try {
             prefs.flush();
         } catch (Exception ignored) {
         }
     }
 
-    private static String keyForPort(String port) {
-        return PREF_FOLDER_MAPPING_PREFIX + (port != null && !port.isEmpty() ? port + "." : "default.");
+    private List<String[]> dedupeAndCapRememberedFolderMappings(List<String[]> mappings) {
+        List<String[]> unique = new ArrayList<>();
+        if (mappings == null) {
+            return unique;
+        }
+
+        for (String[] mapping : mappings) {
+            if (mapping == null || mapping.length < 2) {
+                continue;
+            }
+
+            String sender = normalizeFolderPath(mapping[0]);
+            String receiver = normalizeFolderPath(mapping[1]);
+            if (sender.isEmpty() || receiver.isEmpty()) {
+                continue;
+            }
+
+            boolean duplicate = false;
+            for (String[] existing : unique) {
+                if (sender.equals(existing[0]) && receiver.equals(existing[1])) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                unique.add(new String[]{sender, receiver});
+            }
+        }
+
+        while (unique.size() > MAX_REMEMBERED_FOLDER_MAPPINGS) {
+            unique.remove(unique.size() - 1);
+        }
+        return unique;
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.filesync.ui;
 
 import java.io.File;
+import java.util.List;
 
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
@@ -142,15 +143,18 @@ public class SyncController {
                     String remotePath = get();
                     String nLocal = SettingsManager.normalizeFolderPath(localPath);
                     String nRemote = SettingsManager.normalizeFolderPath(remotePath);
-                    String[] remembered = settings.getRememberedFolderMapping(port);
-                    String rememberedSender = remembered != null ? remembered[0] : "";
-                    String rememberedReceiver = remembered != null ? remembered[1] : "";
-
-                    boolean match = SettingsManager.isMappingMatch(
-                            nLocal,
-                            nRemote,
-                            rememberedSender,
-                            rememberedReceiver);
+                    List<String[]> rememberedMappings = settings.getRememberedFolderMappings(port);
+                    boolean match = false;
+                    for (String[] remembered : rememberedMappings) {
+                        if (SettingsManager.isMappingMatch(
+                                nLocal,
+                                nRemote,
+                                remembered[0],
+                                remembered[1])) {
+                            match = true;
+                            break;
+                        }
+                    }
 
                     if (match) {
                         state.setPendingMappingRemotePath(nRemote);
@@ -158,11 +162,18 @@ public class SyncController {
                         return;
                     }
 
-                    if (SettingsManager.isBothSidesChangedFromRemembered(
-                            nLocal,
-                            nRemote,
-                            rememberedSender,
-                            rememberedReceiver)) {
+                    boolean bothSidesChanged = !rememberedMappings.isEmpty();
+                    for (String[] remembered : rememberedMappings) {
+                        if (!SettingsManager.isBothSidesChangedFromRemembered(
+                                nLocal,
+                                nRemote,
+                                remembered[0],
+                                remembered[1])) {
+                            bothSidesChanged = false;
+                            break;
+                        }
+                    }
+                    if (bothSidesChanged) {
                         state.setPendingMappingRemotePath(nRemote);
                         logController.log("Detected folder changes on both sides; proceeding with current mapping.");
                         onProceed.run();
@@ -170,9 +181,22 @@ public class SyncController {
                     }
 
                     StringBuilder msg = new StringBuilder();
-                    msg.append("Folder mapping differs from last successful sync.\n\n");
-                    msg.append("Remembered: ").append(remembered != null && !remembered[0].isEmpty() ? remembered[0] : "(none)");
-                    msg.append(" -> ").append(remembered != null && !remembered[1].isEmpty() ? remembered[1] : "(none)");
+                    msg.append("Folder mapping differs from last successful syncs.\n\n");
+                    msg.append("Remembered:\n");
+                    if (rememberedMappings.isEmpty()) {
+                        msg.append("  (none)\n");
+                    } else {
+                        for (int i = 0; i < rememberedMappings.size(); i++) {
+                            String[] remembered = rememberedMappings.get(i);
+                            msg.append("  ")
+                                    .append(i + 1)
+                                    .append(") ")
+                                    .append(remembered[0].isEmpty() ? "(none)" : remembered[0])
+                                    .append(" -> ")
+                                    .append(remembered[1].isEmpty() ? "(none)" : remembered[1])
+                                    .append('\n');
+                        }
+                    }
                     msg.append("\n\nCurrent: ").append(nLocal);
                     msg.append(" -> ").append(nRemote.isEmpty() ? "(unknown)" : nRemote);
                     msg.append("\n\nProceed? The new mapping will be remembered after successful sync.");
