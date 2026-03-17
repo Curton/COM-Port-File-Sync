@@ -136,9 +136,28 @@ com.filesync/
 |   |-- FileChangeDetector.java     # Manifest generation and delta detection
 |   |-- CompressionUtil.java        # GZIP compression with smart detection
 |   |-- GitignoreParser.java        # .gitignore pattern matching
-|   |-- SyncEventBus.java           # Event bus interface (SimpleSyncEventBus impl)
+|   |-- FileDropService.java        # Drag-and-drop single file queuing
+|   |-- SyncPreviewPlan.java        # Sync operation planning and preview
+|   |-- SyncEventBus.java           # Event bus interface
+|   |-- SimpleSyncEventBus.java     # Event bus implementation
+|   |-- SyncEvent.java              # Event data classes
+|   |-- SyncEventType.java          # Event type definitions
+|   |-- SyncEventListener.java      # Event listener interface
 |-- ui/
     |-- MainFrame.java              # Swing GUI and user interactions
+    |-- MainFrameComponents.java    # Reusable UI components
+    |-- MainFrameState.java         # UI state management
+    |-- ConnectionController.java   # Connection UI logic
+    |-- FolderController.java       # Folder selection and mapping
+    |-- SyncController.java         # Sync operation UI
+    |-- DragDropController.java     # Drag-and-drop handling
+    |-- SharedTextController.java   # Shared text area UI
+    |-- SettingsDialog.java         # Settings configuration dialog
+    |-- SyncPreviewRenderer.java    # Sync preview table rendering
+    |-- SyncEventBridge.java        # Bridge between sync events and UI
+    |-- LogController.java          # Log display controller
+    |-- SyncPreviewRow.java         # Preview table row model
+    |-- UiFormatting.java           # UI styling utilities
 ```
 
 ## Protocol Details
@@ -190,12 +209,3 @@ mvn test
 # Build without tests
 mvn clean package -DskipTests
 ```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
