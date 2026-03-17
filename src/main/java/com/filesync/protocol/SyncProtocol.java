@@ -268,6 +268,12 @@ public class SyncProtocol {
             return false;
         }
 
+        // Check file size limit (2GB max due to integer array allocation)
+        if (file.length() > Integer.MAX_VALUE) {
+            sendCommand(CMD_ERROR, "File too large: " + relativePath + " (max 2GB)");
+            return false;
+        }
+
         // Read file content
         byte[] data = readFileContent(file);
 
@@ -799,8 +805,12 @@ public class SyncProtocol {
     }
 
     private byte[] readFileContent(File file) throws IOException {
+        long fileSize = file.length();
+        if (fileSize > Integer.MAX_VALUE) {
+            throw new IOException("File too large: " + fileSize + " bytes (max: " + Integer.MAX_VALUE + " bytes)");
+        }
         try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] data = new byte[(int) file.length()];
+            byte[] data = new byte[(int) fileSize];
             int totalRead = 0;
             while (totalRead < data.length) {
                 int read = fis.read(data, totalRead, data.length - totalRead);
