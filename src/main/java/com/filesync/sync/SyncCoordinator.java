@@ -29,6 +29,7 @@ public class SyncCoordinator {
     private final BooleanSupplier roleNegotiatedSupplier;
     private final AtomicBoolean syncing;
     private final Runnable onSyncIdle;
+    private final Runnable onSyncBoundary;
     private final Runnable heartbeatTouch;
 
     private ScheduledExecutorService executor;
@@ -45,6 +46,7 @@ public class SyncCoordinator {
                            BooleanSupplier roleNegotiatedSupplier,
                            AtomicBoolean syncing,
                            Runnable onSyncIdle,
+                           Runnable onSyncBoundary,
                            Runnable heartbeatTouch) {
         this.protocol = protocol;
         this.eventBus = eventBus;
@@ -57,6 +59,7 @@ public class SyncCoordinator {
         this.roleNegotiatedSupplier = roleNegotiatedSupplier;
         this.syncing = syncing;
         this.onSyncIdle = onSyncIdle;
+        this.onSyncBoundary = onSyncBoundary;
         this.heartbeatTouch = heartbeatTouch;
     }
 
@@ -259,6 +262,7 @@ public class SyncCoordinator {
         protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
         eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
         touchHeartbeat();
+        flushSharedTextBetweenOperations();
     }
 
     public void handleSyncComplete() {
@@ -279,6 +283,7 @@ public class SyncCoordinator {
             if (fileToDelete.delete()) {
                 eventBus.post(new SyncEvent.LogEvent("File deleted: " + relativePath));
                 cleanupEmptyDirectories(fileToDelete.getParentFile(), syncFolder);
+                flushSharedTextBetweenOperations();
             } else {
                 eventBus.post(new SyncEvent.ErrorEvent("Failed to delete file: " + relativePath));
             }
@@ -295,6 +300,7 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.LogEvent("Creating directory: " + relativePath));
             if (dirToCreate.mkdirs()) {
                 eventBus.post(new SyncEvent.LogEvent("Directory created: " + relativePath));
+                flushSharedTextBetweenOperations();
             } else {
                 eventBus.post(new SyncEvent.ErrorEvent("Failed to create directory: " + relativePath));
             }
@@ -312,6 +318,7 @@ public class SyncCoordinator {
             if (deleteDirectoryRecursively(dirToDelete)) {
                 eventBus.post(new SyncEvent.LogEvent("Directory deleted: " + relativePath));
                 cleanupEmptyDirectories(dirToDelete.getParentFile(), syncFolder);
+                flushSharedTextBetweenOperations();
             } else {
                 eventBus.post(new SyncEvent.ErrorEvent("Failed to delete directory: " + relativePath));
             }
@@ -346,6 +353,7 @@ public class SyncCoordinator {
                 }
                 eventBus.post(new SyncEvent.LogEvent(message));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, fileInfo.getPath()));
+                flushSharedTextBetweenOperations();
             }
 
             for (String dirPath : syncPlan.getEmptyDirectoriesToCreate()) {
@@ -353,6 +361,7 @@ public class SyncCoordinator {
                 eventBus.post(new SyncEvent.LogEvent("Creating dir [" + operationIndex + "/" + totalOperations + "]: " + dirPath));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[DIR] " + dirPath));
                 protocol.sendMkdir(dirPath);
+                flushSharedTextBetweenOperations();
             }
 
             for (String pathToDelete : syncPlan.getFilesToDelete()) {
@@ -360,6 +369,7 @@ public class SyncCoordinator {
                 eventBus.post(new SyncEvent.LogEvent("Deleting [" + operationIndex + "/" + totalOperations + "]: " + pathToDelete));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[DEL] " + pathToDelete));
                 protocol.sendFileDelete(pathToDelete);
+                flushSharedTextBetweenOperations();
             }
 
             for (String dirToDelete : syncPlan.getEmptyDirectoriesToDelete()) {
@@ -367,6 +377,7 @@ public class SyncCoordinator {
                 eventBus.post(new SyncEvent.LogEvent("Deleting dir [" + operationIndex + "/" + totalOperations + "]: " + dirToDelete));
                 eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, "[RMDIR] " + dirToDelete));
                 protocol.sendRmdir(dirToDelete);
+                flushSharedTextBetweenOperations();
             }
 
             protocol.sendSyncComplete();
@@ -433,6 +444,12 @@ public class SyncCoordinator {
     private void touchHeartbeat() {
         if (heartbeatTouch != null) {
             heartbeatTouch.run();
+        }
+    }
+
+    private void flushSharedTextBetweenOperations() {
+        if (onSyncBoundary != null) {
+            onSyncBoundary.run();
         }
     }
 }

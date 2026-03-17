@@ -95,6 +95,8 @@ class ReconnectRecoveryTest {
                 () -> {
                 },
                 () -> {
+                },
+                () -> {
                 });
 
         coordinator.startSync();
@@ -132,6 +134,8 @@ class ReconnectRecoveryTest {
                 () -> true,
                 () -> true,
                 syncing,
+                () -> {
+                },
                 () -> {
                 },
                 () -> {
@@ -273,6 +277,68 @@ class ReconnectRecoveryTest {
     }
 
     @Test
+    void sharedTextSentAtSyncBoundaryBeforeCompletion() throws InterruptedException {
+        AtomicBoolean running = new AtomicBoolean(true);
+        AtomicBoolean connectionAlive = new AtomicBoolean(true);
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        AtomicBoolean transferBusy = new AtomicBoolean(false);
+        AtomicBoolean syncCompleted = new AtomicBoolean(false);
+
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.SyncCompleteEvent) {
+                syncCompleted.set(true);
+            }
+        });
+
+        BoundaryPrioritySyncProtocol protocol = new BoundaryPrioritySyncProtocol(syncing);
+        SharedTextService sharedTextService = new SharedTextService(
+                protocol,
+                eventBus,
+                running::get,
+                connectionAlive::get,
+                syncing::get,
+                transferBusy::get);
+
+        SyncCoordinator coordinator = new SyncCoordinator(
+                protocol,
+                eventBus,
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                connectionAlive::get,
+                () -> true,
+                () -> true,
+                syncing,
+                sharedTextService::onSyncIdle,
+                sharedTextService::onSyncBoundary,
+                () -> {
+                });
+
+        SyncPreviewPlan longSyncPlan = new SyncPreviewPlan(
+                List.of(new FileChangeDetector.FileInfo("long.txt", 10L, 0L, "md5")),
+                List.of(),
+                List.of(),
+                List.of(),
+                10L,
+                false);
+
+        new Thread(() -> coordinator.startSyncWithPlan(longSyncPlan), "sync-boundary-test").start();
+
+        waitUntil(protocol::isSendFileStarted, Duration.ofSeconds(2));
+        sharedTextService.queueSharedText("shared while syncing");
+        protocol.allowFileSendToContinue();
+
+        waitUntil(protocol::wasSharedTextSent, Duration.ofSeconds(2));
+        assertEquals("shared while syncing", protocol.getLastSharedText(),
+                "Shared text should be sent when queued during an active sync operation");
+        assertTrue(protocol.wasSharedTextSentWhileSyncing(),
+                "Shared text should be sent before sync completes");
+        waitUntil(syncCompleted::get, Duration.ofSeconds(2));
+    }
+
+    @Test
     void startSyncWithPlanUsesProvidedPlanWithoutManifestRoundtrip() throws IOException, InterruptedException {
         Files.writeString(tempDir.resolve("test.txt"), "payload");
 
@@ -299,6 +365,7 @@ class ReconnectRecoveryTest {
                 () -> true,
                 () -> true,
                 syncing,
+                () -> {},
                 () -> {},
                 () -> {});
 
@@ -445,6 +512,84 @@ class ReconnectRecoveryTest {
                 throw new IOException("Interrupted before completing simulated send");
             }
             return false;
+        }
+
+        @Override
+        public void sendMkdir(String relativePath) {
+            // No-op
+        }
+
+        @Override
+        public void sendFileDelete(String relativePath) {
+            // No-op
+        }
+
+        @Override
+        public void sendRmdir(String relativePath) {
+            // No-op
+        }
+
+        @Override
+        public void sendSyncComplete() {
+            // No-op
+        }
+    }
+
+    private static final class BoundaryPrioritySyncProtocol extends SyncProtocol {
+        private final AtomicBoolean sendFileStarted = new AtomicBoolean(false);
+        private final AtomicBoolean syncingState;
+        private final AtomicBoolean sharedTextSent = new AtomicBoolean(false);
+        private final AtomicBoolean sharedTextSentWhileSyncing = new AtomicBoolean(false);
+        private final java.util.concurrent.CountDownLatch continueLatch = new java.util.concurrent.CountDownLatch(1);
+        private volatile String lastSharedText;
+
+        BoundaryPrioritySyncProtocol(AtomicBoolean syncingState) {
+            super(new StubSerialPortManager(true));
+            this.syncingState = syncingState;
+        }
+
+        void allowFileSendToContinue() {
+            continueLatch.countDown();
+        }
+
+        boolean isSendFileStarted() {
+            return sendFileStarted.get();
+        }
+
+        boolean wasSharedTextSent() {
+            return sharedTextSent.get();
+        }
+
+        boolean wasSharedTextSentWhileSyncing() {
+            return sharedTextSentWhileSyncing.get();
+        }
+
+        String getLastSharedText() {
+            return lastSharedText;
+        }
+
+        @Override
+        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+            sendFileStarted.set(true);
+            try {
+                continueLatch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while simulating long file send", e);
+            }
+            return true;
+        }
+
+        @Override
+        public void sendSharedText(long timestamp, String text) {
+            lastSharedText = text;
+            sharedTextSent.set(true);
+            sharedTextSentWhileSyncing.set(syncingState.get());
+        }
+
+        @Override
+        public void sendSharedText(String text) {
+            sendSharedText(System.currentTimeMillis(), text);
         }
 
         @Override

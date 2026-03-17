@@ -55,6 +55,14 @@ public class SharedTextService {
     }
 
     public void flushIfIdle() {
+        flushIfIdle(false);
+    }
+
+    public void onSyncBoundary() {
+        flushIfIdle(true);
+    }
+
+    private void flushIfIdle(boolean allowWhileSyncing) {
         while (true) {
             SharedTextPayload textToSend = pendingSharedText.get();
             if (textToSend == null) {
@@ -64,7 +72,10 @@ public class SharedTextService {
                 eventBus.post(new SyncEvent.ErrorEvent("Cannot send shared text - not connected"));
                 return;
             }
-            if (syncingSupplier.getAsBoolean() || transferBusySupplier.getAsBoolean()) {
+            if (!allowWhileSyncing && syncingSupplier.getAsBoolean()) {
+                return;
+            }
+            if (transferBusySupplier.getAsBoolean()) {
                 return;
             }
             try {

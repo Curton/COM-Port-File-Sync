@@ -96,6 +96,7 @@ public class FileSyncManager {
                 roleNegotiationService::isRoleNegotiated,
                 syncing,
                 sharedTextService::onSyncIdle,
+                sharedTextService::onSyncBoundary,
                 connectionService::recordMessageActivity);
 
         protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
