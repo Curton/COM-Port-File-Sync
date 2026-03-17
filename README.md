@@ -28,6 +28,9 @@ COM Port File Sync enables reliable file transfer between two machines connected
 - **Auto-Connect** - Automatically connects to the last used port or single available port on startup
 - **Role Negotiation** - Automatic sender/receiver role assignment on connection
 - **Connection Monitoring** - Heartbeat-based connection health monitoring with auto-recovery
+- **Drag-and-Drop File Send** - Quickly queue one local file for transfer by dragging it onto the main window
+- **Sync Preview** - Review planned file operations in a preview dialog before applying a sync
+- **Folder Mapping Guard** - Remembers local-to-remote folder mappings per port and prompts when paths changed
 
 ## Requirements
 
@@ -73,7 +76,8 @@ java -jar target/com-file-sync-*.jar
 3. **Select the COM port** from the dropdown on each machine
 4. **Click "Connect"** on both sides - they will auto-negotiate roles
 5. **Select sync folders** on both machines using the folder dropdown for quick-recent picks or the "Browse..." button
-6. **Click "Start Sync"** on the sender side
+6. **Click "Preview Sync"** to inspect the operation plan (recommended for first-time syncs)
+7. **Click "Start Sync"** on the sender side when ready to apply changes
 
 The folder dropdown keeps up to the 10 most recently used valid folders for quick switching.
 
@@ -96,6 +100,13 @@ Click the **Settings** button to configure COM port parameters:
 | **Respect .gitignore** | When enabled, files matching `.gitignore` patterns are excluded from sync |
 | **Strict Sync** | When enabled, files on receiver that don't exist on sender will be deleted |
 | **Fast Mode** | Uses file metadata instead of MD5 hashes for faster manifest comparison |
+| **Remembered Folder Mapping** | Remote folder mapping is remembered per port; you will be prompted when mapping changes |
+
+### New Feature Highlights
+
+- **Folder Mapping Confirmation** - On sync start, the app compares local/remote folder paths with remembered mappings and asks for confirmation when they change.
+- **Dry-Run Preview** - Use the preview action to validate transfer scope before transfers begin.
+- **Single-File Drag-and-Drop Sending** - Drop one file directly onto the main interface for immediate transfer when connected.
 
 ### Shared Text
 

@@ -49,7 +49,13 @@ goto :promptChoice
 
 :runjar
 echo using JAR: !LATEST!
-java -jar "%TARGET_DIR%\!LATEST!"
+start "" /b javaw -jar "%TARGET_DIR%\!LATEST!"
+if !errorlevel! neq 0 (
+    echo Failed to start application.
+    exit /b 1
+)
+
 echo.
-echo JAR exited with code: !errorlevel!
+echo Application started in background. Close this window if you do not need logs.
+exit /b 0
 endlocal
