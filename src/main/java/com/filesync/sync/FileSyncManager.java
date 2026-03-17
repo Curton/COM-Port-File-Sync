@@ -235,6 +235,7 @@ public class FileSyncManager {
         connectionService.stop();
         syncCoordinator.cancelOngoingSync();
         sharedTextService.clearPendingSharedText();
+        serialPort.close();
 
         if (listenerFuture != null) {
             listenerFuture.cancel(true);
