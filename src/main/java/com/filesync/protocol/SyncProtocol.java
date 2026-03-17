@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -47,6 +48,8 @@ public class SyncProtocol {
     private static final String START_MARKER = "[[SYNC:";
     private static final String END_MARKER = "]]";
     private static final String SEPARATOR = ":";
+    private static final char SEPARATOR_CHAR = ':';
+    private static final char ESCAPE_CHAR = '\\';
 
     private static final int DEFAULT_TIMEOUT_MS = 30000;
     private static final int SHARED_TEXT_INLINE_BUDGET_MS = 5000;
@@ -94,7 +97,7 @@ public class SyncProtocol {
         StringBuilder sb = new StringBuilder();
         sb.append(START_MARKER).append(command);
         for (String param : params) {
-            sb.append(SEPARATOR).append(param);
+            sb.append(SEPARATOR).append(escapeProtocolParam(param));
         }
         sb.append(END_MARKER);
         serialPort.writeLine(sb.toString());
@@ -117,7 +120,7 @@ public class SyncProtocol {
         }
 
         String content = line.substring(START_MARKER.length(), line.length() - END_MARKER.length());
-        String[] parts = content.split(SEPARATOR, -1);
+        String[] parts = splitEscapedFields(content);
 
         if (parts.length == 0) {
             return null;
@@ -128,6 +131,46 @@ public class SyncProtocol {
         System.arraycopy(parts, 1, params, 0, params.length);
 
         return new Message(command, params);
+    }
+
+    private static String escapeProtocolParam(String param) {
+        if (param == null) {
+            return "";
+        }
+        return param.replace(String.valueOf(ESCAPE_CHAR), String.valueOf(ESCAPE_CHAR) + ESCAPE_CHAR)
+                .replace(SEPARATOR, String.valueOf(ESCAPE_CHAR) + SEPARATOR_CHAR);
+    }
+
+    private static String[] splitEscapedFields(String content) {
+        ArrayList<String> parts = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean escaping = false;
+
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (escaping) {
+                current.append(c);
+                escaping = false;
+                continue;
+            }
+            if (c == ESCAPE_CHAR) {
+                escaping = true;
+                continue;
+            }
+            if (c == SEPARATOR_CHAR) {
+                parts.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+
+        if (escaping) {
+            current.append(ESCAPE_CHAR);
+        }
+        parts.add(current.toString());
+
+        return parts.toArray(new String[0]);
     }
 
     /**
@@ -764,6 +807,16 @@ public class SyncProtocol {
      * Protocol message class
      */
     public static class Message {
+        public static class ProtocolFieldParseException extends IllegalArgumentException {
+            ProtocolFieldParseException(String message) {
+                super(message);
+            }
+
+            ProtocolFieldParseException(String message, Throwable cause) {
+                super(message, cause);
+            }
+        }
+
         private final String command;
         private final String[] params;
 
@@ -788,19 +841,42 @@ public class SyncProtocol {
         }
 
         public int getParamAsInt(int index) {
-            String param = getParam(index);
-            if (param != null) {
-                return Integer.parseInt(param);
-            }
-            return 0;
+            return parseIntParameter(index);
         }
 
         public long getParamAsLong(int index) {
-            String param = getParam(index);
-            if (param != null) {
-                return Long.parseLong(param);
+            return parseLongParameter(index);
+        }
+
+        private int parseIntParameter(int index) {
+            String param = getRequiredParam(index, "integer");
+            try {
+                return Integer.parseInt(param);
+            } catch (NumberFormatException e) {
+                throw new ProtocolFieldParseException(
+                        "Invalid integer parameter at index " + index + " for command '" + command + "': " + param,
+                        e);
             }
-            return 0L;
+        }
+
+        private long parseLongParameter(int index) {
+            String param = getRequiredParam(index, "long");
+            try {
+                return Long.parseLong(param);
+            } catch (NumberFormatException e) {
+                throw new ProtocolFieldParseException(
+                        "Invalid long parameter at index " + index + " for command '" + command + "': " + param,
+                        e);
+            }
+        }
+
+        private String getRequiredParam(int index, String expectedType) {
+            String param = getParam(index);
+            if (param == null || param.trim().isEmpty()) {
+                throw new ProtocolFieldParseException(
+                        "Missing " + expectedType + " parameter at index " + index + " for command '" + command + "'.");
+            }
+            return param.trim();
         }
 
         public boolean getParamAsBoolean(int index) {

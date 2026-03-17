@@ -395,6 +395,15 @@ public class FileSyncManager {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
+            } catch (SyncProtocol.Message.ProtocolFieldParseException e) {
+                if (running.get()) {
+                    eventBus.post(new SyncEvent.ErrorEvent("Protocol parse error: " + e.getMessage()));
+                    try {
+                        protocol.sendError("Protocol parse error");
+                    } catch (IOException ignored) {
+                        // Ignore send failures while handling malformed inbound messages.
+                    }
+                }
             } catch (IOException e) {
                 if (running.get()) {
                     eventBus.post(new SyncEvent.ErrorEvent("Communication error: " + e.getMessage()));
