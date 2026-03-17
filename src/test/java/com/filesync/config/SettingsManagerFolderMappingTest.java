@@ -36,6 +36,18 @@ class SettingsManagerFolderMappingTest {
     }
 
     @Test
+    void isBothSidesChangedFromRemembered_returnsTrueOnlyWhenBothDiffer() {
+        assertTrue(SettingsManager.isBothSidesChangedFromRemembered(
+                "C:/newLocal", "D:/newRemote", "C:/oldLocal", "D:/oldRemote"));
+        assertFalse(SettingsManager.isBothSidesChangedFromRemembered(
+                "C:/newLocal", "D:/oldRemote", "C:/oldLocal", "D:/oldRemote"));
+        assertFalse(SettingsManager.isBothSidesChangedFromRemembered(
+                "C:/oldLocal", "D:/newRemote", "C:/oldLocal", "D:/oldRemote"));
+        assertFalse(SettingsManager.isBothSidesChangedFromRemembered(
+                "C:/newLocal", "", "C:/oldLocal", "D:/oldRemote"));
+    }
+
+    @Test
     void getRememberedFolderMapping_returnsNullWhenEmpty() {
         SettingsManager settings = new SettingsManager();
         String port = "COM99_TEST_EMPTY_" + System.currentTimeMillis();

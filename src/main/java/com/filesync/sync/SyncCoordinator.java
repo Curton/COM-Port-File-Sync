@@ -196,28 +196,41 @@ public class SyncCoordinator {
      * @param senderFastMode sender's fast mode setting, or null to use local
      */
     public void handleManifestRequest(Boolean senderRespectGitignore, Boolean senderFastMode) throws IOException {
-        File syncFolder = syncFolderSupplier.get();
-        if (syncFolder == null || !syncFolder.exists()) {
-            protocol.sendError("Sync folder not configured");
-            return;
+        boolean alreadySyncing = syncing.getAndSet(true);
+        try {
+            File syncFolder = syncFolderSupplier.get();
+            if (syncFolder == null || !syncFolder.exists()) {
+                protocol.sendError("Sync folder not configured");
+                return;
+            }
+
+            // Use sender's settings if provided, otherwise use local settings
+            boolean respectGitignore = senderRespectGitignore != null
+                    ? senderRespectGitignore
+                    : respectGitignoreModeSupplier.getAsBoolean();
+            boolean fastMode = senderFastMode != null
+                    ? senderFastMode
+                    : fastModeSupplier.getAsBoolean();
+
+            eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
+            FileChangeDetector.FileManifest manifest = FileChangeDetector.generateManifest(
+                    syncFolder,
+                    respectGitignore,
+                    fastMode);
+            protocol.sendManifest(manifest);
+            String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
+            if (manifest.getEmptyDirectoryCount() > 0) {
+                logMsg += ", " + manifest.getEmptyDirectoryCount() + " empty dirs";
+            }
+            logMsg += ")";
+            eventBus.post(new SyncEvent.LogEvent(logMsg));
+        } finally {
+            if (!alreadySyncing) {
+                syncing.set(false);
+                onSyncIdle.run();
+            }
+            touchHeartbeat();
         }
-        
-        // Use sender's settings if provided, otherwise use local settings
-        boolean respectGitignore = senderRespectGitignore != null ? senderRespectGitignore : respectGitignoreModeSupplier.getAsBoolean();
-        boolean fastMode = senderFastMode != null ? senderFastMode : fastModeSupplier.getAsBoolean();
-        
-        eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
-        FileChangeDetector.FileManifest manifest = FileChangeDetector.generateManifest(
-                syncFolder,
-                respectGitignore,
-                fastMode);
-        protocol.sendManifest(manifest);
-        String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
-        if (manifest.getEmptyDirectoryCount() > 0) {
-            logMsg += ", " + manifest.getEmptyDirectoryCount() + " empty dirs";
-        }
-        logMsg += ")";
-        eventBus.post(new SyncEvent.LogEvent(logMsg));
     }
 
     public void handleFileRequest(String relativePath) throws IOException {

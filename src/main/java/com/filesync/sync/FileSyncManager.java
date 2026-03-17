@@ -57,7 +57,7 @@ public class FileSyncManager {
                 running,
                 connectionAlive,
                 syncing::get,
-                protocol::isXmodemInProgress,
+                this::isProtocolExchangeBusy,
                 this::onConnectionLost,
                 this::onConnectionRestored);
 
@@ -304,6 +304,7 @@ public class FileSyncManager {
             return "";
         } finally {
             senderBlockingProtocolExchange.set(false);
+            connectionService.recordMessageActivity();
         }
     }
 
@@ -329,10 +330,14 @@ public class FileSyncManager {
         if (getSyncFolder() == null || !getSyncFolder().exists()) {
             throw new IllegalStateException("Please select a sync folder first");
         }
+        senderBlockingProtocolExchange.set(true);
         try {
             return syncCoordinator.createSyncPreviewPlan();
         } catch (IOException e) {
             throw new RuntimeException("Failed to build sync preview: " + e.getMessage(), e);
+        } finally {
+            senderBlockingProtocolExchange.set(false);
+            connectionService.recordMessageActivity();
         }
     }
 
@@ -442,6 +447,7 @@ public class FileSyncManager {
                 break;
 
             case SyncProtocol.CMD_ERROR:
+                syncCoordinator.cancelOngoingSync();
                 eventBus.post(new SyncEvent.ErrorEvent("Remote error: " + msg.getParam(0)));
                 break;
 
@@ -539,6 +545,10 @@ public class FileSyncManager {
         if (clearBufferedText) {
             sharedTextService.clearPendingSharedText();
         }
+    }
+
+    private boolean isProtocolExchangeBusy() {
+        return protocol.isXmodemInProgress() || senderBlockingProtocolExchange.get();
     }
 }
 

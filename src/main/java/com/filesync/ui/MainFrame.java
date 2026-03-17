@@ -1113,14 +1113,23 @@ public class MainFrame extends JFrame {
                     String nLocal = SettingsManager.normalizeFolderPath(localPath);
                     String nRemote = SettingsManager.normalizeFolderPath(remotePath);
                     String[] remembered = settings.getRememberedFolderMapping(port);
+                    String rememberedSender = remembered != null ? remembered[0] : "";
+                    String rememberedReceiver = remembered != null ? remembered[1] : "";
 
                     boolean match = SettingsManager.isMappingMatch(
                             nLocal, nRemote,
-                            remembered != null ? remembered[0] : "",
-                            remembered != null ? remembered[1] : "");
+                            rememberedSender, rememberedReceiver);
 
                     if (match) {
                         pendingMappingRemotePath = nRemote;
+                        onProceed.run();
+                        return;
+                    }
+
+                    if (SettingsManager.isBothSidesChangedFromRemembered(
+                            nLocal, nRemote, rememberedSender, rememberedReceiver)) {
+                        pendingMappingRemotePath = nRemote;
+                        log("Detected folder changes on both sides; proceeding with current mapping.");
                         onProceed.run();
                         return;
                     }
@@ -1673,8 +1682,8 @@ public class MainFrame extends JFrame {
                             SettingsManager.normalizeFolderPath(localFolder.getAbsolutePath()),
                             SettingsManager.normalizeFolderPath(remote));
                 }
-                pendingMappingRemotePath = null;
             }
+            pendingMappingRemotePath = null;
             progressBar.setValue(100);
             progressBar.setString("Sync complete");
             updateSyncButtonState();

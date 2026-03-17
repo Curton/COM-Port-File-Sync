@@ -267,6 +267,24 @@ public class SettingsManager {
     }
 
     /**
+     * Returns true when both local and remote folders are changed from remembered mapping.
+     * Useful to treat a full mapping switch as an intentional change.
+     */
+    public static boolean isBothSidesChangedFromRemembered(String localPath, String remotePath,
+                                                           String rememberedSender, String rememberedReceiver) {
+        String nLocal = normalizeFolderPath(localPath);
+        String nRemote = normalizeFolderPath(remotePath);
+        String nSender = normalizeFolderPath(rememberedSender);
+        String nReceiver = normalizeFolderPath(rememberedReceiver);
+
+        if (nLocal.isEmpty() || nRemote.isEmpty() || nSender.isEmpty() || nReceiver.isEmpty()) {
+            return false;
+        }
+
+        return !nLocal.equals(nSender) && !nRemote.equals(nReceiver);
+    }
+
+    /**
      * Get the index of a stop bits value in STOP_BITS_VALUES array
      */
     public static int getStopBitsIndex(int value) {

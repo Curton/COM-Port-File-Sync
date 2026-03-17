@@ -1,8 +1,5 @@
 package com.filesync.sync;
 
-import com.filesync.protocol.SyncProtocol;
-import com.filesync.serial.SerialPortManager;
-
 import java.io.IOException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -10,6 +7,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+
+import com.filesync.protocol.SyncProtocol;
+import com.filesync.serial.SerialPortManager;
 
 /**
  * Manages heartbeats and connection liveness using a shared executor.
