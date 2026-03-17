@@ -247,6 +247,22 @@ public class FileSyncManager {
     }
 
     /**
+     * Disconnect from the connected peer and stop local sync services.
+     *
+     * @param notifyRemote when true, send a best-effort disconnect notification before teardown
+     */
+    public void disconnect(boolean notifyRemote) {
+        if (notifyRemote && running.get() && serialPort.isOpen()) {
+            try {
+                protocol.sendDisconnect();
+            } catch (IOException e) {
+                eventBus.post(new SyncEvent.LogEvent("Failed to send disconnect notification: " + e.getMessage()));
+            }
+        }
+        stopListening();
+    }
+
+    /**
      * Send shared text to remote.
      */
     public void sendSharedText(String text) {
@@ -468,6 +484,10 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_HEARTBEAT_ACK:
                 connectionService.handleHeartbeatAck();
+                break;
+
+            case SyncProtocol.CMD_DISCONNECT:
+                connectionService.reportCommunicationFailure("Connection closed by remote");
                 break;
 
             case SyncProtocol.CMD_ROLE_NEGOTIATE:

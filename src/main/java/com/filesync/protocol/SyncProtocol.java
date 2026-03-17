@@ -43,6 +43,7 @@ public class SyncProtocol {
     public static final String CMD_DROP_FILE = "DROP_FILE";
     public static final String CMD_FOLDER_CONTEXT_REQ = "FOLDER_CONTEXT_REQ";
     public static final String CMD_FOLDER_CONTEXT_DATA = "FOLDER_CONTEXT_DATA";
+    public static final String CMD_DISCONNECT = "DISCONNECT";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -560,6 +561,13 @@ public class SyncProtocol {
      */
     public void sendHeartbeatAck() throws IOException {
         sendCommand(CMD_HEARTBEAT_ACK);
+    }
+
+    /**
+     * Send disconnect notification
+     */
+    public void sendDisconnect() throws IOException {
+        sendCommand(CMD_DISCONNECT);
     }
 
     /**

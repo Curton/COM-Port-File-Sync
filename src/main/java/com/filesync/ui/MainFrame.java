@@ -187,7 +187,6 @@ public class MainFrame extends JFrame {
         if (eventBus != null && eventBusListener != null) {
             eventBus.unregister(eventBusListener);
         }
-        syncManager.stopListening();
-        serialPort.close();
+        syncManager.disconnect(true);
     }
 }

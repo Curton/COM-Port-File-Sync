@@ -143,27 +143,11 @@ com.filesync/
 
 ## Protocol Details
 
-### Sync Protocol Commands
-
-| Command | Description |
-|---------|-------------|
-| `MANIFEST_REQ` | Request file manifest from remote |
-| `MANIFEST_DATA` | Manifest data follows (via XMODEM) |
-| `FILE_REQ` | Request specific file |
-| `FILE_DATA` | File data follows (via XMODEM) |
-| `FILE_DELETE` | Delete file on remote (strict sync) |
-| `MKDIR` | Create directory on remote |
-| `RMDIR` | Remove directory on remote |
-| `SYNC_COMPLETE` | Sync operation finished |
-| `HEARTBEAT` | Connection keep-alive |
-| `SHARED_TEXT` | Shared text payload |
 
 ### XMODEM Implementation
 
 - **CRC-16-CCITT** checksums for error detection
 - **Automatic block size selection**: 4KB for large files, 1KB for medium, 128 bytes for small
-- **Retry mechanism**: Up to 10 retries per block with exponential backoff
-- **Padding removal**: CTRL-Z (0x1A) padding is stripped from received data
 
 ## Dependencies
 

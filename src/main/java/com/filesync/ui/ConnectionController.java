@@ -193,8 +193,7 @@ public class ConnectionController {
     }
 
     private void disconnect() {
-        syncManager.stopListening();
-        serialPort.close();
+        syncManager.disconnect(true);
         state.setConnected(false);
         components.getConnectButton().setText(CONNECT_TEXT);
         components.getStatusLabel().setText("Disconnected");
