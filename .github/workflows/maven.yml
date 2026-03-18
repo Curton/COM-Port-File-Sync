@@ -35,7 +35,6 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: target/*.jar
-        fail_on_existing: false
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
