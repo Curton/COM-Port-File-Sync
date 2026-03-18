@@ -43,6 +43,7 @@ public class SyncProtocol {
     public static final String CMD_DROP_FILE = "DROP_FILE";
     public static final String CMD_FOLDER_CONTEXT_REQ = "FOLDER_CONTEXT_REQ";
     public static final String CMD_FOLDER_CONTEXT_DATA = "FOLDER_CONTEXT_DATA";
+    public static final String CMD_FOLDER_CHANGE = "FOLDER_CHANGE";
     public static final String CMD_DISCONNECT = "DISCONNECT";
     public static final String CMD_CANCEL = "CANCEL";
 
@@ -521,6 +522,17 @@ public class SyncProtocol {
     public void sendFolderContextResponse(String folderPath) throws IOException {
         String encoded = encodePathForProtocol(folderPath != null ? folderPath : "");
         sendCommand(CMD_FOLDER_CONTEXT_DATA, encoded);
+    }
+
+    /**
+     * Send folder change notification to remote receiver.
+     * The receiver should look up the mapped folder and switch to it.
+     *
+     * @param folderPath local sync folder path (will be Base64 encoded)
+     */
+    public void sendFolderChange(String folderPath) throws IOException {
+        String encoded = encodePathForProtocol(folderPath);
+        sendCommand(CMD_FOLDER_CHANGE, encoded);
     }
 
     /**

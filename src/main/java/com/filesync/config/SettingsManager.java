@@ -495,4 +495,26 @@ public class SettingsManager {
         }
         recentFolders = unique;
     }
+
+    /**
+     * Find the receiver folder path that corresponds to the given sender folder
+     * for the specified COM port. Looks up the most recent mapping for that port.
+     *
+     * @param senderPath the sender's sync folder path (will be normalized)
+     * @param port the COM port identifier (e.g., "COM3") or empty string for default
+     * @return the corresponding receiver folder path, or null if no mapping found
+     */
+    public String findReceiverFolderForSender(String senderPath, String port) {
+        if (senderPath == null || senderPath.isEmpty()) {
+            return null;
+        }
+        List<String[]> mappings = loadRememberedFolderMappings(port);
+        String normalizedSender = normalizeFolderPath(senderPath);
+        for (String[] mapping : mappings) {
+            if (mapping.length >= 2 && normalizedSender.equals(normalizeFolderPath(mapping[0]))) {
+                return mapping[1];
+            }
+        }
+        return null;
+    }
 }

@@ -4,7 +4,7 @@ A cross-platform Java application for synchronizing files between two computers 
 
 ## Overview
 
-COM Port File Sync enables reliable file transfer between two machines connected via a serial cable (null-modem cable, USB-to-serial adapters, or virtual COM ports). It uses a custom protocol built on top of XMODEM with CRC-16 checksums for error-free transmission, making it ideal for scenarios where network connectivity is unavailable or restricted.
+COM Port File Sync enables reliable file transfer between two machines connected via a serial cable (null-modem cable, USB-to-serial adapters, or virtual COM ports). It uses a custom protocol built on top of XMODEM with CRC-16, making it ideal for scenarios where network connectivity is unavailable or restricted.
 
 <img width="1372" height="1186" alt="image" src="https://github.com/user-attachments/assets/c69465b0-9ec4-49dc-b854-925fec6386ea" />
 
@@ -13,19 +13,17 @@ COM Port File Sync enables reliable file transfer between two machines connected
 ### Core Functionality
 - **Bidirectional File Synchronization** - Sync files in either direction (A -> B or B <- A) between two connected machines
 - **XMODEM Protocol** - Reliable file transfer using XMODEM with CRC-16 checksums and automatic retries
-- **Adaptive Block Sizes** - Supports 128-byte, 1KB, and 4KB blocks for optimal throughput based on data size
 - **File Change Detection** - Compares file manifests using MD5 checksums to identify changed files
 - **Automatic Compression** - Smart GZIP compression for text-based files with entropy analysis to skip already-compressed content
 
 ### Sync Modes
 - **Standard Sync** - Transfers new and modified files from sender to receiver
-- **Strict Sync Mode** - Additionally deletes files on the receiver that don't exist on the sender (mirror mode)
+- **Mirror Mode** - Additionally deletes files on the receiver that don't exist on the sender
 - **Fast Mode** - Uses file metadata (size + modification time) instead of MD5 hashes for faster manifest generation
 
 ### Additional Features
 - **`.gitignore` Support** - Respects `.gitignore` patterns to exclude files from synchronization
 - **Shared Text Area** - Real-time text sharing between connected machines (clipboard sync)
-- **Auto-Connect** - Automatically connects to the last used port or single available port on startup
 - **Role Negotiation** - Automatic sender/receiver role assignment on connection
 - **Connection Monitoring** - Heartbeat-based connection health monitoring with auto-recovery
 - **Drag-and-Drop File Send** - Quickly queue one local file for transfer by dragging it onto the main window

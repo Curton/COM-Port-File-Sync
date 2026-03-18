@@ -7,6 +7,7 @@ import javax.swing.SwingUtilities;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.sync.FileSyncManager;
+import com.filesync.sync.SyncEvent;
 
 /**
  * Folder history and folder-selection behaviors.
@@ -34,6 +35,13 @@ public class FolderController {
     }
 
     public void initEventHandlers() {
+        // Register to remote folder change events
+        syncManager.getEventBus().register(event -> {
+            if (event instanceof SyncEvent.RemoteFolderChangedEvent remoteEvent) {
+                SwingUtilities.invokeLater(() -> onRemoteFolderChanged(remoteEvent.getFolderPath()));
+            }
+        });
+
         components.getBrowseFolderButton().addActionListener(event -> browseFolder());
         components.getFolderComboBox().addActionListener(event -> {
             if (state.isSuppressFolderSelectionEvents()) {
@@ -43,6 +51,10 @@ public class FolderController {
             if (selectedFolder != null && !selectedFolder.isBlank()) {
                 applyFolderSelection(selectedFolder, true);
                 logController.log("Selected folder: " + selectedFolder);
+                // Notify remote if we're the sender and connected
+                if (syncManager.isSender() && syncManager.isConnectionAlive()) {
+                    syncManager.notifyFolderChange(selectedFolder);
+                }
             }
         });
     }
@@ -104,6 +116,23 @@ public class FolderController {
         }
     }
 
+    private void onRemoteFolderChanged(String folderPath) {
+        if (folderPath == null || folderPath.isBlank()) {
+            return;
+        }
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            return;
+        }
+        try {
+            state.setSuppressFolderSelectionEvents(true);
+            applyFolderSelection(folderPath, true);
+            logController.log("Remote folder changed to: " + folderPath);
+        } finally {
+            state.setSuppressFolderSelectionEvents(false);
+        }
+    }
+
     public File getCurrentFolderFromSelection() {
         String selectedFolder = (String) components.getFolderComboBox().getSelectedItem();
         if (selectedFolder != null && !selectedFolder.isBlank()) {
@@ -135,8 +164,13 @@ public class FolderController {
 
         if (fileChooser.showOpenDialog(SwingUtilities.getWindowAncestor(components.getFolderComboBox())) == JFileChooser.APPROVE_OPTION) {
             File selectedFolder = fileChooser.getSelectedFile();
-            applyFolderSelection(selectedFolder.getAbsolutePath(), true);
-            logController.log("Selected folder: " + selectedFolder.getAbsolutePath());
+            String folderPath = selectedFolder.getAbsolutePath();
+            applyFolderSelection(folderPath, true);
+            logController.log("Selected folder: " + folderPath);
+            // Notify remote if we're the sender and connected
+            if (syncManager.isSender() && syncManager.isConnectionAlive()) {
+                syncManager.notifyFolderChange(folderPath);
+            }
         }
     }
 }

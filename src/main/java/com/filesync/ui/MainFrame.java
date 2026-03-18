@@ -43,7 +43,7 @@ public class MainFrame extends JFrame {
                 settings.getDataBits(),
                 settings.getStopBits(),
                 settings.getParity());
-        syncManager = new FileSyncManager(serialPort);
+        syncManager = new FileSyncManager(serialPort, settings);
         eventBus = syncManager.getEventBus();
 
         state = new MainFrameState();

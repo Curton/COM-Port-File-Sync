@@ -206,5 +206,22 @@ public interface SyncEvent {
             return SyncEventType.DROP_FILE_RECEIVED;
         }
     }
+
+    final class RemoteFolderChangedEvent implements SyncEvent {
+        private final String folderPath;
+
+        public RemoteFolderChangedEvent(String folderPath) {
+            this.folderPath = folderPath;
+        }
+
+        public String getFolderPath() {
+            return folderPath;
+        }
+
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.REMOTE_FOLDER_CHANGED;
+        }
+    }
 }
 

@@ -8,6 +8,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.filesync.config.SettingsManager;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
@@ -22,6 +23,7 @@ public class FileSyncManager {
 
     private final SerialPortManager serialPort;
     private final SyncProtocol protocol;
+    private final SettingsManager settings;
 
     private volatile File syncFolder;
     private volatile boolean strictSyncMode = false;
@@ -45,9 +47,10 @@ public class FileSyncManager {
     private ScheduledExecutorService executor;
     private Future<?> listenerFuture;
 
-    public FileSyncManager(SerialPortManager serialPort) {
+    public FileSyncManager(SerialPortManager serialPort, SettingsManager settings) {
         this.serialPort = serialPort;
         this.protocol = new SyncProtocol(serialPort);
+        this.settings = settings;
         this.eventBus = new SimpleSyncEventBus();
 
         this.connectionService = new ConnectionService(
@@ -337,6 +340,26 @@ public class FileSyncManager {
         protocol.sendFolderContextResponse(path);
     }
 
+    private void handleFolderChange(String encodedSenderFolder) {
+        // Only receiver should process folder change notifications
+        if (roleNegotiationService.isSender()) {
+            return;
+        }
+        String senderFolder = SyncProtocol.decodePathFromProtocol(encodedSenderFolder);
+        if (senderFolder == null || senderFolder.isEmpty()) {
+            return;
+        }
+        String port = serialPort.getPortName();
+        String receiverFolder = settings.findReceiverFolderForSender(senderFolder, port);
+        if (receiverFolder != null && !receiverFolder.isEmpty()) {
+            File folder = new File(receiverFolder);
+            if (folder.exists() && folder.isDirectory()) {
+                setSyncFolder(folder);
+                eventBus.post(new SyncEvent.RemoteFolderChangedEvent(receiverFolder));
+            }
+        }
+    }
+
     public SyncPreviewPlan previewSync() {
         if (!isSender()) {
             throw new IllegalStateException("Cannot initiate sync preview as receiver. Change direction first.");
@@ -369,6 +392,23 @@ public class FileSyncManager {
      */
     public void notifyDirectionChange() {
         roleNegotiationService.notifyDirectionChange();
+    }
+
+    /**
+     * Notify remote (receiver) that the sender folder has changed.
+     * The receiver will look up its mapped folder and switch to it.
+     *
+     * @param folderPath the new sender folder path (absolute)
+     */
+    public void notifyFolderChange(String folderPath) {
+        if (!isSender() || !isConnectionAlive()) {
+            return;
+        }
+        try {
+            protocol.sendFolderChange(folderPath);
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Failed to send folder change notification: " + e.getMessage()));
+        }
     }
 
     /**
@@ -452,6 +492,10 @@ public class FileSyncManager {
 
             case SyncProtocol.CMD_FOLDER_CONTEXT_REQ:
                 handleFolderContextRequest();
+                break;
+
+            case SyncProtocol.CMD_FOLDER_CHANGE:
+                handleFolderChange(msg.getParam(0));
                 break;
 
             case SyncProtocol.CMD_MANIFEST_DATA:

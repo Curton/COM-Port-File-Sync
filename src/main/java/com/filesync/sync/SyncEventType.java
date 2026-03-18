@@ -15,6 +15,7 @@ public enum SyncEventType {
     LOG,
     ERROR,
     SHARED_TEXT_RECEIVED,
-    DROP_FILE_RECEIVED
+    DROP_FILE_RECEIVED,
+    REMOTE_FOLDER_CHANGED
 }
 
