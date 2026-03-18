@@ -168,6 +168,167 @@ class ReconnectRecoveryTest {
     }
 
     @Test
+    void cancelOngoingSyncReportsCancellationStatus() throws Exception {
+        Files.writeString(tempDir.resolve("test.txt"), "payload");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        List<String> logs = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.LogEvent logEvent) {
+                logs.add(logEvent.getMessage());
+            } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
+                errors.add(errorEvent.getMessage());
+            }
+        });
+
+        BlockingSyncProtocol protocol = new BlockingSyncProtocol();
+        SyncCoordinator coordinator = new SyncCoordinator(
+                protocol,
+                eventBus,
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                syncing,
+                () -> {
+                },
+                () -> {
+                },
+                () -> {
+                });
+
+        ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
+        coordinator.setExecutor(executor);
+        try {
+            protocol.setBlockAtManifestWait(true);
+            coordinator.startSync();
+            assertTrue(protocol.awaitFirstWaitEntered(Duration.ofSeconds(2)),
+                    "Sync should reach manifest wait while starting");
+
+            coordinator.cancelOngoingSync();
+            waitUntil(() -> !syncing.get(), Duration.ofSeconds(2));
+
+            assertTrue(logs.stream().anyMatch(msg -> msg.contains("Sync cancelled")),
+                    "Cancellation should log a cancellation status");
+            assertTrue(errors.stream().noneMatch(msg -> msg.contains("Sync failed")),
+                    "Cancellation should not be treated as failure");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void receivingFileCancellationIsHandledAsSyncCancellation() {
+        AtomicBoolean syncing = new AtomicBoolean(true);
+        List<String> logs = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        eventBus.register(event -> {
+            if (event instanceof SyncEvent.LogEvent logEvent) {
+                logs.add(logEvent.getMessage());
+            } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
+                errors.add(errorEvent.getMessage());
+            }
+        });
+
+        CancelingIncomingFileProtocol protocol = new CancelingIncomingFileProtocol();
+        SyncCoordinator coordinator = new SyncCoordinator(
+                protocol,
+                eventBus,
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                syncing,
+                () -> {
+                },
+                () -> {
+                },
+                () -> {
+                });
+
+        SyncProtocol.Message cancelMessage = new SyncProtocol.Message(
+                SyncProtocol.CMD_FILE_DATA,
+                new String[] {"test.txt", "10", "false", "0"});
+        try {
+            coordinator.handleIncomingFileData(cancelMessage);
+        } catch (IOException e) {
+            throw new AssertionError("Cancellation handling should not rethrow", e);
+        }
+
+        assertTrue(logs.stream().anyMatch(msg -> msg.contains("Sync cancelled")),
+                "Receiver-side file transfer cancellation should be logged as a normal sync cancel");
+        assertTrue(errors.isEmpty(), "Cancellation during receive should not emit an error event");
+        assertFalse(syncing.get(), "Syncing flag should be cleared after cancellation");
+    }
+
+    @Test
+    void senderCancellationSignalsPeerAppropriately() {
+        AtomicBoolean syncing = new AtomicBoolean(true);
+        CancelSignalProtocol transportCancellationProtocol = new CancelSignalProtocol(false);
+        SyncCoordinator coordinator = new SyncCoordinator(
+                transportCancellationProtocol,
+                new SimpleSyncEventBus(),
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                syncing,
+                () -> {
+                },
+                () -> {
+                },
+                () -> {
+                });
+
+        coordinator.cancelOngoingSync();
+
+        assertTrue(transportCancellationProtocol.cancelCommandSent.get(), "Non-transfer cancellation should send a cancel command");
+        assertFalse(transportCancellationProtocol.transferCancelSent.get(), "XMODEM cancel should not be sent when transfer is not in progress");
+        assertFalse(syncing.get(), "Cancelling should clear syncing flag");
+    }
+
+    @Test
+    void senderCancellationUsesXmodemCancelSignalDuringTransfer() {
+        AtomicBoolean syncing = new AtomicBoolean(true);
+        CancelSignalProtocol transportCancellationProtocol = new CancelSignalProtocol(true);
+        SyncCoordinator coordinator = new SyncCoordinator(
+                transportCancellationProtocol,
+                new SimpleSyncEventBus(),
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                syncing,
+                () -> {
+                },
+                () -> {
+                },
+                () -> {
+                });
+
+        coordinator.cancelOngoingSync();
+
+        assertTrue(transportCancellationProtocol.transferCancelSent.get(), "Transfer cancellation should send XMODEM cancel bytes");
+        assertFalse(transportCancellationProtocol.cancelCommandSent.get(), "Cancel command should be skipped while transfer is active");
+        assertFalse(syncing.get(), "Cancelling should clear syncing flag");
+    }
+
+    @Test
     void directionChangeMarksRoleNegotiated() {
         AtomicBoolean isSender = new AtomicBoolean(true);
         AtomicBoolean roleNegotiated = new AtomicBoolean(false);
@@ -670,6 +831,49 @@ class ReconnectRecoveryTest {
         @Override
         public Message waitForCommand(String expectedCommand) throws IOException {
             throw new IOException("Timeout waiting for command: " + expectedCommand);
+        }
+    }
+
+    private static final class CancelingIncomingFileProtocol extends SyncProtocol {
+        CancelingIncomingFileProtocol() {
+            super(new StubSerialPortManager(true));
+        }
+
+        @Override
+        public void sendAck() {
+            // No-op
+        }
+
+        @Override
+        public void receiveFile(File baseDir, String relativePath, int expectedSize, boolean compressed, long lastModified)
+                throws IOException {
+            throw new IOException("Transfer cancelled by sender");
+        }
+    }
+
+    private static final class CancelSignalProtocol extends SyncProtocol {
+        private final AtomicBoolean xmodemInProgress;
+        private final AtomicBoolean cancelCommandSent = new AtomicBoolean();
+        private final AtomicBoolean transferCancelSent = new AtomicBoolean();
+
+        CancelSignalProtocol(boolean xmodemInProgress) {
+            super(new StubSerialPortManager(true));
+            this.xmodemInProgress = new AtomicBoolean(xmodemInProgress);
+        }
+
+        @Override
+        public boolean isXmodemInProgress() {
+            return xmodemInProgress.get();
+        }
+
+        @Override
+        public void sendCancelCommand() {
+            cancelCommandSent.set(true);
+        }
+
+        @Override
+        public void sendTransferCancel() {
+            transferCancelSent.set(true);
         }
     }
 }

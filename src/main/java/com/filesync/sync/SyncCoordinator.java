@@ -28,6 +28,7 @@ public class SyncCoordinator {
     private final BooleanSupplier isSenderSupplier;
     private final BooleanSupplier roleNegotiatedSupplier;
     private final AtomicBoolean syncing;
+    private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
     private final Runnable onSyncIdle;
     private final Runnable onSyncBoundary;
     private final Runnable heartbeatTouch;
@@ -106,6 +107,7 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.ErrorEvent("Please select a sync folder first"));
             return;
         }
+        cancelRequested.set(false);
         final SyncPreviewPlan planToUse = (plan != null && plan.isStrictSyncMode() != strictSyncModeSupplier.getAsBoolean())
                 ? null
                 : plan;
@@ -183,11 +185,28 @@ public class SyncCoordinator {
     }
 
     public void cancelOngoingSync() {
+        cancelRequested.set(true);
+        try {
+            if (protocol.isXmodemInProgress()) {
+                protocol.sendTransferCancel();
+            } else {
+                protocol.sendCancelCommand();
+            }
+        } catch (IOException ignored) {
+            // Best effort cancellation; local sync state transitions are handled below.
+        }
         if (syncFuture != null) {
             syncFuture.cancel(true);
             syncFuture = null;
         }
         syncing.set(false);
+    }
+
+    public void handleRemoteCancel(String reason) {
+        cancelRequested.set(true);
+        syncing.set(false);
+        eventBus.post(new SyncEvent.LogEvent(buildCancellationMessage(reason)));
+        onSyncIdle.run();
     }
 
     /**
@@ -259,10 +278,18 @@ public class SyncCoordinator {
 
         eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
         protocol.sendAck();
-        protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
-        eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
-        touchHeartbeat();
-        flushSharedTextBetweenOperations();
+        try {
+            protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
+            eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
+            touchHeartbeat();
+            flushSharedTextBetweenOperations();
+        } catch (IOException e) {
+            if (isSyncCancelledException(e)) {
+                handleRemoteCancel("Transfer cancelled while receiving file " + relativePath);
+            } else {
+                throw e;
+            }
+        }
     }
 
     public void handleSyncComplete() {
@@ -385,9 +412,14 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.TransferCompleteEvent());
             eventBus.post(new SyncEvent.SyncCompleteEvent());
         } catch (IOException e) {
-            eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
+            if (cancelRequested.get()) {
+                eventBus.post(new SyncEvent.LogEvent("Sync cancelled"));
+            } else {
+                eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
+            }
         } finally {
             syncing.set(false);
+            cancelRequested.set(false);
             touchHeartbeat();
             onSyncIdle.run();
         }
@@ -451,6 +483,18 @@ public class SyncCoordinator {
         if (onSyncBoundary != null) {
             onSyncBoundary.run();
         }
+    }
+
+    private boolean isSyncCancelledException(IOException e) {
+        String message = e != null ? e.getMessage() : null;
+        return message != null && message.contains("Transfer cancelled");
+    }
+
+    private String buildCancellationMessage(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return "Sync cancelled";
+        }
+        return "Sync cancelled: " + reason;
     }
 }
 

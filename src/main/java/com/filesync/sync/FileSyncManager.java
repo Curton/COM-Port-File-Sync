@@ -293,6 +293,10 @@ public class FileSyncManager {
         initiateSync(plan);
     }
 
+    public void cancelSync() {
+        syncCoordinator.cancelOngoingSync();
+    }
+
     private static final int FOLDER_CONTEXT_TIMEOUT_MS = 5000;
 
     /**
@@ -477,6 +481,11 @@ public class FileSyncManager {
             case SyncProtocol.CMD_ERROR:
                 syncCoordinator.cancelOngoingSync();
                 eventBus.post(new SyncEvent.ErrorEvent("Remote error: " + msg.getParam(0)));
+                break;
+
+            case SyncProtocol.CMD_CANCEL:
+                String cancelReason = msg.getParams().length > 0 ? msg.getParam(0) : "";
+                syncCoordinator.handleRemoteCancel(cancelReason);
                 break;
 
             case SyncProtocol.CMD_HEARTBEAT:

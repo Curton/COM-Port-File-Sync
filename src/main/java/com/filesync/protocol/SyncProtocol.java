@@ -44,6 +44,7 @@ public class SyncProtocol {
     public static final String CMD_FOLDER_CONTEXT_REQ = "FOLDER_CONTEXT_REQ";
     public static final String CMD_FOLDER_CONTEXT_DATA = "FOLDER_CONTEXT_DATA";
     public static final String CMD_DISCONNECT = "DISCONNECT";
+    public static final String CMD_CANCEL = "CANCEL";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -553,6 +554,20 @@ public class SyncProtocol {
      */
     public void sendError(String message) throws IOException {
         sendCommand(CMD_ERROR, message);
+    }
+
+    /**
+     * Notify peer that a sync was cancelled.
+     */
+    public void sendCancelCommand() throws IOException {
+        sendCommand(CMD_CANCEL);
+    }
+
+    /**
+     * Cancel an in-flight XMODEM transfer (control-plane cancel).
+     */
+    public void sendTransferCancel() throws IOException {
+        xmodem.sendCancelSignal();
     }
 
     /**

@@ -358,6 +358,10 @@ public class XModemTransfer {
         return false;
     }
 
+    public void sendCancelSignal() throws IOException {
+        sendCancel();
+    }
+
     private void sendCancel() throws IOException {
         // Send CAN twice to ensure it's received
         serialPort.write(CAN);

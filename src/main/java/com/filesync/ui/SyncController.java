@@ -15,6 +15,9 @@ import com.filesync.sync.SyncPreviewPlan;
  * Sync flow and control panel actions.
  */
 public class SyncController {
+    private static final String START_SYNC_TEXT = "Start Sync";
+    private static final String CANCEL_SYNC_TEXT = "Cancel";
+
     private final JFrame owner;
     private final MainFrameComponents components;
     private final FileSyncManager syncManager;
@@ -41,7 +44,7 @@ public class SyncController {
 
     public void initActionHandlers() {
         components.getDirectionButton().addActionListener(event -> toggleDirection());
-        components.getSyncButton().addActionListener(event -> startSync());
+        components.getSyncButton().addActionListener(event -> onSyncButtonClicked());
         components.getPreviewSyncButton().addActionListener(event -> previewSync());
 
         components.getRespectGitignoreCheckBox().addActionListener(event -> {
@@ -68,6 +71,14 @@ public class SyncController {
             settings.save();
             logController.log("Fast mode: " + (fastMode ? "enabled" : "disabled"));
         });
+    }
+
+    private void onSyncButtonClicked() {
+        if (syncManager.isSyncing()) {
+            cancelSync();
+            return;
+        }
+        startSync();
     }
 
     public void updateRespectGitignoreState() {
@@ -121,6 +132,16 @@ public class SyncController {
 
     private void doStartSync() {
         syncManager.initiateSync();
+    }
+
+    public void cancelSync() {
+        if (!syncManager.isTransferBusy()) {
+            return;
+        }
+        logController.log("Cancelling sync...");
+        syncManager.cancelSync();
+        components.getProgressBar().setString("Cancelling sync...");
+        updateSyncButtonState();
     }
 
     private void runSyncWithPreflight(Runnable onProceed) {
@@ -299,7 +320,8 @@ public class SyncController {
 
     public void onSyncStarted() {
         javax.swing.SwingUtilities.invokeLater(() -> {
-            components.getSyncButton().setEnabled(false);
+            components.getSyncButton().setText(CANCEL_SYNC_TEXT);
+            components.getSyncButton().setEnabled(true);
             components.getPreviewSyncButton().setEnabled(false);
             components.getDirectionButton().setEnabled(false);
             components.getProgressBar().setValue(0);
@@ -337,10 +359,20 @@ public class SyncController {
 
     public void updateSyncButtonState() {
         boolean canSync = state.canSync(syncManager);
-        boolean canOperate = canSync && !syncManager.isSyncing() && !state.isPreviewInProgress();
-        components.getSyncButton().setEnabled(canOperate);
-        components.getPreviewSyncButton().setEnabled(canOperate);
-        components.getDirectionButton().setEnabled(!syncManager.isTransferBusy() && !state.isPreviewInProgress());
+        boolean transferBusy = syncManager.isTransferBusy();
+        boolean isSyncing = syncManager.isSyncing();
+        boolean canOperate = canSync && !state.isPreviewInProgress();
+
+        if (isSyncing) {
+            components.getSyncButton().setText(CANCEL_SYNC_TEXT);
+            components.getSyncButton().setEnabled(canSync);
+        } else {
+            components.getSyncButton().setText(START_SYNC_TEXT);
+            components.getSyncButton().setEnabled(canOperate && !transferBusy);
+        }
+
+        components.getPreviewSyncButton().setEnabled(canOperate && !transferBusy);
+        components.getDirectionButton().setEnabled(!transferBusy && !state.isPreviewInProgress());
     }
 
     public void onFileProgress(int currentFile, int totalFiles, String fileName) {
