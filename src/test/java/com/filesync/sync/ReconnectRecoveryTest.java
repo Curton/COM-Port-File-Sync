@@ -174,12 +174,15 @@ class ReconnectRecoveryTest {
         AtomicBoolean syncing = new AtomicBoolean(false);
         List<String> logs = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        AtomicBoolean syncCancelledEventReceived = new AtomicBoolean(false);
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
         eventBus.register(event -> {
             if (event instanceof SyncEvent.LogEvent logEvent) {
                 logs.add(logEvent.getMessage());
             } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
                 errors.add(errorEvent.getMessage());
+            } else if (event instanceof SyncEvent.SyncCancelledEvent) {
+                syncCancelledEventReceived.set(true);
             }
         });
 
@@ -217,6 +220,8 @@ class ReconnectRecoveryTest {
                     "Cancellation should log a cancellation status");
             assertTrue(errors.stream().noneMatch(msg -> msg.contains("Sync failed")),
                     "Cancellation should not be treated as failure");
+            assertTrue(syncCancelledEventReceived.get(),
+                    "SyncCancelledEvent should be posted so UI can refresh button state");
         } finally {
             executor.shutdownNow();
         }
@@ -227,12 +232,15 @@ class ReconnectRecoveryTest {
         AtomicBoolean syncing = new AtomicBoolean(true);
         List<String> logs = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        AtomicBoolean syncCancelledEventReceived = new AtomicBoolean(false);
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
         eventBus.register(event -> {
             if (event instanceof SyncEvent.LogEvent logEvent) {
                 logs.add(logEvent.getMessage());
             } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
                 errors.add(errorEvent.getMessage());
+            } else if (event instanceof SyncEvent.SyncCancelledEvent) {
+                syncCancelledEventReceived.set(true);
             }
         });
 
@@ -268,6 +276,8 @@ class ReconnectRecoveryTest {
                 "Receiver-side file transfer cancellation should be logged as a normal sync cancel");
         assertTrue(errors.isEmpty(), "Cancellation during receive should not emit an error event");
         assertFalse(syncing.get(), "Syncing flag should be cleared after cancellation");
+        assertTrue(syncCancelledEventReceived.get(),
+                "SyncCancelledEvent should be posted so receiver UI can refresh button state");
     }
 
     @Test

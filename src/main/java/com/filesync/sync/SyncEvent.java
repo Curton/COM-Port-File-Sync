@@ -55,6 +55,13 @@ public interface SyncEvent {
         }
     }
 
+    final class SyncCancelledEvent implements SyncEvent {
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.SYNC_CANCELLED;
+        }
+    }
+
     final class TransferCompleteEvent implements SyncEvent {
         @Override
         public SyncEventType getType() {

@@ -206,6 +206,7 @@ public class SyncCoordinator {
         cancelRequested.set(true);
         syncing.set(false);
         eventBus.post(new SyncEvent.LogEvent(buildCancellationMessage(reason)));
+        eventBus.post(new SyncEvent.SyncCancelledEvent());
         onSyncIdle.run();
     }
 
@@ -414,6 +415,7 @@ public class SyncCoordinator {
         } catch (IOException e) {
             if (cancelRequested.get()) {
                 eventBus.post(new SyncEvent.LogEvent("Sync cancelled"));
+                eventBus.post(new SyncEvent.SyncCancelledEvent());
             } else {
                 eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
             }

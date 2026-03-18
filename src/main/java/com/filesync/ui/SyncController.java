@@ -329,6 +329,13 @@ public class SyncController {
         });
     }
 
+    public void onSyncCancelled() {
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            components.getProgressBar().setString("Sync cancelled");
+            updateSyncButtonState();
+        });
+    }
+
     public void onSyncComplete() {
         javax.swing.SwingUtilities.invokeLater(() -> {
             String port = (String) components.getPortComboBox().getSelectedItem();

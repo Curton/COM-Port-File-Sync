@@ -34,6 +34,9 @@ public class SyncEventBridge {
             case SYNC_COMPLETE:
                 syncController.onSyncComplete();
                 break;
+            case SYNC_CANCELLED:
+                syncController.onSyncCancelled();
+                break;
             case TRANSFER_COMPLETE:
                 syncController.onTransferComplete();
                 break;
