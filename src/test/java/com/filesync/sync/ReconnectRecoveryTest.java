@@ -214,7 +214,7 @@ class ReconnectRecoveryTest {
                     "Sync should reach manifest wait while starting");
 
             coordinator.cancelOngoingSync();
-            waitUntil(() -> !syncing.get(), Duration.ofSeconds(2));
+            waitUntil(() -> !syncing.get() && syncCancelledEventReceived.get(), Duration.ofSeconds(2));
 
             assertTrue(logs.stream().anyMatch(msg -> msg.contains("Sync cancelled")),
                     "Cancellation should log a cancellation status");
