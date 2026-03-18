@@ -1,11 +1,6 @@
 # This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
 
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
 name: Java CI with Maven
 
 on:
@@ -21,7 +16,6 @@ permissions:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -32,41 +26,15 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
         cache: maven
-    - name: Extract version from pom.xml
-      id: extract_version
-      run: |
-        VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-        echo "Extracted version: $VERSION"
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
     - name: Build with Maven
       run: mvn -B package --file pom.xml
     - name: List target directory
       run: ls -la target/
-    - name: Check if jar exists
-      id: check_jar
-      run: |
-        JAR_PATH="target/com-file-sync-${{ steps.extract_version.outputs.version }}.jar"
-        echo "Looking for jar at: $JAR_PATH"
-        if [ -f "$JAR_PATH" ]; then
-          echo "Jar found at $JAR_PATH"
-          ls -lh "$JAR_PATH"
-          echo "jar_path=$JAR_PATH" >> $GITHUB_OUTPUT
-        else
-          echo "Jar NOT found at $JAR_PATH"
-          echo "Contents of target directory:"
-          ls -la target/
-          # Let's see what jar files are actually there
-          echo "All jar files in target:"
-          ls -la target/*.jar 2>/dev/null || echo "No jar files found"
-          exit 1
-        fi
     - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/v')
+      if: github.ref_type == 'tag'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        files: ${{ steps.check_jar.outputs.jar_path }}
+        files: target/*.jar
         fail_on_existing: false
         generate_release_notes: true
       env:
