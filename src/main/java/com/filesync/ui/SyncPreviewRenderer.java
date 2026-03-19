@@ -23,8 +23,11 @@ import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
 
+import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.SyncPreviewPlan;
+import com.filesync.ui.SyncPreviewRow;
+import com.filesync.ui.SyncPreviewOperationType;
 
 /**
  * Build and render sync preview text/table UIs.
@@ -292,5 +295,83 @@ public class SyncPreviewRenderer {
                 selectedCreateDirs,
                 selectedDeleteFiles,
                 selectedDeleteDirs);
+    }
+
+    /**
+     * Resolve conflicts for selected files in the sync plan.
+     * For each selected file that has a conflict, shows appropriate dialog:
+     * - Binary files: BinaryConflictDialog
+     * - Text files: TextMergeDialog
+     *
+     * @param plan the sync plan with conflicts
+     * @param conflictResolver provider to fetch remote content for merge UI
+     * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
+     */
+    public boolean resolveConflictsForSelectedFiles(
+            SyncPreviewPlan plan,
+            ConflictResolver conflictResolver) {
+
+        if (plan.getConflicts().isEmpty()) {
+            return true;
+        }
+
+        // Check each file to transfer for conflicts
+        for (FileChangeDetector.FileInfo fileInfo : plan.getFilesToTransfer()) {
+            ConflictInfo conflict = plan.getConflict(fileInfo.getPath());
+            if (conflict == null || !conflict.isResolved()) {
+                // Need to resolve this conflict
+                boolean resolved = promptConflictResolution(conflict, conflictResolver);
+                if (!resolved) {
+                    return false; // User cancelled
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Prompt user to resolve a single conflict.
+     */
+    private boolean promptConflictResolution(ConflictInfo conflict, ConflictResolver conflictResolver) {
+        // Fetch remote content if needed for merge UI
+        if (!conflict.isBinary()) {
+            byte[] remoteContent = conflictResolver.fetchRemoteContent(conflict.getPath());
+            if (remoteContent != null) {
+                conflict.setRemoteContent(remoteContent);
+            }
+        }
+
+        if (conflict.isBinary()) {
+            BinaryConflictDialog.Resolution result = BinaryConflictDialog.showDialog(owner, conflict);
+            switch (result) {
+                case KEEP_LOCAL -> conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+                case KEEP_REMOTE -> conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+                case SKIP -> conflict.setResolution(ConflictInfo.Resolution.SKIP);
+                case CANCEL -> { return false; }
+            }
+        } else {
+            TextMergeDialog.Resolution result = TextMergeDialog.showDialog(owner, conflict);
+            switch (result) {
+                case KEEP_LOCAL -> conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+                case KEEP_REMOTE -> conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+                case MERGE -> conflict.setResolution(ConflictInfo.Resolution.MERGE);
+                case CANCEL -> { return false; }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Interface for fetching remote file content needed for conflict resolution.
+     */
+    public interface ConflictResolver {
+        /**
+         * Fetch remote file content for the given path.
+         * @param path the relative path of the file
+         * @return the file content, or null if unavailable
+         */
+        byte[] fetchRemoteContent(String path);
     }
 }

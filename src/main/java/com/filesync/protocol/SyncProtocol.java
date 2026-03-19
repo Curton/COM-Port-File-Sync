@@ -44,6 +44,8 @@ public class SyncProtocol {
     public static final String CMD_FOLDER_CONTEXT_REQ = "FOLDER_CONTEXT_REQ";
     public static final String CMD_FOLDER_CONTEXT_DATA = "FOLDER_CONTEXT_DATA";
     public static final String CMD_FOLDER_CHANGE = "FOLDER_CHANGE";
+    public static final String CMD_FILE_CONTENT_REQ = "FILE_CONTENT_REQ";
+    public static final String CMD_FILE_CONTENT_DATA = "FILE_CONTENT_DATA";
     public static final String CMD_DISCONNECT = "DISCONNECT";
     public static final String CMD_CANCEL = "CANCEL";
 
@@ -545,6 +547,52 @@ public class SyncProtocol {
             return "";
         }
         return decodePathFromProtocol(msg.getParam(0));
+    }
+
+    /**
+     * Send file content response for conflict resolution.
+     * The content is Base64 encoded and sent inline within the protocol message.
+     *
+     * @param relativePath the relative path of the file being sent
+     * @param content the file content bytes
+     */
+    public void sendFileContentResponse(String relativePath, byte[] content) throws IOException {
+        String encoded = encodePathForProtocol(relativePath);
+        String contentBase64 = BASE64_ENCODER.encodeToString(content);
+        sendCommand(CMD_FILE_CONTENT_DATA, encoded, contentBase64);
+    }
+
+    /**
+     * Wait for file content response and return Base64-encoded content.
+     * Call after sending CMD_FILE_CONTENT_REQ.
+     *
+     * @param timeoutMs maximum time to wait in milliseconds
+     * @return Base64-encoded file content, or null if timeout/error
+     */
+    public String waitForFileContentResponse(long timeoutMs) throws IOException {
+        long startTime = System.currentTimeMillis();
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            Message msg = receiveCommand();
+            if (msg == null) {
+                try { Thread.sleep(10); } catch (InterruptedException e) { }
+                continue;
+            }
+            String cmd = msg.getCommand();
+            if (CMD_FILE_CONTENT_DATA.equals(cmd)) {
+                return msg.getParam(1);
+            }
+            if (CMD_ERROR.equals(cmd)) {
+                String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                throw new IOException("Remote error during file content request: " + errMsg);
+            }
+            if (CMD_HEARTBEAT.equals(cmd)) {
+                sendHeartbeatAck();
+                runMessageActivityCallback();
+            } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
+                runMessageActivityCallback();
+            }
+        }
+        return null;
     }
 
     /**

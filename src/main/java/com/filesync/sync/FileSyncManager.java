@@ -2,6 +2,8 @@ package com.filesync.sync;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.util.Base64;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -396,6 +398,38 @@ public class FileSyncManager {
     }
 
     /**
+     * Fetch remote file content for conflict resolution during preview.
+     * Sends a request to the receiver (which is the "remote" during preview as sender)
+     * to get the content of a file that has a conflict.
+     *
+     * @param relativePath the relative path of the file to fetch
+     * @return the file content bytes, or null if unavailable/timeout/error
+     */
+    public byte[] fetchRemoteFileContent(String relativePath) {
+        if (!isSender() || !connectionAlive.get() || syncFolder == null) {
+            return null;
+        }
+
+        final long TIMEOUT_MS = 10000;
+        senderBlockingProtocolExchange.set(true);
+
+        try {
+            protocol.sendCommand(SyncProtocol.CMD_FILE_CONTENT_REQ,
+                    SyncProtocol.encodePathForProtocol(relativePath));
+
+            String contentBase64 = protocol.waitForFileContentResponse(TIMEOUT_MS);
+            if (contentBase64 != null && !contentBase64.isEmpty()) {
+                return Base64.getDecoder().decode(contentBase64);
+            }
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Failed to fetch remote file content: " + e.getMessage()));
+        } finally {
+            senderBlockingProtocolExchange.set(false);
+        }
+        return null;
+    }
+
+    /**
      * Notify remote (receiver) that the sender folder has changed.
      * Looks up the mapped receiver path and sends it; the receiver has no mapping stored
      * (only sender stores it after sync), so we send the target path directly.
@@ -500,6 +534,20 @@ public class FileSyncManager {
             }
             case SyncProtocol.CMD_FOLDER_CONTEXT_REQ -> handleFolderContextRequest();
             case SyncProtocol.CMD_FOLDER_CHANGE -> handleFolderChange(msg.getParam(0));
+            case SyncProtocol.CMD_FILE_CONTENT_REQ -> {
+                String relativePath = SyncProtocol.decodePathFromProtocol(msg.getParam(0));
+                if (relativePath != null && !relativePath.isEmpty()) {
+                    File file = new File(syncFolder, relativePath);
+                    if (file.exists() && file.isFile()) {
+                        try {
+                            byte[] content = Files.readAllBytes(file.toPath());
+                            protocol.sendFileContentResponse(relativePath, content);
+                        } catch (IOException e) {
+                            eventBus.post(new SyncEvent.LogEvent("Failed to send file content: " + e.getMessage()));
+                        }
+                    }
+                }
+            }
             case SyncProtocol.CMD_MANIFEST_DATA -> {
                 // Handled in initiateSync flow
             }

@@ -17,6 +17,7 @@ public final class SyncPreviewPlan {
     private final long totalBytesToTransfer;
     private final boolean strictSyncMode;
     private final int totalOperations;
+    private final List<ConflictInfo> conflicts;
 
     public SyncPreviewPlan(List<FileChangeDetector.FileInfo> filesToTransfer,
                            List<String> emptyDirectoriesToCreate,
@@ -24,6 +25,17 @@ public final class SyncPreviewPlan {
                            List<String> emptyDirectoriesToDelete,
                            long totalBytesToTransfer,
                            boolean strictSyncMode) {
+        this(filesToTransfer, emptyDirectoriesToCreate, filesToDelete, emptyDirectoriesToDelete,
+             totalBytesToTransfer, strictSyncMode, Collections.emptyList());
+    }
+
+    public SyncPreviewPlan(List<FileChangeDetector.FileInfo> filesToTransfer,
+                           List<String> emptyDirectoriesToCreate,
+                           List<String> filesToDelete,
+                           List<String> emptyDirectoriesToDelete,
+                           long totalBytesToTransfer,
+                           boolean strictSyncMode,
+                           List<ConflictInfo> conflicts) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -34,6 +46,7 @@ public final class SyncPreviewPlan {
                 + this.emptyDirectoriesToCreate.size()
                 + this.filesToDelete.size()
                 + this.emptyDirectoriesToDelete.size();
+        this.conflicts = conflicts != null ? List.copyOf(conflicts) : Collections.emptyList();
     }
 
     public SyncPreviewPlan createFilteredPlan(Set<String> selectedFilesToTransfer,
@@ -62,7 +75,8 @@ public final class SyncPreviewPlan {
                 filteredFilesToDelete,
                 filteredEmptyDirectoriesToDelete,
                 filteredTotalBytesToTransfer,
-                strictSyncMode);
+                strictSyncMode,
+                conflicts);
     }
 
     private static List<FileChangeDetector.FileInfo> filterFilesBySelection(List<FileChangeDetector.FileInfo> source,
@@ -127,5 +141,20 @@ public final class SyncPreviewPlan {
 
     public int getTotalOperations() {
         return totalOperations;
+    }
+
+    public List<ConflictInfo> getConflicts() {
+        return conflicts;
+    }
+
+    public boolean hasConflict(String path) {
+        return conflicts.stream().anyMatch(c -> c.getPath().equals(path));
+    }
+
+    public ConflictInfo getConflict(String path) {
+        return conflicts.stream()
+                .filter(c -> c.getPath().equals(path))
+                .findFirst()
+                .orElse(null);
     }
 }

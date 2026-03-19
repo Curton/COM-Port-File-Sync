@@ -38,7 +38,7 @@ public class FileChangeDetector {
     // Rsync-style timestamp tolerance (in milliseconds) to handle filesystem precision differences.
     // NTFS has 100ns precision, FAT32 has 2-second precision, and setLastModified() may not
     // preserve exact values across different filesystems. 3 seconds covers most cases.
-    private static final long MODIFY_WINDOW_MS = 3000;
+    static final long MODIFY_WINDOW_MS = 3000;
     
     /**
      * Callback interface for manifest generation progress.

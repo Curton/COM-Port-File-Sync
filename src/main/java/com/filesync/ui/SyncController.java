@@ -287,6 +287,24 @@ public class SyncController {
                         return;
                     }
 
+                    // Resolve conflicts for selected files before starting sync
+                    if (!selectedPlan.getConflicts().isEmpty()) {
+                        boolean conflictsResolved = previewRenderer.resolveConflictsForSelectedFiles(
+                                selectedPlan,
+                                path -> {
+                                    try {
+                                        return syncManager.fetchRemoteFileContent(path);
+                                    } catch (Exception e) {
+                                        logController.log("Failed to fetch remote content for " + path + ": " + e.getMessage());
+                                        return null;
+                                    }
+                                });
+                        if (!conflictsResolved) {
+                            // User cancelled conflict resolution
+                            return;
+                        }
+                    }
+
                     components.getSyncButton().setEnabled(false);
                     components.getPreviewSyncButton().setEnabled(false);
                     components.getProgressBar().setValue(0);

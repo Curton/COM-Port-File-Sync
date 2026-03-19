@@ -175,13 +175,22 @@ public class SyncCoordinator {
                 .mapToLong(FileChangeDetector.FileInfo::getSize)
                 .sum();
 
+        // Detect conflicts: files modified on both sides
+        List<ConflictInfo> conflicts = ConflictAnalyzer.findConflicts(
+                localManifest, remoteManifest, syncFolder);
+
+        if (!conflicts.isEmpty()) {
+            eventBus.post(new SyncEvent.LogEvent("Detected " + conflicts.size() + " potential conflict(s)"));
+        }
+
         return new SyncPreviewPlan(
                 filesToSync,
                 emptyDirsToCreate,
                 filesToDelete,
                 emptyDirsToDelete,
                 totalBytesToTransfer,
-                strictMode);
+                strictMode,
+                conflicts);
     }
 
     public void cancelOngoingSync() {
