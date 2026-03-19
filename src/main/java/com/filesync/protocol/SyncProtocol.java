@@ -349,6 +349,97 @@ public class SyncProtocol {
     }
 
     /**
+     * Send file data with pre-computed content (used for merged conflict resolution).
+     * Performs limited retries around the underlying XMODEM transfer so that
+     * transient handshake issues do not abort the entire sync.
+     *
+     * @param baseDir the base directory containing the file
+     * @param relativePath the relative path within the base directory
+     * @param content the pre-computed file content to send (e.g., merged content)
+     * @return true if file was compressed, false otherwise
+     */
+    public boolean sendFile(File baseDir, String relativePath, byte[] content) throws IOException {
+        return sendFile(baseDir, relativePath, content, System.currentTimeMillis());
+    }
+
+    /**
+     * Send file data with pre-computed content and explicit lastModified.
+     * Use when the local file was just written so sender and receiver share the same
+     * timestamp and the next sync does not re-detect a conflict (fast mode).
+     *
+     * @param baseDir the base directory containing the file
+     * @param relativePath the relative path within the base directory
+     * @param content the pre-computed file content to send (e.g., merged content)
+     * @param lastModified timestamp to send; use file.lastModified() when file was just written
+     * @return true if file was compressed, false otherwise
+     */
+    public boolean sendFile(File baseDir, String relativePath, byte[] content, long lastModified) throws IOException {
+        if (content == null) {
+            sendCommand(CMD_ERROR, "File content is null: " + relativePath);
+            return false;
+        }
+
+        // Smart compression based on content analysis
+        CompressionUtil.CompressedData compressedData = CompressionUtil.compressIfBeneficial(relativePath, content);
+        boolean wasCompressed = compressedData.isCompressed();
+        long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
+
+        // Try to send the file with limited retries in case of handshake issues
+        final int maxAttempts = 3;
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                sendCommand(CMD_FILE_DATA,
+                        relativePath,
+                        String.valueOf(compressedData.getData().length),
+                        String.valueOf(wasCompressed),
+                        String.valueOf(ts));
+
+                waitForCommand(CMD_ACK);
+
+                xmodemInProgress.set(true);
+                boolean success;
+                try {
+                    success = xmodem.send(compressedData.getData());
+                } finally {
+                    xmodemInProgress.set(false);
+                }
+
+                if (success) {
+                    return wasCompressed;
+                }
+            } catch (IOException e) {
+                lastFailure = e;
+            }
+
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException e) {
+            }
+
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        String detail = xmodem.getLastErrorMessage();
+        if (detail == null || detail.isEmpty()) {
+            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
+        }
+        IOException finalEx = new IOException("Failed to send merged file " + relativePath +
+                " after " + maxAttempts + " attempts (" + detail + ")");
+        if (lastFailure != null) {
+            finalEx.addSuppressed(lastFailure);
+        }
+        throw finalEx;
+    }
+
+    /**
      * Send a single dropped file to the peer.
      */
     public void sendDropFile(File file) throws IOException {
@@ -580,6 +671,9 @@ public class SyncProtocol {
             String cmd = msg.getCommand();
             if (CMD_FILE_CONTENT_DATA.equals(cmd)) {
                 return msg.getParam(1);
+            }
+            if (CMD_CANCEL.equals(cmd)) {
+                return null;  // User cancelled, return null gracefully
             }
             if (CMD_ERROR.equals(cmd)) {
                 String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";

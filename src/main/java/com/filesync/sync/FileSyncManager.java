@@ -40,7 +40,7 @@ public class FileSyncManager {
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
 
-    private final AtomicLong threadIdGenerator = new AtomicLong(0);
+    private final AtomicLong threadIdGenerator = new AtomicLong(0); // names FileSync-N threads in executor
 
     private final SyncEventBus eventBus;
     private final ConnectionService connectionService;
@@ -410,7 +410,7 @@ public class FileSyncManager {
             return null;
         }
 
-        final long TIMEOUT_MS = 10000;
+        final long TIMEOUT_MS = 10000;  // 10 seconds - may need adjustment for slow serial connections
         senderBlockingProtocolExchange.set(true);
 
         try {
@@ -433,6 +433,9 @@ public class FileSyncManager {
      * Notify remote (receiver) that the sender folder has changed.
      * Looks up the mapped receiver path and sends it; the receiver has no mapping stored
      * (only sender stores it after sync), so we send the target path directly.
+     *
+     * Note: This is sender-initiated only. The receiver cannot notify the sender of folder
+     * changes - if both sides change folders simultaneously, there is no conflict resolution.
      *
      * @param senderFolderPath the new sender folder path (absolute)
      */

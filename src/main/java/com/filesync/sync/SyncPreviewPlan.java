@@ -1,5 +1,6 @@
 package com.filesync.sync;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Collections;
 import java.util.ArrayList;
@@ -54,7 +55,7 @@ public final class SyncPreviewPlan {
                                              Set<String> selectedFilesToDelete,
                                              Set<String> selectedEmptyDirectoriesToDelete) {
         List<FileChangeDetector.FileInfo> filteredFilesToTransfer =
-                filterFilesBySelection(filesToTransfer, selectedFilesToTransfer);
+                filterFilesBySelectionAndConflicts(filesToTransfer, selectedFilesToTransfer, conflicts);
 
         List<String> filteredEmptyDirectoriesToCreate =
                 filterPathsBySelection(emptyDirectoriesToCreate, selectedEmptyDirectoriesToCreate);
@@ -79,16 +80,32 @@ public final class SyncPreviewPlan {
                 conflicts);
     }
 
-    private static List<FileChangeDetector.FileInfo> filterFilesBySelection(List<FileChangeDetector.FileInfo> source,
-                                                                         Set<String> selectedPaths) {
-        if (selectedPaths == null) {
+    private static List<FileChangeDetector.FileInfo> filterFilesBySelectionAndConflicts(
+            List<FileChangeDetector.FileInfo> source,
+            Set<String> selectedPaths,
+            List<ConflictInfo> conflicts) {
+        if (selectedPaths == null && (conflicts == null || conflicts.isEmpty())) {
             return copyFiles(source);
+        }
+        Set<String> conflictSkipPaths = new HashSet<>();
+        if (conflicts != null) {
+            for (ConflictInfo conflict : conflicts) {
+                ConflictInfo.Resolution res = conflict.getResolution();
+                if (res == ConflictInfo.Resolution.SKIP || res == ConflictInfo.Resolution.KEEP_REMOTE) {
+                    conflictSkipPaths.add(conflict.getPath());
+                }
+            }
         }
         List<FileChangeDetector.FileInfo> result = new ArrayList<>();
         for (FileChangeDetector.FileInfo fileInfo : source) {
-            if (selectedPaths.contains(fileInfo.getPath())) {
-                result.add(fileInfo);
+            String path = fileInfo.getPath();
+            if (selectedPaths != null && !selectedPaths.contains(path)) {
+                continue;
             }
+            if (conflictSkipPaths.contains(path)) {
+                continue;
+            }
+            result.add(fileInfo);
         }
         return List.copyOf(result);
     }

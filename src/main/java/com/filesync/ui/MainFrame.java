@@ -51,15 +51,15 @@ public class MainFrame extends JFrame {
         logController = new LogController(components.getLogTextArea());
         settingsDialog = new SettingsDialog();
 
-        SyncPreviewRenderer syncPreviewRenderer = new SyncPreviewRenderer(this);
         syncController = new SyncController(
                 this,
                 components,
                 syncManager,
                 state,
                 settings,
-                logController,
-                syncPreviewRenderer);
+                logController);
+        SyncPreviewRenderer syncPreviewRenderer = new SyncPreviewRenderer(this, syncController);
+        syncController.setPreviewRenderer(syncPreviewRenderer);
         connectionController = new ConnectionController(
                 this,
                 components,

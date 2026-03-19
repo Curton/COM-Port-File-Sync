@@ -73,4 +73,171 @@ class SyncPreviewPlanTest {
         assertEquals(basePlan.getTotalBytesToTransfer(), filteredPlan.getTotalBytesToTransfer());
         assertEquals(basePlan.getTotalOperations(), filteredPlan.getTotalOperations());
     }
+
+    @Test
+    void createFilteredPlan_excludesSkippedConflicts() {
+        FileChangeDetector.FileInfo transferOne = new FileChangeDetector.FileInfo("keep.txt", 100L, 0L, "md5-a");
+        FileChangeDetector.FileInfo conflictFile = new FileChangeDetector.FileInfo("conflict.txt", 200L, 0L, "md5-b");
+
+        ConflictInfo skipConflict = new ConflictInfo("conflict.txt",
+                new FileChangeDetector.FileInfo("conflict.txt", 200L, 0L, "md5-b"),
+                new FileChangeDetector.FileInfo("conflict.txt", 200L, 0L, "md5-c"),
+                false, "local".getBytes());
+        skipConflict.setResolution(ConflictInfo.Resolution.SKIP);
+
+        SyncPreviewPlan basePlan = new SyncPreviewPlan(
+                List.of(transferOne, conflictFile),
+                List.of(),
+                List.of(),
+                List.of(),
+                300L,
+                false,
+                List.of(skipConflict));
+
+        SyncPreviewPlan filteredPlan = basePlan.createFilteredPlan(
+                Set.of("keep.txt", "conflict.txt"),
+                Set.of(),
+                Set.of(),
+                Set.of());
+
+        assertEquals(1, filteredPlan.getFilesToTransfer().size());
+        assertEquals("keep.txt", filteredPlan.getFilesToTransfer().get(0).getPath());
+        assertEquals(1, filteredPlan.getConflicts().size());
+    }
+
+    @Test
+    void createFilteredPlan_excludesKeepRemoteConflicts() {
+        FileChangeDetector.FileInfo transferOne = new FileChangeDetector.FileInfo("keep.txt", 100L, 0L, "md5-a");
+        FileChangeDetector.FileInfo conflictFile = new FileChangeDetector.FileInfo("remote.txt", 200L, 0L, "md5-b");
+
+        ConflictInfo keepRemoteConflict = new ConflictInfo("remote.txt",
+                new FileChangeDetector.FileInfo("remote.txt", 200L, 0L, "md5-b"),
+                new FileChangeDetector.FileInfo("remote.txt", 200L, 0L, "md5-c"),
+                false, "local".getBytes());
+        keepRemoteConflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+
+        SyncPreviewPlan basePlan = new SyncPreviewPlan(
+                List.of(transferOne, conflictFile),
+                List.of(),
+                List.of(),
+                List.of(),
+                300L,
+                false,
+                List.of(keepRemoteConflict));
+
+        SyncPreviewPlan filteredPlan = basePlan.createFilteredPlan(
+                Set.of("keep.txt", "remote.txt"),
+                Set.of(),
+                Set.of(),
+                Set.of());
+
+        assertEquals(1, filteredPlan.getFilesToTransfer().size());
+        assertEquals("keep.txt", filteredPlan.getFilesToTransfer().get(0).getPath());
+        assertEquals(1, filteredPlan.getConflicts().size());
+    }
+
+    @Test
+    void createFilteredPlan_includesKeepLocalConflicts() {
+        FileChangeDetector.FileInfo conflictFile = new FileChangeDetector.FileInfo("local.txt", 200L, 0L, "md5-a");
+
+        ConflictInfo keepLocalConflict = new ConflictInfo("local.txt",
+                new FileChangeDetector.FileInfo("local.txt", 200L, 0L, "md5-a"),
+                new FileChangeDetector.FileInfo("local.txt", 200L, 0L, "md5-b"),
+                false, "local content".getBytes());
+        keepLocalConflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+
+        SyncPreviewPlan basePlan = new SyncPreviewPlan(
+                List.of(conflictFile),
+                List.of(),
+                List.of(),
+                List.of(),
+                200L,
+                false,
+                List.of(keepLocalConflict));
+
+        SyncPreviewPlan filteredPlan = basePlan.createFilteredPlan(
+                Set.of("local.txt"),
+                Set.of(),
+                Set.of(),
+                Set.of());
+
+        assertEquals(1, filteredPlan.getFilesToTransfer().size());
+        assertEquals("local.txt", filteredPlan.getFilesToTransfer().get(0).getPath());
+        assertEquals(1, filteredPlan.getConflicts().size());
+    }
+
+    @Test
+    void createFilteredPlan_includesMergeConflicts() {
+        FileChangeDetector.FileInfo conflictFile = new FileChangeDetector.FileInfo("merge.txt", 200L, 0L, "md5-a");
+
+        ConflictInfo mergeConflict = new ConflictInfo("merge.txt",
+                new FileChangeDetector.FileInfo("merge.txt", 200L, 0L, "md5-a"),
+                new FileChangeDetector.FileInfo("merge.txt", 200L, 0L, "md5-b"),
+                false, "local content".getBytes());
+        mergeConflict.setRemoteContent("remote content".getBytes());
+        mergeConflict.setMergedContent("merged content");
+        mergeConflict.setResolution(ConflictInfo.Resolution.MERGE);
+
+        SyncPreviewPlan basePlan = new SyncPreviewPlan(
+                List.of(conflictFile),
+                List.of(),
+                List.of(),
+                List.of(),
+                200L,
+                false,
+                List.of(mergeConflict));
+
+        SyncPreviewPlan filteredPlan = basePlan.createFilteredPlan(
+                Set.of("merge.txt"),
+                Set.of(),
+                Set.of(),
+                Set.of());
+
+        assertEquals(1, filteredPlan.getFilesToTransfer().size());
+        assertEquals("merge.txt", filteredPlan.getFilesToTransfer().get(0).getPath());
+        assertEquals(1, filteredPlan.getConflicts().size());
+        assertEquals(ConflictInfo.Resolution.MERGE, filteredPlan.getConflicts().get(0).getResolution());
+    }
+
+    @Test
+    void createFilteredPlan_preservesConflictsInFilteredPlan() {
+        FileChangeDetector.FileInfo fileOne = new FileChangeDetector.FileInfo("file1.txt", 100L, 0L, "md5-a");
+        FileChangeDetector.FileInfo fileTwo = new FileChangeDetector.FileInfo("file2.txt", 150L, 0L, "md5-b");
+
+        ConflictInfo conflict1 = new ConflictInfo("file1.txt",
+                new FileChangeDetector.FileInfo("file1.txt", 100L, 0L, "md5-a"),
+                new FileChangeDetector.FileInfo("file1.txt", 100L, 0L, "md5-x"),
+                false, "content1".getBytes());
+        conflict1.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+
+        ConflictInfo conflict2 = new ConflictInfo("file2.txt",
+                new FileChangeDetector.FileInfo("file2.txt", 150L, 0L, "md5-b"),
+                new FileChangeDetector.FileInfo("file2.txt", 150L, 0L, "md5-y"),
+                false, "content2".getBytes());
+        conflict2.setResolution(ConflictInfo.Resolution.SKIP);
+
+        SyncPreviewPlan basePlan = new SyncPreviewPlan(
+                List.of(fileOne, fileTwo),
+                List.of(),
+                List.of(),
+                List.of(),
+                250L,
+                true,
+                List.of(conflict1, conflict2));
+
+        // Select only file1 - only file1 should be in transfer list
+        // but conflicts list is preserved as-is (not filtered)
+        SyncPreviewPlan filteredPlan = basePlan.createFilteredPlan(
+                Set.of("file1.txt"),
+                Set.of(),
+                Set.of(),
+                Set.of());
+
+        assertEquals(1, filteredPlan.getFilesToTransfer().size());
+        assertEquals("file1.txt", filteredPlan.getFilesToTransfer().get(0).getPath());
+        // Conflicts list is preserved unchanged - both conflicts remain
+        assertEquals(2, filteredPlan.getConflicts().size());
+        assertEquals("file1.txt", filteredPlan.getConflicts().get(0).getPath());
+        assertEquals("file2.txt", filteredPlan.getConflicts().get(1).getPath());
+    }
 }

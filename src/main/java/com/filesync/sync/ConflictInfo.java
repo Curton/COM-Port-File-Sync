@@ -22,13 +22,25 @@ public final class ConflictInfo {
         UNRESOLVED
     }
 
+    /**
+     * Where to apply the resolution: remote only, or both local and remote.
+     */
+    public enum ApplyTarget {
+        /** Apply changes to remote only (do not overwrite local file) */
+        REMOTE_ONLY,
+        /** Apply changes to both local and remote */
+        BOTH
+    }
+
     private final String path;
     private final FileChangeDetector.FileInfo localInfo;
     private final FileChangeDetector.FileInfo remoteInfo;
     private final boolean binary;
     private final byte[] localContent;
     private byte[] remoteContent;
+    private String mergedContent;
     private Resolution resolution = Resolution.UNRESOLVED;
+    private ApplyTarget applyTarget = ApplyTarget.BOTH;
 
     public ConflictInfo(String path,
                         FileChangeDetector.FileInfo localInfo,
@@ -70,12 +82,35 @@ public final class ConflictInfo {
         this.remoteContent = remoteContent;
     }
 
+    public String getMergedContent() {
+        return mergedContent;
+    }
+
+    public void setMergedContent(String mergedContent) {
+        this.mergedContent = mergedContent;
+    }
+
+    public byte[] getMergedContentAsBytes() {
+        if (mergedContent == null) {
+            return null;
+        }
+        return mergedContent.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     public Resolution getResolution() {
         return resolution;
     }
 
     public void setResolution(Resolution resolution) {
         this.resolution = resolution;
+    }
+
+    public ApplyTarget getApplyTarget() {
+        return applyTarget;
+    }
+
+    public void setApplyTarget(ApplyTarget applyTarget) {
+        this.applyTarget = applyTarget;
     }
 
     public boolean isResolved() {

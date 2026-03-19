@@ -33,10 +33,44 @@ import com.filesync.ui.SyncPreviewOperationType;
  * Build and render sync preview text/table UIs.
  */
 public class SyncPreviewRenderer {
+
+    /**
+     * Result of a sync preview dialog showing both the selected plan and UI state.
+     */
+    public static final class SyncPreviewResult {
+        private final SyncPreviewPlan plan;
+        private final DefaultTableModel model;
+        private final List<SyncPreviewRow> rows;
+
+        SyncPreviewResult(SyncPreviewPlan plan, DefaultTableModel model, List<SyncPreviewRow> rows) {
+            this.plan = plan;
+            this.model = model;
+            this.rows = rows;
+        }
+
+        public SyncPreviewPlan getPlan() {
+            return plan;
+        }
+
+        public DefaultTableModel getModel() {
+            return model;
+        }
+
+        public List<SyncPreviewRow> getRows() {
+            return rows;
+        }
+    }
+
     private final JFrame owner;
+    private final ConflictResolver conflictResolver;
+
+    public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
+        this.owner = owner;
+        this.conflictResolver = conflictResolver;
+    }
 
     public SyncPreviewRenderer(JFrame owner) {
-        this.owner = owner;
+        this(owner, null);
     }
 
     public SyncPreviewPlan showSyncPreviewDialog(SyncPreviewPlan syncPreview, boolean requireConfirmation) {
@@ -60,6 +94,20 @@ public class SyncPreviewRenderer {
             return null;
         }
         return createFilteredSyncPlan(syncPreview, previewModel, rows);
+    }
+
+    public SyncPreviewResult showSyncPreviewDialogWithResult(SyncPreviewPlan syncPreview) {
+        List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
+        DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
+
+        JPanel previewPanel = createPreviewPanel(previewModel, rows);
+        int response = showPreviewOptionDialog(previewPanel);
+
+        if (response != 0) {
+            return null;
+        }
+        SyncPreviewPlan plan = createFilteredSyncPlan(syncPreview, previewModel, rows);
+        return new SyncPreviewResult(plan, previewModel, rows);
     }
 
     private JPanel createPreviewPanel(DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
@@ -181,6 +229,22 @@ public class SyncPreviewRenderer {
         return model;
     }
 
+    /**
+     * Refresh the type label column in the table model for rows that have conflict info.
+     * Call this after conflict resolution to update the display.
+     *
+     * @param model the table model to update
+     * @param rows the rows list matching the model
+     */
+    public void refreshConflictTypeLabels(DefaultTableModel model, List<SyncPreviewRow> rows) {
+        for (int i = 0; i < rows.size(); i++) {
+            SyncPreviewRow row = rows.get(i);
+            if (row.getOperationType() == SyncPreviewOperationType.CONFLICT) {
+                model.setValueAt(row.getTypeLabel(), i, 1);
+            }
+        }
+    }
+
     private TableCellRenderer createPathTailRenderer() {
         return new DefaultTableCellRenderer() {
             @Override
@@ -214,11 +278,16 @@ public class SyncPreviewRenderer {
         List<SyncPreviewRow> rows = new ArrayList<>();
 
         for (FileChangeDetector.FileInfo fileInfo : syncPreview.getFilesToTransfer()) {
+            ConflictInfo conflict = syncPreview.getConflict(fileInfo.getPath());
+            SyncPreviewOperationType type = conflict != null
+                    ? SyncPreviewOperationType.CONFLICT
+                    : SyncPreviewOperationType.TRANSFER_FILE;
             rows.add(new SyncPreviewRow(
-                    SyncPreviewOperationType.TRANSFER_FILE,
+                    type,
                     fileInfo.getPath(),
                     UiFormatting.formatBytes(fileInfo.getSize()),
-                    fileInfo.getSize()));
+                    fileInfo.getSize(),
+                    conflict));
         }
 
         for (String path : syncPreview.getEmptyDirectoriesToCreate()) {
@@ -282,8 +351,11 @@ public class SyncPreviewRenderer {
                 continue;
             }
             SyncPreviewRow row = rows.get(i);
+            if (row == null) {
+                continue;
+            }
             switch (row.getOperationType()) {
-                case TRANSFER_FILE -> selectedTransferFiles.add(row.getPath());
+                case CONFLICT, TRANSFER_FILE -> selectedTransferFiles.add(row.getPath());
                 case CREATE_DIR -> selectedCreateDirs.add(row.getPath());
                 case DELETE_FILE -> selectedDeleteFiles.add(row.getPath());
                 case DELETE_DIR -> selectedDeleteDirs.add(row.getPath());
@@ -299,67 +371,76 @@ public class SyncPreviewRenderer {
 
     /**
      * Resolve conflicts for selected files in the sync plan.
-     * For each selected file that has a conflict, shows appropriate dialog:
-     * - Binary files: BinaryConflictDialog
-     * - Text files: TextMergeDialog
+     * Shows a single unified dialog with Next/Previous navigation and progress (e.g. 2/5).
+     * User can cancel to abort the entire resolution.
      *
      * @param plan the sync plan with conflicts
-     * @param conflictResolver provider to fetch remote content for merge UI
+     * @param previewModel the table model to refresh after resolution
+     * @param rows the rows list matching the model
      * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
      */
     public boolean resolveConflictsForSelectedFiles(
             SyncPreviewPlan plan,
-            ConflictResolver conflictResolver) {
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows) {
+        return resolveConflictsForSelectedFiles(plan, null, previewModel, rows);
+    }
+
+    /**
+     * Resolve conflicts for selected files in one unified window.
+     * Fetches remote content for text conflicts, then shows ConflictResolutionDialog
+     * with Next/Previous navigation and progress indicator.
+     *
+     * @param plan the sync plan with conflicts
+     * @param resolver provider to fetch remote content for merge UI (may be null to use injected resolver)
+     * @param previewModel the table model to refresh after resolution
+     * @param rows the rows list matching the model
+     * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
+     */
+    public boolean resolveConflictsForSelectedFiles(
+            SyncPreviewPlan plan,
+            ConflictResolver resolver,
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows) {
+
+        ConflictResolver effectiveResolver = resolver != null ? resolver : conflictResolver;
+        if (effectiveResolver == null) {
+            throw new IllegalStateException("No ConflictResolver available");
+        }
 
         if (plan.getConflicts().isEmpty()) {
             return true;
         }
 
-        // Check each file to transfer for conflicts
+        // Collect unresolved conflicts in transfer order
+        List<ConflictInfo> toResolve = new ArrayList<>();
         for (FileChangeDetector.FileInfo fileInfo : plan.getFilesToTransfer()) {
             ConflictInfo conflict = plan.getConflict(fileInfo.getPath());
-            if (conflict == null || !conflict.isResolved()) {
-                // Need to resolve this conflict
-                boolean resolved = promptConflictResolution(conflict, conflictResolver);
-                if (!resolved) {
-                    return false; // User cancelled
-                }
+            if (conflict != null && !conflict.isResolved()) {
+                toResolve.add(conflict);
             }
         }
 
-        return true;
-    }
+        if (toResolve.isEmpty()) {
+            return true;
+        }
 
-    /**
-     * Prompt user to resolve a single conflict.
-     */
-    private boolean promptConflictResolution(ConflictInfo conflict, ConflictResolver conflictResolver) {
-        // Fetch remote content if needed for merge UI
-        if (!conflict.isBinary()) {
-            byte[] remoteContent = conflictResolver.fetchRemoteContent(conflict.getPath());
+        // Fetch remote content for all conflicts before showing dialog
+        // (text: needed for merge UI; binary: needed for KEEP_REMOTE to write to local later)
+        for (ConflictInfo conflict : toResolve) {
+            byte[] remoteContent = effectiveResolver.fetchRemoteContent(conflict.getPath());
             if (remoteContent != null) {
                 conflict.setRemoteContent(remoteContent);
             }
         }
 
-        if (conflict.isBinary()) {
-            BinaryConflictDialog.Resolution result = BinaryConflictDialog.showDialog(owner, conflict);
-            switch (result) {
-                case KEEP_LOCAL -> conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
-                case KEEP_REMOTE -> conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
-                case SKIP -> conflict.setResolution(ConflictInfo.Resolution.SKIP);
-                case CANCEL -> { return false; }
-            }
-        } else {
-            TextMergeDialog.Resolution result = TextMergeDialog.showDialog(owner, conflict);
-            switch (result) {
-                case KEEP_LOCAL -> conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
-                case KEEP_REMOTE -> conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
-                case MERGE -> conflict.setResolution(ConflictInfo.Resolution.MERGE);
-                case CANCEL -> { return false; }
-            }
+        ConflictResolutionDialog.Result result = ConflictResolutionDialog.showDialog(owner, toResolve);
+        if (result != ConflictResolutionDialog.Result.COMPLETED) {
+            return false;
         }
 
+        // Refresh table to show resolved labels
+        refreshConflictTypeLabels(previewModel, rows);
         return true;
     }
 

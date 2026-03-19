@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -74,6 +75,11 @@ public class ConflictAnalyzer {
             if (localInfo != null && remoteInfo != null) {
                 // File exists on both sides - check if content differs
                 if (contentDiffers(localInfo, remoteInfo)) {
+                    // Only treat as conflict when receiver has newer changes (we would overwrite them).
+                    // If only sender modified, remote has old version - normal transfer, no conflict.
+                    if (!isReceiverNewer(localInfo, remoteInfo)) {
+                        continue; // Sender's version is same or newer, safe to transfer
+                    }
                     boolean isBinary = isBinaryExtension(path);
                     File localFile = new File(localFolder, path);
                     byte[] localContent = readFileContent(localFile);
@@ -107,6 +113,15 @@ public class ConflictAnalyzer {
         // Fall back to size and timestamp comparison (fast mode)
         return local.getSize() != remote.getSize()
                 || Math.abs(local.getLastModified() - remote.getLastModified()) > FileChangeDetector.MODIFY_WINDOW_MS;
+    }
+
+    /**
+     * True when receiver (remote) has a newer version than sender (local).
+     * In that case we would overwrite receiver's changes - a real conflict.
+     * When only sender modified, remote is older - no conflict, normal transfer.
+     */
+    private static boolean isReceiverNewer(FileChangeDetector.FileInfo local, FileChangeDetector.FileInfo remote) {
+        return remote.getLastModified() > local.getLastModified() + FileChangeDetector.MODIFY_WINDOW_MS;
     }
 
     /**
@@ -165,16 +180,7 @@ public class ConflictAnalyzer {
                 return null; // File too large
             }
 
-            byte[] content = new byte[(int) fileSize];
-            try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
-                int totalRead = 0;
-                while (totalRead < fileSize) {
-                    int read = fis.read(content, totalRead, (int) fileSize - totalRead);
-                    if (read == -1) break;
-                    totalRead += read;
-                }
-            }
-            return content;
+            return Files.readAllBytes(file.toPath());
         } catch (IOException e) {
             return null;
         }

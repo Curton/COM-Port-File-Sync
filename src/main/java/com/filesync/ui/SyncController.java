@@ -6,6 +6,7 @@ import java.util.List;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.SwingWorker;
+import javax.swing.table.DefaultTableModel;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.sync.FileSyncManager;
@@ -14,7 +15,7 @@ import com.filesync.sync.SyncPreviewPlan;
 /**
  * Sync flow and control panel actions.
  */
-public class SyncController {
+public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private static final String START_SYNC_TEXT = "Start Sync";
     private static final String CANCEL_SYNC_TEXT = "Cancel";
 
@@ -24,22 +25,34 @@ public class SyncController {
     private final MainFrameState state;
     private final SettingsManager settings;
     private final LogController logController;
-    private final SyncPreviewRenderer previewRenderer;
+    private SyncPreviewRenderer previewRenderer;
 
     public SyncController(JFrame owner,
                           MainFrameComponents components,
                           FileSyncManager syncManager,
                           MainFrameState state,
                           SettingsManager settings,
-                          LogController logController,
-                          SyncPreviewRenderer previewRenderer) {
+                          LogController logController) {
         this.owner = owner;
         this.components = components;
         this.syncManager = syncManager;
         this.state = state;
         this.settings = settings;
         this.logController = logController;
+    }
+
+    public void setPreviewRenderer(SyncPreviewRenderer previewRenderer) {
         this.previewRenderer = previewRenderer;
+    }
+
+    @Override
+    public byte[] fetchRemoteContent(String path) {
+        try {
+            return syncManager.fetchRemoteFileContent(path);
+        } catch (Exception e) {
+            logController.log("Failed to fetch remote content for " + path + ": " + e.getMessage());
+            return null;
+        }
     }
 
     public void initActionHandlers() {
@@ -282,27 +295,27 @@ public class SyncController {
                         return;
                     }
 
-                    SyncPreviewPlan selectedPlan = previewRenderer.showSyncPreviewDialog(syncPreview, true);
-                    if (selectedPlan == null) {
+                    SyncPreviewRenderer.SyncPreviewResult previewResult =
+                            previewRenderer.showSyncPreviewDialogWithResult(syncPreview);
+                    if (previewResult == null) {
                         return;
                     }
+                    SyncPreviewPlan selectedPlan = previewResult.getPlan();
+                    DefaultTableModel previewModel = previewResult.getModel();
+                    List<SyncPreviewRow> previewRows = previewResult.getRows();
 
                     // Resolve conflicts for selected files before starting sync
                     if (!selectedPlan.getConflicts().isEmpty()) {
                         boolean conflictsResolved = previewRenderer.resolveConflictsForSelectedFiles(
                                 selectedPlan,
-                                path -> {
-                                    try {
-                                        return syncManager.fetchRemoteFileContent(path);
-                                    } catch (Exception e) {
-                                        logController.log("Failed to fetch remote content for " + path + ": " + e.getMessage());
-                                        return null;
-                                    }
-                                });
+                                previewModel,
+                                previewRows);
                         if (!conflictsResolved) {
                             // User cancelled conflict resolution
                             return;
                         }
+                        // Re-create filtered plan now that conflicts have resolutions (SKIP/KEEP_REMOTE exclude from transfer)
+                        selectedPlan = previewRenderer.createFilteredSyncPlan(syncPreview, previewModel, previewRows);
                     }
 
                     components.getSyncButton().setEnabled(false);
@@ -417,8 +430,11 @@ public class SyncController {
     }
 
     public void onTransferComplete() {
-        components.getProgressBar().setString("Transfer complete");
-        components.getProgressBar().setValue(100);
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            components.getProgressBar().setString("Transfer complete");
+            components.getProgressBar().setValue(100);
+            updateSyncButtonState();
+        });
     }
 
     public void onConnectionStatusChanged(boolean isAlive) {
@@ -431,6 +447,8 @@ public class SyncController {
                 components.getPortComboBox().setEnabled(false);
                 components.getRefreshPortsButton().setEnabled(false);
                 components.getSettingsButton().setEnabled(false);
+                /* Re-enable Sync Control when connection restored; connect() disables them during connect */
+                components.getDirectionButton().setEnabled(true);
             } else {
                 components.getStatusLabel().setText("Connection Lost");
                 components.getStatusLabel().setForeground(java.awt.Color.ORANGE);

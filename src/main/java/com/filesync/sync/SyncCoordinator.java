@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -366,8 +367,13 @@ public class SyncCoordinator {
         try {
             eventBus.post(new SyncEvent.SyncStartedEvent());
             SyncPreviewPlan syncPlan = providedPlan != null ? providedPlan : createSyncPreviewPlan();
-            int totalOperations = syncPlan.getTotalOperations();
+            File syncFolder = syncFolderSupplier.get();
 
+            // Apply conflict resolutions to local files first (e.g. KEEP_REMOTE + BOTH)
+            // Must run before totalOperations check so KEEP_REMOTE-only sync still applies local writes
+            applyConflictResolutionsToLocalFiles(syncPlan, syncFolder);
+
+            int totalOperations = syncPlan.getTotalOperations();
             if (totalOperations == 0) {
                 eventBus.post(new SyncEvent.LogEvent("No files need to be synced or deleted"));
                 eventBus.post(new SyncEvent.SyncCompleteEvent());
@@ -379,17 +385,35 @@ public class SyncCoordinator {
             logSyncSummary(syncPlan);
 
             int operationIndex = 0;
-            File syncFolder = syncFolderSupplier.get();
             for (FileChangeDetector.FileInfo fileInfo : syncPlan.getFilesToTransfer()) {
                 operationIndex++;
-                boolean wasCompressed = protocol.sendFile(syncFolder, fileInfo.getPath());
-                String message = "Syncing [" + operationIndex + "/" + totalOperations + "]: "
-                        + fileInfo.getPath();
+                String filePath = fileInfo.getPath();
+                ConflictInfo conflict = syncPlan.getConflict(filePath);
+                boolean wasCompressed;
+                String message;
+                if (conflict != null && conflict.getResolution() == ConflictInfo.Resolution.MERGE) {
+                    byte[] mergedContent = conflict.getMergedContentAsBytes();
+                    if (mergedContent != null) {
+                        File mergedFile = new File(syncFolder, filePath);
+                        long lastModified = mergedFile.exists() ? mergedFile.lastModified() : 0L;
+                        wasCompressed = protocol.sendFile(syncFolder, filePath, mergedContent, lastModified);
+                        if (!wasCompressed) {
+                            eventBus.post(new SyncEvent.ErrorEvent("Failed to send merged file: " + filePath));
+                        }
+                        message = "Syncing (merged) [" + operationIndex + "/" + totalOperations + "]: " + filePath;
+                    } else {
+                        wasCompressed = protocol.sendFile(syncFolder, filePath);
+                        message = "Syncing [" + operationIndex + "/" + totalOperations + "]: " + filePath;
+                    }
+                } else {
+                    wasCompressed = protocol.sendFile(syncFolder, filePath);
+                    message = "Syncing [" + operationIndex + "/" + totalOperations + "]: " + filePath;
+                }
                 if (wasCompressed) {
                     message += " (compressed)";
                 }
                 eventBus.post(new SyncEvent.LogEvent(message));
-                eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, fileInfo.getPath()));
+                eventBus.post(new SyncEvent.FileProgressEvent(operationIndex, totalOperations, filePath));
                 flushSharedTextBetweenOperations();
             }
 
@@ -433,6 +457,49 @@ public class SyncCoordinator {
             cancelRequested.set(false);
             touchHeartbeat();
             onSyncIdle.run();
+        }
+    }
+
+    /**
+     * Write resolved conflict content to local files.
+     * Only when ApplyTarget.BOTH: KEEP_REMOTE overwrites local with remote; MERGE overwrites local with merged.
+     * When ApplyTarget.REMOTE_ONLY, local file is not modified (changes apply to remote only).
+     * Sets lastModified to match remote (KEEP_REMOTE) or preserve write time for MERGE
+     * so the next sync does not re-detect the same conflict (fast mode uses size+lastModified).
+     */
+    private void applyConflictResolutionsToLocalFiles(SyncPreviewPlan syncPlan, File syncFolder) {
+        for (ConflictInfo conflict : syncPlan.getConflicts()) {
+            if (conflict.getApplyTarget() != ConflictInfo.ApplyTarget.BOTH) {
+                continue;
+            }
+            ConflictInfo.Resolution res = conflict.getResolution();
+            byte[] contentToWrite = null;
+            if (res == ConflictInfo.Resolution.KEEP_REMOTE) {
+                contentToWrite = conflict.getRemoteContent();
+            } else if (res == ConflictInfo.Resolution.MERGE) {
+                contentToWrite = conflict.getMergedContentAsBytes();
+            }
+            if (contentToWrite == null) {
+                continue;
+            }
+            String path = conflict.getPath();
+            File file = new File(syncFolder, path);
+            try {
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                Files.write(file.toPath(), contentToWrite);
+                if (res == ConflictInfo.Resolution.KEEP_REMOTE) {
+                    long remoteLastModified = conflict.getRemoteInfo().getLastModified();
+                    if (remoteLastModified > 0 && !file.setLastModified(remoteLastModified)) {
+                        eventBus.post(new SyncEvent.LogEvent("Could not set lastModified for " + path + ", may re-detect conflict"));
+                    }
+                }
+                eventBus.post(new SyncEvent.LogEvent("Applied conflict resolution to local: " + path));
+            } catch (IOException e) {
+                eventBus.post(new SyncEvent.ErrorEvent("Failed to apply conflict resolution to " + path + ": " + e.getMessage()));
+            }
         }
     }
 

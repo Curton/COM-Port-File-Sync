@@ -9,9 +9,6 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 
 import javax.swing.ButtonGroup;
-import javax.swing.JButton;
-import javax.swing.JDialog;
-import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
@@ -21,20 +18,16 @@ import javax.swing.JTextArea;
 import com.filesync.sync.ConflictInfo;
 
 /**
- * Dialog for resolving text file conflicts.
- * Shows both versions and allows user to choose which to keep or to merge manually.
+ * Panel for resolving text file conflicts with merge option.
+ * Extracted from TextMergeDialog for use in unified ConflictResolutionDialog.
  */
-public class TextMergeDialog extends JDialog {
+public class TextMergePanel extends JPanel {
 
     public enum Resolution {
         KEEP_LOCAL,
         KEEP_REMOTE,
-        MERGE,
-        CANCEL
+        MERGE
     }
-
-    private Resolution resolution = Resolution.CANCEL;
-    private String mergedContent;
 
     private final JRadioButton keepLocalRadio;
     private final JRadioButton keepRemoteRadio;
@@ -42,22 +35,14 @@ public class TextMergeDialog extends JDialog {
     private final JTextArea mergeTextArea;
     private final JPanel mergePanel;
 
-    public TextMergeDialog(JFrame parent, ConflictInfo conflict) {
-        super(parent, "Resolve Conflict: " + conflict.getPath(), true);
-        setMinimumSize(new Dimension(900, 700));
-        setLocationRelativeTo(parent);
+    public TextMergePanel(ConflictInfo conflict) {
+        setLayout(new BorderLayout(8, 8));
 
-        // Main panel
-        JPanel mainPanel = new JPanel(new BorderLayout(8, 8));
-        mainPanel.setBorder(javax.swing.BorderFactory.createEmptyBorder(16, 16, 16, 16));
-
-        // Header
         JLabel headerLabel = new JLabel("<html><b>Conflict Detected</b><br/>" +
                 "This file has been modified on both sides. Choose how to resolve:</html>");
         headerLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 0, 8, 0));
-        mainPanel.add(headerLabel, BorderLayout.NORTH);
+        add(headerLabel, BorderLayout.NORTH);
 
-        // Split pane for local and remote
         JPanel splitPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(4, 4, 4, 4);
@@ -65,21 +50,16 @@ public class TextMergeDialog extends JDialog {
         gbc.weightx = 0.5;
         gbc.weighty = 1.0;
 
-        // Local version
         gbc.gridx = 0;
         gbc.gridy = 0;
-        JPanel localPanel = createVersionPanel("LOCAL VERSION", conflict.getLocalContentAsString());
-        splitPanel.add(localPanel, gbc);
+        splitPanel.add(createVersionPanel("LOCAL VERSION", conflict.getLocalContentAsString()), gbc);
 
-        // Remote version
         gbc.gridx = 1;
         gbc.gridy = 0;
-        JPanel remotePanel = createVersionPanel("REMOTE VERSION", conflict.getRemoteContentAsString());
-        splitPanel.add(remotePanel, gbc);
+        splitPanel.add(createVersionPanel("REMOTE VERSION", conflict.getRemoteContentAsString()), gbc);
 
-        mainPanel.add(splitPanel, BorderLayout.CENTER);
+        add(splitPanel, BorderLayout.CENTER);
 
-        // Merge panel (initially hidden)
         mergePanel = new JPanel(new BorderLayout(4, 4));
         JLabel mergeLabel = new JLabel("EDIT MERGED VERSION:");
         mergeLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 0, 4, 0));
@@ -94,7 +74,6 @@ public class TextMergeDialog extends JDialog {
         mergePanel.add(mergeScroll, BorderLayout.CENTER);
         mergePanel.setVisible(false);
 
-        // Resolution choices
         JPanel choicePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         keepLocalRadio = new JRadioButton("Keep Local");
         keepLocalRadio.setSelected(true);
@@ -108,7 +87,6 @@ public class TextMergeDialog extends JDialog {
 
         mergeRadio.addActionListener(e -> {
             mergePanel.setVisible(true);
-            // Pre-populate merge with both versions for easier manual merging
             String localContent = conflict.getLocalContentAsString();
             String remoteContent = conflict.getRemoteContentAsString();
             String combined = "<<<<<<< LOCAL\n" + localContent +
@@ -127,44 +105,10 @@ public class TextMergeDialog extends JDialog {
         choicePanel.add(keepRemoteRadio);
         choicePanel.add(mergeRadio);
 
-        JPanel bottomPanel = new JPanel(new BorderLayout(4, 4));
-        bottomPanel.add(choicePanel, BorderLayout.NORTH);
-
-        // Buttons
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        JButton cancelButton = new JButton("Cancel");
-        cancelButton.addActionListener(e -> {
-            resolution = Resolution.CANCEL;
-            dispose();
-        });
-
-        JButton okButton = new JButton("OK");
-        okButton.addActionListener(e -> {
-            if (keepLocalRadio.isSelected()) {
-                resolution = Resolution.KEEP_LOCAL;
-            } else if (keepRemoteRadio.isSelected()) {
-                resolution = Resolution.KEEP_REMOTE;
-            } else if (mergeRadio.isSelected()) {
-                resolution = Resolution.MERGE;
-                mergedContent = mergeTextArea.getText();
-                conflict.setMergedContent(mergedContent);
-            } else {
-                resolution = Resolution.CANCEL;
-            }
-            dispose();
-        });
-
-        buttonPanel.add(cancelButton);
-        buttonPanel.add(okButton);
-        bottomPanel.add(buttonPanel, BorderLayout.SOUTH);
-
-        // Stack merge panel above resolution choices; mergePanel was being overwritten by bottomPanel
         JPanel southContainer = new JPanel(new BorderLayout(4, 4));
         southContainer.add(mergePanel, BorderLayout.NORTH);
-        southContainer.add(bottomPanel, BorderLayout.SOUTH);
-        mainPanel.add(southContainer, BorderLayout.SOUTH);
-
-        setContentPane(mainPanel);
+        southContainer.add(choicePanel, BorderLayout.SOUTH);
+        add(southContainer, BorderLayout.SOUTH);
     }
 
     private JPanel createVersionPanel(String title, String content) {
@@ -188,16 +132,29 @@ public class TextMergeDialog extends JDialog {
     }
 
     public Resolution getResolution() {
-        return resolution;
+        if (keepLocalRadio.isSelected()) {
+            return Resolution.KEEP_LOCAL;
+        } else if (keepRemoteRadio.isSelected()) {
+            return Resolution.KEEP_REMOTE;
+        } else if (mergeRadio.isSelected()) {
+            return Resolution.MERGE;
+        }
+        return Resolution.KEEP_LOCAL;
     }
 
     public String getMergedContent() {
-        return mergedContent;
+        if (mergeRadio.isSelected()) {
+            return mergeTextArea.getText();
+        }
+        return null;
     }
 
-    public static Resolution showDialog(JFrame parent, ConflictInfo conflict) {
-        TextMergeDialog dialog = new TextMergeDialog(parent, conflict);
-        dialog.setVisible(true);
-        return dialog.getResolution();
+    /** Apply target fixed by resolution: keep local -> apply to remote; keep remote -> apply to local; merge -> apply to both */
+    public ConflictInfo.ApplyTarget getApplyTarget() {
+        Resolution r = getResolution();
+        if (r == Resolution.KEEP_LOCAL) {
+            return ConflictInfo.ApplyTarget.REMOTE_ONLY;
+        }
+        return ConflictInfo.ApplyTarget.BOTH;
     }
 }
