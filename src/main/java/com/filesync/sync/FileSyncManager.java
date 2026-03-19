@@ -7,6 +7,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.protocol.SyncProtocol;
@@ -36,6 +37,8 @@ public class FileSyncManager {
     private final AtomicBoolean connectionAlive = new AtomicBoolean(false);
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
+
+    private final AtomicLong threadIdGenerator = new AtomicLong(0);
 
     private final SyncEventBus eventBus;
     private final ConnectionService connectionService;
@@ -554,7 +557,7 @@ public class FileSyncManager {
         if (executor == null || executor.isShutdown()) {
             ScheduledThreadPoolExecutor exec = new ScheduledThreadPoolExecutor(4, runnable -> {
                 Thread t = new Thread(runnable);
-                t.setName("FileSync-" + t.getId());
+                t.setName("FileSync-" + threadIdGenerator.incrementAndGet());
                 t.setDaemon(true);
                 return t;
             });
