@@ -279,10 +279,22 @@ public class SettingsManager {
             }
         }
 
+        boolean hasLegacyMapping = loadAndMigrateLegacyMapping(key, mappings);
+        List<String[]> normalizedMappings = dedupeAndCapRememberedFolderMappings(mappings);
+        boolean mappingsChanged = storedSize != normalizedMappings.size()
+                || hasLegacyMapping
+                || hasStoredMappingDifferences(mappings, normalizedMappings);
+
+        if (mappingsChanged) {
+            saveRememberedFolderMappings(port, normalizedMappings);
+        }
+        return normalizedMappings;
+    }
+
+    private boolean loadAndMigrateLegacyMapping(String key, List<String[]> mappings) {
         String legacySender = normalizeFolderPath(prefs.get(key + PREF_FOLDER_MAPPING_SENDER, ""));
         String legacyReceiver = normalizeFolderPath(prefs.get(key + PREF_FOLDER_MAPPING_RECEIVER, ""));
         boolean hasLegacyMapping = !legacySender.isEmpty() && !legacyReceiver.isEmpty();
-        boolean hasStoredMappings = !mappings.isEmpty();
 
         if (hasLegacyMapping) {
             mappings.removeIf(mapping ->
@@ -291,29 +303,21 @@ public class SettingsManager {
             prefs.remove(key + PREF_FOLDER_MAPPING_SENDER);
             prefs.remove(key + PREF_FOLDER_MAPPING_RECEIVER);
         }
+        return hasLegacyMapping;
+    }
 
-        List<String[]> normalizedMappings = dedupeAndCapRememberedFolderMappings(mappings);
-        boolean mappingsChanged = storedSize != normalizedMappings.size();
-        if (!mappingsChanged && hasStoredMappings) {
-            for (int i = 0; i < mappings.size() && i < normalizedMappings.size(); i++) {
-                String[] existing = mappings.get(i);
-                String[] normalized = normalizedMappings.get(i);
-                if (!existing[0].equals(normalized[0]) || !existing[1].equals(normalized[1])) {
-                    mappingsChanged = true;
-                    break;
-                }
-            }
-            if (!mappingsChanged && mappings.size() != normalizedMappings.size()) {
-                mappingsChanged = true;
-            }
-        } else if (!hasStoredMappings && hasLegacyMapping) {
-            mappingsChanged = true;
+    private boolean hasStoredMappingDifferences(List<String[]> mappings, List<String[]> normalizedMappings) {
+        if (mappings.size() != normalizedMappings.size()) {
+            return true;
         }
-
-        if (mappingsChanged || hasLegacyMapping) {
-            saveRememberedFolderMappings(port, normalizedMappings);
+        for (int i = 0; i < mappings.size(); i++) {
+            String[] existing = mappings.get(i);
+            String[] normalized = normalizedMappings.get(i);
+            if (!existing[0].equals(normalized[0]) || !existing[1].equals(normalized[1])) {
+                return true;
+            }
         }
-        return normalizedMappings;
+        return false;
     }
 
     private void saveRememberedFolderMappings(String port, List<String[]> mappings) {

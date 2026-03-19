@@ -37,8 +37,8 @@ public class SyncPreviewRenderer {
     }
 
     public SyncPreviewPlan showSyncPreviewDialog(SyncPreviewPlan syncPreview, boolean requireConfirmation) {
-        JTextArea previewArea = createSyncPreviewTextArea(syncPreview);
         if (!requireConfirmation) {
+            JTextArea previewArea = createSyncPreviewTextArea(syncPreview);
             JOptionPane.showMessageDialog(
                     owner,
                     previewArea,
@@ -49,6 +49,33 @@ public class SyncPreviewRenderer {
 
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
+
+        JPanel previewPanel = createPreviewPanel(previewModel, rows);
+        int response = showPreviewOptionDialog(previewPanel);
+
+        if (response != 0) {
+            return null;
+        }
+        return createFilteredSyncPlan(syncPreview, previewModel, rows);
+    }
+
+    private JPanel createPreviewPanel(DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
+        JTable previewTable = createPreviewTable(previewModel);
+        JLabel selectionSummary = new JLabel();
+        updateSyncPreviewSummary(selectionSummary, previewModel, rows);
+        previewModel.addTableModelListener(event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
+
+        JPanel controlPanel = createControlPanel(previewModel, selectionSummary);
+        JScrollPane previewScroll = new JScrollPane(previewTable);
+        previewScroll.setPreferredSize(new Dimension(720, 480));
+
+        JPanel previewPanel = new JPanel(new java.awt.BorderLayout(0, 8));
+        previewPanel.add(controlPanel, java.awt.BorderLayout.NORTH);
+        previewPanel.add(previewScroll, java.awt.BorderLayout.CENTER);
+        return previewPanel;
+    }
+
+    private JTable createPreviewTable(DefaultTableModel previewModel) {
         JTable previewTable = new JTable(previewModel);
         previewTable.setFillsViewportHeight(true);
         previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
@@ -58,11 +85,10 @@ public class SyncPreviewRenderer {
         previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
         previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        return previewTable;
+    }
 
-        JLabel selectionSummary = new JLabel();
-        updateSyncPreviewSummary(selectionSummary, previewModel, rows);
-        previewModel.addTableModelListener(event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
-
+    private JPanel createControlPanel(DefaultTableModel previewModel, JLabel selectionSummary) {
         javax.swing.JButton selectAllButton = new javax.swing.JButton("Select All");
         selectAllButton.addActionListener(event -> setPreviewSelection(previewModel, true));
         javax.swing.JButton deselectAllButton = new javax.swing.JButton("Deselect All");
@@ -72,15 +98,11 @@ public class SyncPreviewRenderer {
         controlPanel.add(selectAllButton);
         controlPanel.add(deselectAllButton);
         controlPanel.add(selectionSummary);
+        return controlPanel;
+    }
 
-        JScrollPane previewScroll = new JScrollPane(previewTable);
-        previewScroll.setPreferredSize(new Dimension(720, 480));
-
-        JPanel previewPanel = new JPanel(new java.awt.BorderLayout(0, 8));
-        previewPanel.add(controlPanel, java.awt.BorderLayout.NORTH);
-        previewPanel.add(previewScroll, java.awt.BorderLayout.CENTER);
-
-        int response = JOptionPane.showOptionDialog(
+    private int showPreviewOptionDialog(JPanel previewPanel) {
+        return JOptionPane.showOptionDialog(
                 owner,
                 previewPanel,
                 "Sync Preview - Select Files",
@@ -89,15 +111,6 @@ public class SyncPreviewRenderer {
                 null,
                 new Object[] {"Start Sync", "Cancel"},
                 "Start Sync");
-        if (response != 0) {
-            return null;
-        }
-
-        SyncPreviewPlan selectedPlan = createFilteredSyncPlan(syncPreview, previewModel, rows);
-        if (selectedPlan.getTotalOperations() == 0) {
-            return null;
-        }
-        return selectedPlan;
     }
 
     public JTextArea createSyncPreviewTextArea(SyncPreviewPlan syncPreview) {
