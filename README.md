@@ -22,13 +22,26 @@ COM Port File Sync enables reliable file transfer between two machines connected
 - **Fast Mode** - Uses file metadata (size + modification time) instead of MD5 hashes for faster manifest generation
 
 ### Additional Features
+
+**Sync Control**
+- **Direction Toggle** - Switch between sender (A -> B) and receiver (B <- A) modes with a single click
+- **Mirror Mode** - Automatically deletes files on receiver that don't exist on sender
+- **Fast Mode** - Uses file metadata (size + modification time) instead of MD5 hashes for faster manifest comparison
+
+**File Filtering**
 - **`.gitignore` Support** - Respects `.gitignore` patterns to exclude files from synchronization
-- **Shared Text Area** - Real-time text sharing between connected machines (clipboard sync)
+- **Remembered Folder Mapping** - Remote folder mapping is remembered per port; prompts when mapping changes
+
+**User Experience**
+- **Folder Mapping Guard** - Remembers local-to-remote folder mappings per port and prompts when paths change
+- **Dry-Run Preview** - Review planned file operations in a preview dialog before applying a sync
+- **Single-File Drag-and-Drop Sending** - Drop one file directly onto the main interface for immediate transfer when connected
+- **Drag-and-Drop File Send** - Quickly queue one local file for transfer by dragging it onto the main window
+
+**Connection**
 - **Role Negotiation** - Automatic sender/receiver role assignment on connection
 - **Connection Monitoring** - Heartbeat-based connection health monitoring with auto-recovery
-- **Drag-and-Drop File Send** - Quickly queue one local file for transfer by dragging it onto the main window
-- **Sync Preview** - Review planned file operations in a preview dialog before applying a sync
-- **Folder Mapping Guard** - Remembers local-to-remote folder mappings per port and prompts when paths changed
+- **Shared Text Area** - Real-time text sharing between connected machines (clipboard sync)
 
 ## Requirements
 
@@ -90,22 +103,6 @@ Click the **Settings** button to configure COM port parameters:
 | Stop Bits | 1 | 1, 1.5, 2 |
 | Parity | None | None, Odd, Even, Mark, Space |
 
-### Sync Options
-
-| Option | Description |
-|--------|-------------|
-| **A -> B / B <- A** | Toggle sync direction. Click to switch between sender and receiver mode |
-| **Respect .gitignore** | When enabled, files matching `.gitignore` patterns are excluded from sync |
-| **Strict Sync** | When enabled, files on receiver that don't exist on sender will be deleted |
-| **Fast Mode** | Uses file metadata instead of MD5 hashes for faster manifest comparison |
-| **Remembered Folder Mapping** | Remote folder mapping is remembered per port; you will be prompted when mapping changes |
-
-### New Feature Highlights
-
-- **Folder Mapping Confirmation** - On sync start, the app compares local/remote folder paths with remembered mappings and asks for confirmation when they change.
-- **Dry-Run Preview** - Use the preview action to validate transfer scope before transfers begin.
-- **Single-File Drag-and-Drop Sending** - Drop one file directly onto the main interface for immediate transfer when connected.
-
 ### Shared Text
 
 The Shared Text area allows real-time text sharing between connected machines:
@@ -158,21 +155,6 @@ com.filesync/
     |-- UiFormatting.java           # UI styling utilities
 ```
 
-## Protocol Details
-
-
-### XMODEM Implementation
-
-- **CRC-16-CCITT** checksums for error detection
-- **Automatic block size selection**: 4KB for large files, 1KB for medium, 128 bytes for small
-
-## Dependencies
-
-| Dependency | Version | Purpose |
-|------------|---------|---------|
-| [jSerialComm](https://fazecast.github.io/jSerialComm/) | 2.11.4 | Cross-platform serial port communication |
-| [Gson](https://github.com/google/gson) | 2.13.2 | JSON serialization for file manifests |
-| [JUnit 5 (Jupiter)](https://junit.org/junit5/) | 5.11.0 | Unit testing |
 
 ## Troubleshooting
 
