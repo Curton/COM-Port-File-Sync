@@ -266,14 +266,11 @@ public class SyncPreviewRenderer {
                 continue;
             }
             SyncPreviewRow row = rows.get(i);
-            if (row.getOperationType() == SyncPreviewOperationType.TRANSFER_FILE) {
-                selectedTransferFiles.add(row.getPath());
-            } else if (row.getOperationType() == SyncPreviewOperationType.CREATE_DIR) {
-                selectedCreateDirs.add(row.getPath());
-            } else if (row.getOperationType() == SyncPreviewOperationType.DELETE_FILE) {
-                selectedDeleteFiles.add(row.getPath());
-            } else if (row.getOperationType() == SyncPreviewOperationType.DELETE_DIR) {
-                selectedDeleteDirs.add(row.getPath());
+            switch (row.getOperationType()) {
+                case TRANSFER_FILE -> selectedTransferFiles.add(row.getPath());
+                case CREATE_DIR -> selectedCreateDirs.add(row.getPath());
+                case DELETE_FILE -> selectedDeleteFiles.add(row.getPath());
+                case DELETE_DIR -> selectedDeleteDirs.add(row.getPath());
             }
         }
 

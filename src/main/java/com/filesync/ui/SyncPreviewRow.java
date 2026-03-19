@@ -30,17 +30,12 @@ final class SyncPreviewRow {
     }
 
     String getTypeLabel() {
-        switch (operationType) {
-            case TRANSFER_FILE:
-                return "Transfer File";
-            case CREATE_DIR:
-                return "Create Dir";
-            case DELETE_FILE:
-                return "Delete File";
-            case DELETE_DIR:
-                return "Delete Dir";
-            default:
-                return "Unknown";
-        }
+        return switch (operationType) {
+            case TRANSFER_FILE -> "Transfer File";
+            case CREATE_DIR -> "Create Dir";
+            case DELETE_FILE -> "Delete File";
+            case DELETE_DIR -> "Delete Dir";
+            default -> "Unknown";
+        };
     }
 }

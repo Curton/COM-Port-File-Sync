@@ -486,8 +486,7 @@ public class FileSyncManager {
 
     private void handleIncomingMessage(SyncProtocol.Message msg) throws IOException {
         switch (msg.getCommand()) {
-            case SyncProtocol.CMD_MANIFEST_REQ:
-                // Extract sender's settings if provided (for consistent manifest generation)
+            case SyncProtocol.CMD_MANIFEST_REQ -> {
                 Boolean senderRespectGitignore = null;
                 Boolean senderFastMode = null;
                 if (msg.getParams().length >= 2) {
@@ -495,103 +494,59 @@ public class FileSyncManager {
                     senderFastMode = msg.getParamAsBoolean(1);
                 }
                 syncCoordinator.handleManifestRequest(senderRespectGitignore, senderFastMode);
-                break;
-
-            case SyncProtocol.CMD_FOLDER_CONTEXT_REQ:
-                handleFolderContextRequest();
-                break;
-
-            case SyncProtocol.CMD_FOLDER_CHANGE:
-                handleFolderChange(msg.getParam(0));
-                break;
-
-            case SyncProtocol.CMD_MANIFEST_DATA:
+            }
+            case SyncProtocol.CMD_FOLDER_CONTEXT_REQ -> handleFolderContextRequest();
+            case SyncProtocol.CMD_FOLDER_CHANGE -> handleFolderChange(msg.getParam(0));
+            case SyncProtocol.CMD_MANIFEST_DATA -> {
                 // Handled in initiateSync flow
-                break;
-
-            case SyncProtocol.CMD_FILE_REQ:
-                syncCoordinator.handleFileRequest(msg.getParam(0));
-                break;
-
-            case SyncProtocol.CMD_FILE_DATA:
-                syncCoordinator.handleIncomingFileData(msg);
-                break;
-
-            case SyncProtocol.CMD_DIRECTION_CHANGE:
+            }
+            case SyncProtocol.CMD_FILE_REQ -> syncCoordinator.handleFileRequest(msg.getParam(0));
+            case SyncProtocol.CMD_FILE_DATA -> syncCoordinator.handleIncomingFileData(msg);
+            case SyncProtocol.CMD_DIRECTION_CHANGE -> {
                 if (syncCoordinator.isSyncing() || protocol.isXmodemInProgress()) {
                     eventBus.post(new SyncEvent.LogEvent("Ignoring direction change during data transfer"));
-                    break;
+                } else {
+                    roleNegotiationService.handleDirectionChange(msg.getParamAsBoolean(0));
                 }
-                roleNegotiationService.handleDirectionChange(msg.getParamAsBoolean(0));
-                break;
-
-            case SyncProtocol.CMD_SYNC_COMPLETE:
-                syncCoordinator.handleSyncComplete();
-                break;
-
-            case SyncProtocol.CMD_ERROR:
+            }
+            case SyncProtocol.CMD_SYNC_COMPLETE -> syncCoordinator.handleSyncComplete();
+            case SyncProtocol.CMD_ERROR -> {
                 syncCoordinator.cancelOngoingSync();
                 eventBus.post(new SyncEvent.ErrorEvent("Remote error: " + msg.getParam(0)));
-                break;
-
-            case SyncProtocol.CMD_CANCEL:
+            }
+            case SyncProtocol.CMD_CANCEL -> {
                 String cancelReason = msg.getParams().length > 0 ? msg.getParam(0) : "";
                 syncCoordinator.handleRemoteCancel(cancelReason);
-                break;
-
-            case SyncProtocol.CMD_HEARTBEAT:
-                connectionService.handleHeartbeat();
-                break;
-
-            case SyncProtocol.CMD_HEARTBEAT_ACK:
-                connectionService.handleHeartbeatAck();
-                break;
-
-            case SyncProtocol.CMD_DISCONNECT:
-                connectionService.reportCommunicationFailure("Connection closed by remote");
-                break;
-
-            case SyncProtocol.CMD_ROLE_NEGOTIATE:
+            }
+            case SyncProtocol.CMD_HEARTBEAT -> connectionService.handleHeartbeat();
+            case SyncProtocol.CMD_HEARTBEAT_ACK -> connectionService.handleHeartbeatAck();
+            case SyncProtocol.CMD_DISCONNECT -> connectionService.reportCommunicationFailure("Connection closed by remote");
+            case SyncProtocol.CMD_ROLE_NEGOTIATE -> {
                 long remotePriority = msg.getParamAsLong(0);
                 long remoteTieBreaker = msg.getParamAsLong(1);
                 roleNegotiationService.handleRoleNegotiate(remotePriority, remoteTieBreaker);
                 sharedTextService.resendLatestSharedText();
-                break;
-
-            case SyncProtocol.CMD_FILE_DELETE:
-                syncCoordinator.handleFileDelete(msg.getParam(0));
-                break;
-
-            case SyncProtocol.CMD_MKDIR:
-                syncCoordinator.handleMkdir(msg.getParam(0));
-                break;
-
-            case SyncProtocol.CMD_RMDIR:
-                syncCoordinator.handleRmdir(msg.getParam(0));
-                break;
-
-            case SyncProtocol.CMD_SHARED_TEXT:
+            }
+            case SyncProtocol.CMD_FILE_DELETE -> syncCoordinator.handleFileDelete(msg.getParam(0));
+            case SyncProtocol.CMD_MKDIR -> syncCoordinator.handleMkdir(msg.getParam(0));
+            case SyncProtocol.CMD_RMDIR -> syncCoordinator.handleRmdir(msg.getParam(0));
+            case SyncProtocol.CMD_SHARED_TEXT -> {
                 if (msg.getParams().length >= 2) {
                     sharedTextService.handleIncomingSharedText(msg.getParamAsLong(0), msg.getParam(1));
                 } else {
                     sharedTextService.handleIncomingSharedText(msg.getParam(0));
                 }
-                break;
-
-            case SyncProtocol.CMD_SHARED_TEXT_DATA:
+            }
+            case SyncProtocol.CMD_SHARED_TEXT_DATA -> {
                 if (msg.getParams().length >= 3) {
                     sharedTextService.handleIncomingSharedTextData(msg.getParamAsLong(0), msg.getParamAsBoolean(1), msg.getParamAsInt(2));
                 } else {
                     eventBus.post(new SyncEvent.ErrorEvent("Invalid shared text data message"));
                 }
-                break;
-
-            case SyncProtocol.CMD_DROP_FILE:
-                fileDropService.handleIncomingDropFile(msg);
-                break;
-
-            default:
-                break;
+            }
+            case SyncProtocol.CMD_DROP_FILE -> fileDropService.handleIncomingDropFile(msg);
+            default -> {
+            }
         }
     }
 

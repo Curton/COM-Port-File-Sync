@@ -28,62 +28,54 @@ public class SyncEventBridge {
 
         SyncEventType type = event.getType();
         switch (type) {
-            case SYNC_STARTED:
-                syncController.onSyncStarted();
-                break;
-            case SYNC_COMPLETE:
-                syncController.onSyncComplete();
-                break;
-            case SYNC_CANCELLED:
-                syncController.onSyncCancelled();
-                break;
-            case TRANSFER_COMPLETE:
-                syncController.onTransferComplete();
-                break;
-            case FILE_PROGRESS:
+            case SYNC_STARTED -> syncController.onSyncStarted();
+            case SYNC_COMPLETE -> syncController.onSyncComplete();
+            case SYNC_CANCELLED -> syncController.onSyncCancelled();
+            case TRANSFER_COMPLETE -> syncController.onTransferComplete();
+            case FILE_PROGRESS -> {
                 SyncEvent.FileProgressEvent fileProgress = (SyncEvent.FileProgressEvent) event;
                 SwingUtilities.invokeLater(() -> syncController.onFileProgress(fileProgress.getCurrentFile(),
                         fileProgress.getTotalFiles(),
                         fileProgress.getFileName()));
-                break;
-            case TRANSFER_PROGRESS:
+            }
+            case TRANSFER_PROGRESS -> {
                 SyncEvent.TransferProgressEvent transferProgress = (SyncEvent.TransferProgressEvent) event;
                 SwingUtilities.invokeLater(() -> syncController.onTransferProgress(
                         transferProgress.getCurrentBlock(),
                         transferProgress.getTotalBlocks(),
                         transferProgress.getBytesTransferred(),
                         transferProgress.getSpeedBytesPerSec()));
-                break;
-            case DIRECTION_CHANGED:
+            }
+            case DIRECTION_CHANGED -> {
                 SyncEvent.DirectionEvent directionEvent = (SyncEvent.DirectionEvent) event;
                 SwingUtilities.invokeLater(() -> {
                     syncController.applyDirection(directionEvent.isSender());
                     logController.log("Direction changed by remote: " + (directionEvent.isSender() ? "Sender" : "Receiver"));
                 });
-                break;
-            case CONNECTION_STATUS:
+            }
+            case CONNECTION_STATUS -> {
                 SyncEvent.ConnectionEvent connectionEvent = (SyncEvent.ConnectionEvent) event;
                 syncController.onConnectionStatusChanged(connectionEvent.isConnected());
-                break;
-            case LOG:
+            }
+            case LOG -> {
                 SyncEvent.LogEvent logEvent = (SyncEvent.LogEvent) event;
                 syncController.onLog(logEvent.getMessage());
-                break;
-            case ERROR:
+            }
+            case ERROR -> {
                 SyncEvent.ErrorEvent errorEvent = (SyncEvent.ErrorEvent) event;
                 syncController.onError(errorEvent.getMessage());
-                break;
-            case SHARED_TEXT_RECEIVED:
+            }
+            case SHARED_TEXT_RECEIVED -> {
                 SyncEvent.SharedTextReceivedEvent sharedTextEvent = (SyncEvent.SharedTextReceivedEvent) event;
                 sharedTextController.onSharedTextReceived(sharedTextEvent.getText());
-                break;
-            case DROP_FILE_RECEIVED:
+            }
+            case DROP_FILE_RECEIVED -> {
                 SyncEvent.DropFileReceivedEvent dropFileEvent = (SyncEvent.DropFileReceivedEvent) event;
                 SwingUtilities.invokeLater(() -> logController.log(
                         "Received dropped file: " + dropFileEvent.getFileName() + " -> " + dropFileEvent.getFilePath()));
-                break;
-            default:
-                break;
+            }
+            default -> {
+            }
         }
     }
 }
