@@ -557,8 +557,22 @@ public class SyncProtocol {
             throw new IOException("Failed to receive dropped file " + fileName + " (" + detail + ")");
         }
 
+        // ACK is sent by caller (FileDropService) after receiving CMD_DROP_FILE and
+        // before this method is called. After XMODEM receive succeeds, we must send
+        // ACK here so the sender does not timeout waiting for a protocol response.
+        // If validation fails, ERROR is sent so the sender knows the transfer failed.
+        sendAck();
+
         // Verify sender-reported size before any transformation or disk write
-        validateReceivedSize("dropped file", fileName, expectedSize, data);
+        try {
+            validateReceivedSize("dropped file", fileName, expectedSize, data);
+        } catch (IOException e) {
+            // Send ERROR so sender does not timeout waiting for next command.
+            // ACK was already sent above (sender is waiting for protocol response,
+            // not another XMODEM packet-level ACK).
+            sendError("Size mismatch for dropped file: " + e.getMessage());
+            throw e;
+        }
 
         if (compressed) {
             data = CompressionUtil.decompress(data);
@@ -719,9 +733,12 @@ public class SyncProtocol {
 
     /**
      * Cancel an in-flight XMODEM transfer (control-plane cancel).
+     * Sends both the XMODEM CAN signal (data-plane) and CMD_CANCEL (control-plane)
+     * to ensure the remote is notified at both levels and does not timeout.
      */
     public void sendTransferCancel() throws IOException {
         xmodem.sendCancelSignal();
+        sendCancelCommand();
     }
 
     /**

@@ -279,6 +279,8 @@ public class SyncCoordinator {
     public void handleIncomingFileData(SyncProtocol.Message msg) throws IOException {
         File syncFolder = syncFolderSupplier.get();
         if (syncFolder == null) {
+            syncing.set(false);
+            onSyncIdle.run();
             return;
         }
         syncing.set(true);
@@ -306,7 +308,6 @@ public class SyncCoordinator {
     public void handleSyncComplete() {
         syncing.set(false);
         touchHeartbeat();
-        onSyncIdle.run();
         eventBus.post(new SyncEvent.SyncCompleteEvent());
     }
 
