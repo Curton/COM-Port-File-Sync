@@ -173,12 +173,17 @@ public class SettingsManager {
             return;
         }
 
-        recentFolders.remove(folderPath);
-        recentFolders.add(0, folderPath);
+        String normalized = normalizeFolderPath(folderPath);
+        if (normalized.isEmpty()) {
+            return;
+        }
+
+        recentFolders.removeIf(p -> normalizeFolderPath(p).equals(normalized));
+        recentFolders.add(0, normalized);
         while (recentFolders.size() > MAX_RECENT_FOLDERS) {
             recentFolders.remove(recentFolders.size() - 1);
         }
-        setLastFolder(folderPath);
+        setLastFolder(normalized);
         save();
     }
     
@@ -456,12 +461,12 @@ public class SettingsManager {
         for (int i = 0; i < size; i++) {
             String folderPath = prefs.get(PREF_FOLDER_HISTORY_PREFIX + i, "");
             if (folderPath != null && !folderPath.trim().isEmpty()) {
-                recentFolders.add(folderPath.trim());
+                recentFolders.add(normalizeFolderPath(folderPath));
             }
         }
 
         if (recentFolders.isEmpty() && lastFolder != null && !lastFolder.trim().isEmpty()) {
-            recentFolders.add(lastFolder.trim());
+            recentFolders.add(normalizeFolderPath(lastFolder));
         }
 
         dedupeAndCapRecentFolders();
@@ -485,8 +490,11 @@ public class SettingsManager {
                 continue;
             }
 
-            String normalized = folderPath.trim();
-            unique.remove(normalized);
+            String normalized = normalizeFolderPath(folderPath);
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            unique.removeIf(p -> normalizeFolderPath(p).equals(normalized));
             unique.add(normalized);
         }
 

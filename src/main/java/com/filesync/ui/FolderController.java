@@ -65,9 +65,13 @@ public class FolderController {
             if (folderPath == null || folderPath.isEmpty()) {
                 continue;
             }
-            File folder = new File(folderPath);
+            String normalized = SettingsManager.normalizeFolderPath(folderPath);
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            File folder = new File(normalized);
             if (folder.exists() && folder.isDirectory()) {
-                components.getFolderComboBox().addItem(folderPath);
+                components.getFolderComboBox().addItem(normalized);
             }
         }
         while (components.getFolderComboBox().getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
@@ -80,10 +84,14 @@ public class FolderController {
             return;
         }
 
-        String normalizedFolderPath = folderPath.strip();
+        String normalizedFolderPath = SettingsManager.normalizeFolderPath(folderPath);
+        if (normalizedFolderPath.isEmpty()) {
+            return;
+        }
+
         File folder = new File(normalizedFolderPath);
         if (!folder.exists() || !folder.isDirectory()) {
-            components.getFolderComboBox().removeItem(normalizedFolderPath);
+            removeComboItemByNormalizedPath(normalizedFolderPath);
             syncManager.setSyncFolder(null);
             updateSyncButtonState.run();
             return;
@@ -95,7 +103,7 @@ public class FolderController {
         if (rememberFolder) {
             try {
                 state.setSuppressFolderSelectionEvents(true);
-                components.getFolderComboBox().removeItem(normalizedFolderPath);
+                removeComboItemByNormalizedPath(normalizedFolderPath);
                 components.getFolderComboBox().insertItemAt(normalizedFolderPath, 0);
                 while (components.getFolderComboBox().getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
                     components.getFolderComboBox().removeItemAt(components.getFolderComboBox().getItemCount() - 1);
@@ -112,6 +120,16 @@ public class FolderController {
                 components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
             } finally {
                 state.setSuppressFolderSelectionEvents(false);
+            }
+        }
+    }
+
+    private void removeComboItemByNormalizedPath(String normalizedPath) {
+        for (int i = 0; i < components.getFolderComboBox().getItemCount(); i++) {
+            String item = (String) components.getFolderComboBox().getItemAt(i);
+            if (item != null && SettingsManager.normalizeFolderPath(item).equals(normalizedPath)) {
+                components.getFolderComboBox().removeItemAt(i);
+                return;
             }
         }
     }
@@ -164,7 +182,7 @@ public class FolderController {
 
         if (fileChooser.showOpenDialog(SwingUtilities.getWindowAncestor(components.getFolderComboBox())) == JFileChooser.APPROVE_OPTION) {
             File selectedFolder = fileChooser.getSelectedFile();
-            String folderPath = selectedFolder.getAbsolutePath();
+            String folderPath = SettingsManager.normalizeFolderPath(selectedFolder.getAbsolutePath());
             applyFolderSelection(folderPath, true);
             logController.log("Selected folder: " + folderPath);
             // Notify remote if we're the sender and connected

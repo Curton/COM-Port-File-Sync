@@ -336,27 +336,25 @@ public class FileSyncManager {
 
     private void handleFolderContextRequest() throws IOException {
         File folder = getSyncFolder();
-        String path = (folder != null && folder.exists()) ? folder.getAbsolutePath() : "";
+        String path = (folder != null && folder.exists())
+                ? SettingsManager.normalizeFolderPath(folder.getAbsolutePath()) : "";
         protocol.sendFolderContextResponse(path);
     }
 
-    private void handleFolderChange(String encodedSenderFolder) {
+    private void handleFolderChange(String encodedPath) {
         // Only receiver should process folder change notifications
         if (roleNegotiationService.isSender()) {
             return;
         }
-        String senderFolder = SyncProtocol.decodePathFromProtocol(encodedSenderFolder);
-        if (senderFolder == null || senderFolder.isEmpty()) {
+        // Sender sends the receiver path directly (sender has the mapping, receiver does not)
+        String receiverFolder = SyncProtocol.decodePathFromProtocol(encodedPath);
+        if (receiverFolder == null || receiverFolder.isEmpty()) {
             return;
         }
-        String port = serialPort.getPortName();
-        String receiverFolder = settings.findReceiverFolderForSender(senderFolder, port);
-        if (receiverFolder != null && !receiverFolder.isEmpty()) {
-            File folder = new File(receiverFolder);
-            if (folder.exists() && folder.isDirectory()) {
-                setSyncFolder(folder);
-                eventBus.post(new SyncEvent.RemoteFolderChangedEvent(receiverFolder));
-            }
+        File folder = new File(receiverFolder);
+        if (folder.exists() && folder.isDirectory()) {
+            setSyncFolder(folder);
+            eventBus.post(new SyncEvent.RemoteFolderChangedEvent(receiverFolder));
         }
     }
 
@@ -396,16 +394,25 @@ public class FileSyncManager {
 
     /**
      * Notify remote (receiver) that the sender folder has changed.
-     * The receiver will look up its mapped folder and switch to it.
+     * Looks up the mapped receiver path and sends it; the receiver has no mapping stored
+     * (only sender stores it after sync), so we send the target path directly.
      *
-     * @param folderPath the new sender folder path (absolute)
+     * @param senderFolderPath the new sender folder path (absolute)
      */
-    public void notifyFolderChange(String folderPath) {
+    public void notifyFolderChange(String senderFolderPath) {
         if (!isSender() || !isConnectionAlive()) {
             return;
         }
+        String port = serialPort.getPortName();
+        if (port == null) {
+            port = "";
+        }
+        String receiverFolder = settings.findReceiverFolderForSender(senderFolderPath, port);
+        if (receiverFolder == null || receiverFolder.isEmpty()) {
+            return;
+        }
         try {
-            protocol.sendFolderChange(folderPath);
+            protocol.sendFolderChange(receiverFolder);
         } catch (IOException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Failed to send folder change notification: " + e.getMessage()));
         }
