@@ -2,9 +2,9 @@ package com.filesync.ui;
 
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.FontMetrics;
-import java.awt.FlowLayout;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -95,11 +95,6 @@ public class SyncPreviewRenderer {
 
         SyncPreviewPlan selectedPlan = createFilteredSyncPlan(syncPreview, previewModel, rows);
         if (selectedPlan.getTotalOperations() == 0) {
-            JOptionPane.showMessageDialog(
-                    owner,
-                    "No operations selected. Select at least one file or directory to sync.",
-                    "No Operations Selected",
-                    JOptionPane.WARNING_MESSAGE);
             return null;
         }
         return selectedPlan;
