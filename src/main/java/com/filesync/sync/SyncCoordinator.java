@@ -229,7 +229,7 @@ public class SyncCoordinator {
      * @param senderFastMode sender's fast mode setting, or null to use local
      */
     public void handleManifestRequest(Boolean senderRespectGitignore, Boolean senderFastMode) throws IOException {
-        boolean alreadySyncing = syncing.getAndSet(true);
+        syncing.set(true);
         try {
             File syncFolder = syncFolderSupplier.get();
             if (syncFolder == null || !syncFolder.exists()) {
@@ -258,10 +258,8 @@ public class SyncCoordinator {
             logMsg += ")";
             eventBus.post(new SyncEvent.LogEvent(logMsg));
         } finally {
-            if (!alreadySyncing) {
-                syncing.set(false);
-                onSyncIdle.run();
-            }
+            syncing.set(false);
+            onSyncIdle.run();
             touchHeartbeat();
         }
     }
@@ -300,6 +298,8 @@ public class SyncCoordinator {
             if (isSyncCancelledException(e)) {
                 handleRemoteCancel("Transfer cancelled while receiving file " + relativePath);
             } else {
+                syncing.set(false);
+                onSyncIdle.run();
                 throw e;
             }
         }
