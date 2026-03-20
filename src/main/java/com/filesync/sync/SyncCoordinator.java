@@ -229,6 +229,11 @@ public class SyncCoordinator {
      * @param senderFastMode sender's fast mode setting, or null to use local
      */
     public void handleManifestRequest(Boolean senderRespectGitignore, Boolean senderFastMode) throws IOException {
+        // Note: The original code used getAndSet(true) to detect nested calls and avoid
+        // calling onSyncIdle for inner calls. This was redundant because the sync protocol
+        // is single-threaded and manifest requests are processed sequentially (one peer
+        // sends a manifest, the other receives it, then roles swap). The check is thus
+        // unnecessary and this simplification ensures onSyncIdle always runs after completion.
         syncing.set(true);
         try {
             File syncFolder = syncFolderSupplier.get();
