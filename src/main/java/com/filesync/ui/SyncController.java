@@ -419,7 +419,6 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     public void onTransferProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
-        components.getDirectionButton().setEnabled(false);
         String speedStr = UiFormatting.formatSpeed(speedBytesPerSec);
         if (totalBlocks > 0) {
             components.getProgressBar().setValue((int) ((double) currentBlock / totalBlocks * 100));
@@ -427,6 +426,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         } else {
             components.getProgressBar().setString("Block " + currentBlock + " - " + speedStr);
         }
+        updateSyncButtonState();
     }
 
     public void onTransferComplete() {

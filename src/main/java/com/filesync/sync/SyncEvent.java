@@ -133,6 +133,13 @@ public interface SyncEvent {
         }
     }
 
+    final class SyncControlRefreshEvent implements SyncEvent {
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.SYNC_CONTROL_REFRESH;
+        }
+    }
+
     final class LogEvent implements SyncEvent {
         private final String message;
 

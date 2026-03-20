@@ -266,6 +266,8 @@ public class SyncCoordinator {
             syncing.set(false);
             onSyncIdle.run();
             touchHeartbeat();
+            // Manifest XMODEM posts TRANSFER_PROGRESS (disables direction); preview has no SYNC_COMPLETE on receiver.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         }
     }
 

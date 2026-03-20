@@ -46,6 +46,7 @@ public class SyncEventBridge {
                         transferProgress.getBytesTransferred(),
                         transferProgress.getSpeedBytesPerSec()));
             }
+            case SYNC_CONTROL_REFRESH -> SwingUtilities.invokeLater(syncController::updateSyncButtonState);
             case DIRECTION_CHANGED -> {
                 SyncEvent.DirectionEvent directionEvent = (SyncEvent.DirectionEvent) event;
                 SwingUtilities.invokeLater(() -> {
