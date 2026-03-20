@@ -7,6 +7,7 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.awt.Image;
 import java.awt.Insets;
 
 import javax.swing.Box;
@@ -245,6 +246,25 @@ public class MainFrameComponents {
         frame.setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
         frame.setMinimumSize(new Dimension(650, 450));
         frame.setLocationRelativeTo(null);
+
+        Image iconImage = loadIconImage();
+        if (iconImage != null) {
+            frame.setIconImage(iconImage);
+        }
+    }
+
+    private Image loadIconImage() {
+        try (java.io.InputStream is = getClass().getClassLoader().getResourceAsStream("icon.jpg")) {
+            if (is != null) {
+                java.awt.image.BufferedImage bufferedImage = javax.imageio.ImageIO.read(is);
+                if (bufferedImage != null) {
+                    return bufferedImage;
+                }
+            }
+        } catch (java.io.IOException e) {
+            System.err.println("Failed to load icon: " + e.getMessage());
+        }
+        return null;
     }
 
     public JComboBox<String> getPortComboBox() {
