@@ -21,6 +21,7 @@ buildNumber.properties
 .vscode/
 *.swp
 *~
+.cursor/
 
 # OS
 .DS_Store
@@ -37,5 +38,3 @@ CLAUDE.md
 *.ear
 *.log
 
-
-.cursor/
