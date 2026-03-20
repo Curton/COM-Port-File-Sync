@@ -6,7 +6,7 @@ A cross-platform Java application for synchronizing files between two computers 
 
 COM Port File Sync enables reliable file transfer between two machines connected via a serial cable (null-modem cable, USB-to-serial adapters, or virtual COM ports). It uses a custom protocol built on top of XMODEM with CRC-16, making it ideal for scenarios where network connectivity is unavailable or restricted.
 
-<img width="1378" height="1189" alt="image" src="https://github.com/user-attachments/assets/487a36f7-0789-4c16-97e6-368c04639218" />
+<img width="1378" height="1189" alt="image" src="https://github.com/user-attachments/assets/8362659c-0ed1-4ce8-a635-e59f5aa4f46c" />
 <img width="1482" height="1193" alt="image" src="https://github.com/user-attachments/assets/d35db033-0eda-4079-9b73-564fbc7a0bce" />
 
 ## Features
