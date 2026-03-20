@@ -113,7 +113,7 @@ public class FileSyncManager {
         protocol.setProgressListener(new XModemTransfer.TransferProgressListener() {
             @Override
             public void onProgress(int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
-                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress()) {
+                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress() || protocol.isXmodemInProgress()) {
                     eventBus.post(new SyncEvent.TransferProgressEvent(
                             currentBlock,
                             totalBlocks,
@@ -124,7 +124,7 @@ public class FileSyncManager {
 
             @Override
             public void onError(String message) {
-                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress()) {
+                if (syncCoordinator.isSyncing() || fileDropService.isTransferInProgress() || protocol.isXmodemInProgress()) {
                     eventBus.post(new SyncEvent.ErrorEvent(message));
                 }
             }
