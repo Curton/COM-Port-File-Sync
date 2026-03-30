@@ -1,0 +1,207 @@
+package com.filesync.ui;
+
+import com.filesync.config.SettingsManager;
+import com.filesync.sync.FileSyncManager;
+import com.filesync.sync.SyncEvent;
+import java.io.File;
+import javax.swing.JFileChooser;
+import javax.swing.SwingUtilities;
+
+/** Folder history and folder-selection behaviors. */
+public class FolderController {
+    private final MainFrameComponents components;
+    private final SettingsManager settings;
+    private final FileSyncManager syncManager;
+    private final MainFrameState state;
+    private final LogController logController;
+    private final Runnable updateSyncButtonState;
+
+    public FolderController(
+            MainFrameComponents components,
+            SettingsManager settings,
+            FileSyncManager syncManager,
+            MainFrameState state,
+            LogController logController,
+            Runnable updateSyncButtonState) {
+        this.components = components;
+        this.settings = settings;
+        this.syncManager = syncManager;
+        this.state = state;
+        this.logController = logController;
+        this.updateSyncButtonState = updateSyncButtonState;
+    }
+
+    public void initEventHandlers() {
+        // Register to remote folder change events
+        syncManager
+                .getEventBus()
+                .register(
+                        event -> {
+                            if (event instanceof SyncEvent.RemoteFolderChangedEvent remoteEvent) {
+                                SwingUtilities.invokeLater(
+                                        () -> onRemoteFolderChanged(remoteEvent.getFolderPath()));
+                            }
+                        });
+
+        components.getBrowseFolderButton().addActionListener(event -> browseFolder());
+        components
+                .getFolderComboBox()
+                .addActionListener(
+                        event -> {
+                            if (state.isSuppressFolderSelectionEvents()) {
+                                return;
+                            }
+                            String selectedFolder =
+                                    (String) components.getFolderComboBox().getSelectedItem();
+                            if (selectedFolder != null && !selectedFolder.isBlank()) {
+                                applyFolderSelection(selectedFolder, true);
+                                logController.log("Selected folder: " + selectedFolder);
+                                // Notify remote if we're the sender and connected
+                                if (syncManager.isSender() && syncManager.isConnectionAlive()) {
+                                    syncManager.notifyFolderChange(selectedFolder);
+                                }
+                            }
+                        });
+    }
+
+    public void loadFolderHistory() {
+        components.getFolderComboBox().removeAllItems();
+        for (String folderPath : settings.getRecentFolders()) {
+            if (folderPath == null || folderPath.isEmpty()) {
+                continue;
+            }
+            String normalized = SettingsManager.normalizeFolderPath(folderPath);
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            File folder = new File(normalized);
+            if (folder.exists() && folder.isDirectory()) {
+                components.getFolderComboBox().addItem(normalized);
+            }
+        }
+        while (components.getFolderComboBox().getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
+            components
+                    .getFolderComboBox()
+                    .removeItemAt(components.getFolderComboBox().getItemCount() - 1);
+        }
+    }
+
+    public void applyFolderSelection(String folderPath, boolean rememberFolder) {
+        if (folderPath == null || folderPath.isBlank()) {
+            return;
+        }
+
+        String normalizedFolderPath = SettingsManager.normalizeFolderPath(folderPath);
+        if (normalizedFolderPath.isEmpty()) {
+            return;
+        }
+
+        File folder = new File(normalizedFolderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            removeComboItemByNormalizedPath(normalizedFolderPath);
+            syncManager.setSyncFolder(null);
+            updateSyncButtonState.run();
+            return;
+        }
+
+        syncManager.setSyncFolder(folder);
+        updateSyncButtonState.run();
+
+        if (rememberFolder) {
+            try {
+                state.setSuppressFolderSelectionEvents(true);
+                removeComboItemByNormalizedPath(normalizedFolderPath);
+                components.getFolderComboBox().insertItemAt(normalizedFolderPath, 0);
+                while (components.getFolderComboBox().getItemCount()
+                        > SettingsManager.MAX_RECENT_FOLDERS) {
+                    components
+                            .getFolderComboBox()
+                            .removeItemAt(components.getFolderComboBox().getItemCount() - 1);
+                }
+                components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
+            } finally {
+                state.setSuppressFolderSelectionEvents(false);
+            }
+            settings.addRecentFolder(normalizedFolderPath);
+        } else if (components.getFolderComboBox().getItemCount() == 0) {
+            try {
+                state.setSuppressFolderSelectionEvents(true);
+                components.getFolderComboBox().addItem(normalizedFolderPath);
+                components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
+            } finally {
+                state.setSuppressFolderSelectionEvents(false);
+            }
+        }
+    }
+
+    private void removeComboItemByNormalizedPath(String normalizedPath) {
+        for (int i = 0; i < components.getFolderComboBox().getItemCount(); i++) {
+            String item = (String) components.getFolderComboBox().getItemAt(i);
+            if (item != null && SettingsManager.normalizeFolderPath(item).equals(normalizedPath)) {
+                components.getFolderComboBox().removeItemAt(i);
+                return;
+            }
+        }
+    }
+
+    private void onRemoteFolderChanged(String folderPath) {
+        if (folderPath == null || folderPath.isBlank()) {
+            return;
+        }
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            return;
+        }
+        try {
+            state.setSuppressFolderSelectionEvents(true);
+            applyFolderSelection(folderPath, true);
+            logController.log("Remote folder changed to: " + folderPath);
+        } finally {
+            state.setSuppressFolderSelectionEvents(false);
+        }
+    }
+
+    public File getCurrentFolderFromSelection() {
+        String selectedFolder = (String) components.getFolderComboBox().getSelectedItem();
+        if (selectedFolder != null && !selectedFolder.isBlank()) {
+            File selectedFolderFile = new File(selectedFolder);
+            if (selectedFolderFile.exists() && selectedFolderFile.isDirectory()) {
+                return selectedFolderFile;
+            }
+        }
+        return null;
+    }
+
+    public void browseFolder() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        fileChooser.setDialogTitle("Select Sync Folder");
+
+        String lastFolder = settings.getLastFolder();
+        if (lastFolder != null && !lastFolder.isEmpty()) {
+            File lastDir = new File(lastFolder);
+            if (lastDir.exists()) {
+                fileChooser.setCurrentDirectory(lastDir);
+            }
+        }
+
+        File currentFolder = getCurrentFolderFromSelection();
+        if (currentFolder != null && currentFolder.exists()) {
+            fileChooser.setCurrentDirectory(currentFolder);
+        }
+
+        if (fileChooser.showOpenDialog(
+                        SwingUtilities.getWindowAncestor(components.getFolderComboBox()))
+                == JFileChooser.APPROVE_OPTION) {
+            File selectedFolder = fileChooser.getSelectedFile();
+            String folderPath =
+                    SettingsManager.normalizeFolderPath(selectedFolder.getAbsolutePath());
+            applyFolderSelection(folderPath, true);
+            logController.log("Selected folder: " + folderPath);
+            // Notify remote if we're the sender and connected
+            if (syncManager.isSender() && syncManager.isConnectionAlive()) {
+                syncManager.notifyFolderChange(folderPath);
+            }
+        }
+    }
+}
