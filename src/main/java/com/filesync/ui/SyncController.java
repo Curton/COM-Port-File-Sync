@@ -234,27 +234,17 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                             }
 
                             StringBuilder msg = new StringBuilder();
-                            msg.append("Folder mapping differs from last successful syncs.\n\n");
+                            msg.append("Folder mapping differs from last successful sync.\n\n");
                             msg.append("Remembered:\n");
                             if (rememberedMappings.isEmpty()) {
                                 msg.append("  (none)\n");
                             } else {
-                                for (int i = 0; i < rememberedMappings.size(); i++) {
-                                    String[] remembered = rememberedMappings.get(i);
-                                    msg.append("  ")
-                                            .append(i + 1)
-                                            .append(") ")
-                                            .append(
-                                                    remembered[0].isEmpty()
-                                                            ? "(none)"
-                                                            : remembered[0])
-                                            .append(" -> ")
-                                            .append(
-                                                    remembered[1].isEmpty()
-                                                            ? "(none)"
-                                                            : remembered[1])
-                                            .append('\n');
-                                }
+                                String[] remembered = rememberedMappings.get(0);
+                                msg.append("  ")
+                                        .append(remembered[0].isEmpty() ? "(none)" : remembered[0])
+                                        .append(" -> ")
+                                        .append(remembered[1].isEmpty() ? "(none)" : remembered[1])
+                                        .append('\n');
                             }
                             msg.append("\n\nCurrent: ").append(nLocal);
                             msg.append(" -> ").append(nRemote.isEmpty() ? "(unknown)" : nRemote);

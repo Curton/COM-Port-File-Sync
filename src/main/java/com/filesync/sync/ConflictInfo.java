@@ -38,6 +38,10 @@ public final class ConflictInfo {
     private Resolution resolution = Resolution.UNRESOLVED;
     private ApplyTarget applyTarget = ApplyTarget.BOTH;
 
+    // Diff-related fields for text files
+    private TextDiffUtil.DiffResult diffResult;
+    private boolean hasMeaningfulDifferences = true;
+
     public ConflictInfo(
             String path,
             FileChangeDetector.FileInfo localInfo,
@@ -139,5 +143,28 @@ public final class ConflictInfo {
                 + ", resolution="
                 + resolution
                 + '}';
+    }
+
+    /** Get the diff result between local and remote versions. Only applicable for text files. */
+    public TextDiffUtil.DiffResult getDiffResult() {
+        return diffResult;
+    }
+
+    /** Set the diff result between local and remote versions. Only applicable for text files. */
+    public void setDiffResult(TextDiffUtil.DiffResult diffResult) {
+        this.diffResult = diffResult;
+    }
+
+    /**
+     * Check if this conflict has meaningful (non-whitespace) differences. Only applicable for text
+     * files.
+     */
+    public boolean hasMeaningfulDifferences() {
+        return hasMeaningfulDifferences;
+    }
+
+    /** Set whether this conflict has meaningful differences. */
+    public void setHasMeaningfulDifferences(boolean hasMeaningfulDifferences) {
+        this.hasMeaningfulDifferences = hasMeaningfulDifferences;
     }
 }

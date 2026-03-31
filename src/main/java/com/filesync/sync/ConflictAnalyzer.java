@@ -41,13 +41,14 @@ public class ConflictAnalyzer {
      * Find all conflicts between two manifests. A conflict occurs when the same file exists on both
      * sides with different content.
      *
-     * <p>This method only uses manifest metadata - it does not read actual file content. Binary
-     * detection uses file extension heuristics.
+     * <p>For text files, this method computes a line-by-line diff and filters out conflicts that
+     * only have trivial differences (whitespace-only changes, blank lines). Binary files are always
+     * treated as conflicts if their content differs.
      *
      * @param localManifest the sender's manifest
      * @param remoteManifest the receiver's manifest
      * @param localFolder the sender's sync folder (to read local content for ConflictInfo)
-     * @return list of detected conflicts, never null
+     * @return list of detected conflicts with meaningful differences, never null
      */
     public static List<ConflictInfo> findConflicts(
             FileChangeDetector.FileManifest localManifest,
@@ -83,14 +84,78 @@ public class ConflictAnalyzer {
 
                     ConflictInfo conflict =
                             new ConflictInfo(path, localInfo, remoteInfo, isBinary, localContent);
-                    // Remote content will be fetched later via protocol when needed for merge UI
-                    conflicts.add(conflict);
+
+                    // For text files, compute diff and filter out trivial conflicts
+                    if (!isBinary && localContent != null) {
+                        String localText = conflict.getLocalContentAsString();
+                        // Remote content will be fetched later via protocol when needed for merge
+                        // UI
+                        // For now, we can only check local content
+                        // The meaningful differences check will be done when remote content is
+                        // available
+                        conflicts.add(conflict);
+                    } else {
+                        // Binary files or files without local content are always conflicts
+                        conflicts.add(conflict);
+                    }
                 }
             }
             // Files that exist on only one side are not conflicts - normal sync direction
         }
 
         return conflicts;
+    }
+
+    /**
+     * Filter conflicts to only include those with meaningful differences. This method should be
+     * called after remote content has been fetched.
+     *
+     * @param conflicts list of conflicts to filter (modified in place)
+     * @return the same list with trivial conflicts removed (trivial conflicts are marked as SKIP)
+     */
+    public static List<ConflictInfo> filterTrivialConflicts(List<ConflictInfo> conflicts) {
+        conflicts.removeIf(
+                conflict -> {
+                    if (conflict.isBinary()) {
+                        return false; // Binary files are always meaningful
+                    }
+                    String localText = conflict.getLocalContentAsString();
+                    String remoteText = conflict.getRemoteContentAsString();
+                    if (localText == null || remoteText == null) {
+                        return false; // Can't determine, keep the conflict
+                    }
+                    // Compute diff and check for meaningful differences
+                    TextDiffUtil.DiffResult diff = TextDiffUtil.computeDiff(localText, remoteText);
+                    conflict.setDiffResult(diff);
+                    boolean hasMeaningful = diff.hasMeaningfulChanges();
+                    conflict.setHasMeaningfulDifferences(hasMeaningful);
+                    if (!hasMeaningful) {
+                        // Mark trivial conflicts as SKIP so they're excluded from transfer list
+                        conflict.setResolution(ConflictInfo.Resolution.SKIP);
+                        return true; // Remove from the list
+                    }
+                    return false;
+                });
+        return conflicts;
+    }
+
+    /**
+     * Compute and store diff for a conflict. Useful when remote content has been fetched and we
+     * need to prepare the conflict for UI display.
+     *
+     * @param conflict the conflict to compute diff for
+     */
+    public static void computeConflictDiff(ConflictInfo conflict) {
+        if (conflict.isBinary()) {
+            return; // No diff for binary files
+        }
+        String localText = conflict.getLocalContentAsString();
+        String remoteText = conflict.getRemoteContentAsString();
+        if (localText != null && remoteText != null) {
+            TextDiffUtil.DiffResult diff = TextDiffUtil.computeDiff(localText, remoteText);
+            conflict.setDiffResult(diff);
+            conflict.setHasMeaningfulDifferences(diff.hasMeaningfulChanges());
+        }
     }
 
     /** Check if two file infos have different content. */

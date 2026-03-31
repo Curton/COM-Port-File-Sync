@@ -1,5 +1,6 @@
 package com.filesync.ui;
 
+import com.filesync.sync.ConflictAnalyzer;
 import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.SyncPreviewPlan;
@@ -426,6 +427,13 @@ public class SyncPreviewRenderer {
             if (remoteContent != null) {
                 conflict.setRemoteContent(remoteContent);
             }
+        }
+
+        // Filter out trivial conflicts (whitespace-only changes) after remote content is available
+        ConflictAnalyzer.filterTrivialConflicts(toResolve);
+
+        if (toResolve.isEmpty()) {
+            return true; // All conflicts were trivial, nothing to resolve
         }
 
         ConflictResolutionDialog.Result result =
