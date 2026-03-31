@@ -54,7 +54,7 @@ class SettingsManagerFolderMappingTest {
 
     @Test
     void getRememberedFolderMapping_returnsNullWhenEmpty() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_TEST_EMPTY_" + System.currentTimeMillis();
         String[] result = settings.getRememberedFolderMapping(port);
         assertNull(result);
@@ -62,7 +62,7 @@ class SettingsManagerFolderMappingTest {
 
     @Test
     void setAndGetRememberedFolderMapping_persistsCorrectly() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_TEST_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver");
         String[] result = settings.getRememberedFolderMapping(port);
@@ -71,7 +71,7 @@ class SettingsManagerFolderMappingTest {
 
     @Test
     void setRememberedFolderMapping_ignoresEmptyPaths() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_EMPTY_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "", "D:/receiver");
         settings.setRememberedFolderMapping(port, "C:/sender", "");
@@ -82,7 +82,7 @@ class SettingsManagerFolderMappingTest {
 
     @Test
     void getRememberedFolderMappings_returnsMultipleInOrder() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_MULTI_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:/sender1", "D:/receiver1");
         settings.setRememberedFolderMapping(port, "C:/sender2", "D:/receiver2");
@@ -97,7 +97,7 @@ class SettingsManagerFolderMappingTest {
 
     @Test
     void setRememberedFolderMapping_removesExactDuplicateWhenSamePairAddedTwice() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_DUP_" + System.currentTimeMillis();
         String senderPath = "C:/sender_" + port;
         String receiverPath = "D:/receiver1";

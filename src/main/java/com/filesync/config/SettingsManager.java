@@ -75,8 +75,21 @@ public class SettingsManager {
     private boolean fastMode;
     private boolean debugMode;
 
+    /** Creates a SettingsManager using the production preferences node. */
     public SettingsManager() {
-        prefs = Preferences.userNodeForPackage(SettingsManager.class);
+        this(false);
+    }
+
+    /**
+     * Creates a SettingsManager. When {@code testMode} is true, uses an isolated preferences node
+     * under "com/filesync/test" so that unit tests do not interfere with user's actual settings.
+     */
+    public SettingsManager(boolean testMode) {
+        if (testMode) {
+            prefs = Preferences.userRoot().node("com/filesync/test");
+        } else {
+            prefs = Preferences.userNodeForPackage(SettingsManager.class);
+        }
         load();
     }
 

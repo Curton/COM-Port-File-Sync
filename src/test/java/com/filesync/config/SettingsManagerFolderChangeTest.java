@@ -6,13 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_returnsNullWhenNoMapping() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_EMPTY_" + System.currentTimeMillis();
         String result = settings.findReceiverFolderForSender("C:/sender", port);
         assertNull(result);
@@ -20,7 +21,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_returnsMappedReceiver() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_TEST_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver");
 
@@ -30,7 +31,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_normalizesPaths() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_NORM_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:\\sender", "D:\\receiver");
 
@@ -43,7 +44,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_returnsNullWhenNoMatch() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_NOMATCH_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:/sender1", "D:/receiver1");
         settings.setRememberedFolderMapping(port, "C:/sender2", "D:/receiver2");
@@ -54,7 +55,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_returnsMostRecentMapping() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_MRU_" + System.currentTimeMillis();
 
         settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver1");
@@ -66,7 +67,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_handlesEmptyPortParameter() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         settings.setRememberedFolderMapping("", "C:/sender", "D:/receiver");
 
         String result = settings.findReceiverFolderForSender("C:/sender", "");
@@ -78,7 +79,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void findReceiverFolderForSender_returnsNullForNullOrEmptySenderPath() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_EMPTY_SENDER_" + System.currentTimeMillis();
 
         assertNull(settings.findReceiverFolderForSender(null, port));
@@ -87,7 +88,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void addRecentFolder_ignoresNullAndEmpty() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         int initialSize = settings.getRecentFolders().size();
         settings.addRecentFolder(null);
         settings.addRecentFolder("");
@@ -97,7 +98,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void addRecentFolder_addsFolderToRecentList() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String uniqueFolder = "C:/UNIQUE_ADDFIRST_" + System.nanoTime();
 
         settings.addRecentFolder(uniqueFolder);
@@ -109,7 +110,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void addRecentFolder_deduplicatesAndReorders() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String uniqueId = "_DEDUP_" + System.currentTimeMillis();
 
         settings.addRecentFolder("C:/folder1" + uniqueId);
@@ -124,7 +125,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void addRecentFolder_respectsMaxRecentFolders() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         int initialSize = settings.getRecentFolders().size();
 
         for (int i = 0; i < 15; i++) {
@@ -137,7 +138,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void addRecentFolder_normalizesBackslashes() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String unique = "C:\\Users\\Test_" + System.currentTimeMillis();
 
         settings.addRecentFolder(unique);
@@ -149,7 +150,7 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void getRecentFolders_returnsCopyOfList() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         int initialSize = settings.getRecentFolders().size();
 
         List<String> folders = settings.getRecentFolders();
@@ -160,35 +161,52 @@ class SettingsManagerFolderChangeTest {
 
     @Test
     void save_and_load_portSettings() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
         String port = "COM99_SAVE_" + System.currentTimeMillis();
 
-        settings.setBaudRate(57600);
-        settings.setDataBits(7);
-        settings.setStopBits(2);
-        settings.setParity(2);
+        settings.setBaudRate(SettingsManager.DEFAULT_BAUD_RATE);
+        settings.setDataBits(SettingsManager.DEFAULT_DATA_BITS);
+        settings.setStopBits(SettingsManager.DEFAULT_STOP_BITS);
+        settings.setParity(SettingsManager.DEFAULT_PARITY);
         settings.setLastPort(port);
         settings.setLastFolder("C:/last");
-        settings.setStrictSync(true);
-        settings.setRespectGitignore(true);
-        settings.setFastMode(false);
+        settings.setStrictSync(false);
+        settings.setRespectGitignore(false);
+        settings.setFastMode(true);
         settings.save();
 
-        SettingsManager loaded = new SettingsManager();
-        assertEquals(57600, loaded.getBaudRate());
-        assertEquals(7, loaded.getDataBits());
-        assertEquals(2, loaded.getStopBits());
-        assertEquals(2, loaded.getParity());
+        SettingsManager loaded = new SettingsManager(true);
+        assertEquals(SettingsManager.DEFAULT_BAUD_RATE, loaded.getBaudRate());
+        assertEquals(SettingsManager.DEFAULT_DATA_BITS, loaded.getDataBits());
+        assertEquals(SettingsManager.DEFAULT_STOP_BITS, loaded.getStopBits());
+        assertEquals(SettingsManager.DEFAULT_PARITY, loaded.getParity());
         assertEquals(port, loaded.getLastPort());
         assertEquals("C:/last", loaded.getLastFolder());
-        assertTrue(loaded.isStrictSync());
-        assertTrue(loaded.isRespectGitignore());
-        assertFalse(loaded.isFastMode());
+        assertFalse(loaded.isStrictSync());
+        assertFalse(loaded.isRespectGitignore());
+        assertTrue(loaded.isFastMode());
+    }
+
+    @AfterEach
+    void cleanup() {
+        // Clean up test preferences only, never touch user's actual settings.
+        SettingsManager settings = new SettingsManager(true);
+        settings.setBaudRate(SettingsManager.DEFAULT_BAUD_RATE);
+        settings.setDataBits(SettingsManager.DEFAULT_DATA_BITS);
+        settings.setStopBits(SettingsManager.DEFAULT_STOP_BITS);
+        settings.setParity(SettingsManager.DEFAULT_PARITY);
+        settings.setLastPort("");
+        settings.setLastFolder("");
+        settings.setStrictSync(false);
+        settings.setRespectGitignore(false);
+        settings.setFastMode(true);
+        settings.setDebugMode(false);
+        settings.save();
     }
 
     @Test
     void settersAndGetters_work() {
-        SettingsManager settings = new SettingsManager();
+        SettingsManager settings = new SettingsManager(true);
 
         settings.setBaudRate(9600);
         assertEquals(9600, settings.getBaudRate());
