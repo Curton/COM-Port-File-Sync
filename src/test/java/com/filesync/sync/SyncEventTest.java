@@ -1,145 +1,125 @@
 package com.filesync.sync;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.*;
 
 import org.junit.jupiter.api.Test;
 
-/**
- * Unit tests for SyncEvent classes to improve code coverage. These tests cover the event classes
- * that are not directly instantiated in other test classes.
- */
 class SyncEventTest {
 
     @Test
-    void transferProgressEventStoresAllValues() {
-        SyncEvent.TransferProgressEvent event =
-                new SyncEvent.TransferProgressEvent(
-                        50, // currentBlock
-                        100, // totalBlocks
-                        5000L, // bytesTransferred
-                        1024.5 // speedBytesPerSec
-                        );
-
-        assertEquals(50, event.getCurrentBlock());
-        assertEquals(100, event.getTotalBlocks());
-        assertEquals(5000L, event.getBytesTransferred());
-        assertEquals(1024.5, event.getSpeedBytesPerSec(), 0.001);
-        assertEquals(SyncEventType.TRANSFER_PROGRESS, event.getType());
-    }
-
-    @Test
-    void dropFileReceivedEventStoresAllValues() {
-        SyncEvent.DropFileReceivedEvent event =
-                new SyncEvent.DropFileReceivedEvent("test.txt", "/path/to/test.txt");
-
-        assertEquals("test.txt", event.getFileName());
-        assertEquals("/path/to/test.txt", event.getFilePath());
-        assertEquals(SyncEventType.DROP_FILE_RECEIVED, event.getType());
-    }
-
-    @Test
-    void remoteFolderChangedEventStoresFolderPath() {
-        SyncEvent.RemoteFolderChangedEvent event =
-                new SyncEvent.RemoteFolderChangedEvent("/remote/folder/path");
-
-        assertEquals("/remote/folder/path", event.getFolderPath());
-        assertEquals(SyncEventType.REMOTE_FOLDER_CHANGED, event.getType());
-    }
-
-    @Test
-    void syncControlRefreshEventReturnsCorrectType() {
-        SyncEvent.SyncControlRefreshEvent event = new SyncEvent.SyncControlRefreshEvent();
-
-        assertEquals(SyncEventType.SYNC_CONTROL_REFRESH, event.getType());
-    }
-
-    @Test
     void connectionEventStoresConnectedState() {
-        SyncEvent.ConnectionEvent connectedEvent = new SyncEvent.ConnectionEvent(true);
-        SyncEvent.ConnectionEvent disconnectedEvent = new SyncEvent.ConnectionEvent(false);
+        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(true);
+        assertTrue(event.isConnected());
+        assertEquals(SyncEventType.CONNECTION_STATUS, event.getType());
+    }
 
-        assertEquals(true, connectedEvent.isConnected());
-        assertEquals(false, disconnectedEvent.isConnected());
-        assertEquals(SyncEventType.CONNECTION_STATUS, connectedEvent.getType());
-        assertSame(SyncEventType.CONNECTION_STATUS, disconnectedEvent.getType());
+    @Test
+    void connectionEventStoresDisconnectedState() {
+        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(false);
+        assertFalse(event.isConnected());
+        assertEquals(SyncEventType.CONNECTION_STATUS, event.getType());
     }
 
     @Test
     void directionEventStoresSenderState() {
-        SyncEvent.DirectionEvent senderEvent = new SyncEvent.DirectionEvent(true);
-        SyncEvent.DirectionEvent receiverEvent = new SyncEvent.DirectionEvent(false);
-
-        assertEquals(true, senderEvent.isSender());
-        assertEquals(false, receiverEvent.isSender());
-        assertEquals(SyncEventType.DIRECTION_CHANGED, senderEvent.getType());
-        assertSame(SyncEventType.DIRECTION_CHANGED, receiverEvent.getType());
+        SyncEvent.DirectionEvent event = new SyncEvent.DirectionEvent(true);
+        assertTrue(event.isSender());
+        assertEquals(SyncEventType.DIRECTION_CHANGED, event.getType());
     }
 
     @Test
-    void syncStartedEventReturnsCorrectType() {
-        SyncEvent.SyncStartedEvent event = new SyncEvent.SyncStartedEvent();
+    void directionEventStoresReceiverState() {
+        SyncEvent.DirectionEvent event = new SyncEvent.DirectionEvent(false);
+        assertFalse(event.isSender());
+        assertEquals(SyncEventType.DIRECTION_CHANGED, event.getType());
+    }
 
+    @Test
+    void syncStartedEventHasCorrectType() {
+        SyncEvent.SyncStartedEvent event = new SyncEvent.SyncStartedEvent();
         assertEquals(SyncEventType.SYNC_STARTED, event.getType());
     }
 
     @Test
-    void syncCompleteEventReturnsCorrectType() {
+    void syncCompleteEventHasCorrectType() {
         SyncEvent.SyncCompleteEvent event = new SyncEvent.SyncCompleteEvent();
-
         assertEquals(SyncEventType.SYNC_COMPLETE, event.getType());
     }
 
     @Test
-    void syncCancelledEventReturnsCorrectType() {
+    void syncCancelledEventHasCorrectType() {
         SyncEvent.SyncCancelledEvent event = new SyncEvent.SyncCancelledEvent();
-
         assertEquals(SyncEventType.SYNC_CANCELLED, event.getType());
     }
 
     @Test
-    void transferCompleteEventReturnsCorrectType() {
+    void transferCompleteEventHasCorrectType() {
         SyncEvent.TransferCompleteEvent event = new SyncEvent.TransferCompleteEvent();
-
         assertEquals(SyncEventType.TRANSFER_COMPLETE, event.getType());
     }
 
     @Test
-    void fileProgressEventStoresAllValues() {
-        SyncEvent.FileProgressEvent event =
-                new SyncEvent.FileProgressEvent(
-                        3, // currentFile
-                        10, // totalFiles
-                        "data.zip");
-
-        assertEquals(3, event.getCurrentFile());
+    void fileProgressEventStoresValues() {
+        SyncEvent.FileProgressEvent event = new SyncEvent.FileProgressEvent(1, 10, "test.txt");
+        assertEquals(1, event.getCurrentFile());
         assertEquals(10, event.getTotalFiles());
-        assertEquals("data.zip", event.getFileName());
+        assertEquals("test.txt", event.getFileName());
         assertEquals(SyncEventType.FILE_PROGRESS, event.getType());
+    }
+
+    @Test
+    void transferProgressEventStoresValues() {
+        SyncEvent.TransferProgressEvent event =
+                new SyncEvent.TransferProgressEvent(5, 100, 1024L, 512.5);
+        assertEquals(5, event.getCurrentBlock());
+        assertEquals(100, event.getTotalBlocks());
+        assertEquals(1024L, event.getBytesTransferred());
+        assertEquals(512.5, event.getSpeedBytesPerSec());
+        assertEquals(SyncEventType.TRANSFER_PROGRESS, event.getType());
+    }
+
+    @Test
+    void syncControlRefreshEventHasCorrectType() {
+        SyncEvent.SyncControlRefreshEvent event = new SyncEvent.SyncControlRefreshEvent();
+        assertEquals(SyncEventType.SYNC_CONTROL_REFRESH, event.getType());
     }
 
     @Test
     void logEventStoresMessage() {
         SyncEvent.LogEvent event = new SyncEvent.LogEvent("Test log message");
-
         assertEquals("Test log message", event.getMessage());
         assertEquals(SyncEventType.LOG, event.getType());
     }
 
     @Test
     void errorEventStoresMessage() {
-        SyncEvent.ErrorEvent event = new SyncEvent.ErrorEvent("Error occurred");
-
-        assertEquals("Error occurred", event.getMessage());
+        SyncEvent.ErrorEvent event = new SyncEvent.ErrorEvent("Test error message");
+        assertEquals("Test error message", event.getMessage());
         assertEquals(SyncEventType.ERROR, event.getType());
     }
 
     @Test
     void sharedTextReceivedEventStoresText() {
         SyncEvent.SharedTextReceivedEvent event =
-                new SyncEvent.SharedTextReceivedEvent("Hello world");
-
-        assertEquals("Hello world", event.getText());
+                new SyncEvent.SharedTextReceivedEvent("Hello World");
+        assertEquals("Hello World", event.getText());
         assertEquals(SyncEventType.SHARED_TEXT_RECEIVED, event.getType());
+    }
+
+    @Test
+    void dropFileReceivedEventStoresValues() {
+        SyncEvent.DropFileReceivedEvent event =
+                new SyncEvent.DropFileReceivedEvent("file.txt", "/path/to/file.txt");
+        assertEquals("file.txt", event.getFileName());
+        assertEquals("/path/to/file.txt", event.getFilePath());
+        assertEquals(SyncEventType.DROP_FILE_RECEIVED, event.getType());
+    }
+
+    @Test
+    void remoteFolderChangedEventStoresFolderPath() {
+        SyncEvent.RemoteFolderChangedEvent event =
+                new SyncEvent.RemoteFolderChangedEvent("/remote/folder");
+        assertEquals("/remote/folder", event.getFolderPath());
+        assertEquals(SyncEventType.REMOTE_FOLDER_CHANGED, event.getType());
     }
 }
