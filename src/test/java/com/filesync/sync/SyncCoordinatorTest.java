@@ -4,11 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -16,6 +16,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
 import java.io.File;
 import java.io.IOException;
@@ -64,7 +65,7 @@ class SyncCoordinatorTest {
                             return null;
                         })
                 .when(mockEventBus)
-                .post(any(SyncEvent.class));
+                .post(isA(SyncEvent.class));
 
         syncFolder = tempDir.toFile();
     }
@@ -190,7 +191,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleSyncComplete();
 
-        verify(mockEventBus).post(any(SyncEvent.SyncCompleteEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.SyncCompleteEvent.class));
     }
 
     @Test
@@ -231,7 +232,7 @@ class SyncCoordinatorTest {
         coordinator.startSync();
 
         // Since no executor, performSync runs synchronously and posts SyncStartedEvent
-        verify(mockEventBus).post(any(SyncEvent.SyncStartedEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.SyncStartedEvent.class));
     }
 
     // ========== Medium tests: startSyncWithPlan validation ==========
@@ -243,7 +244,7 @@ class SyncCoordinatorTest {
 
         coordinator.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals(
                 "Cannot initiate sync as receiver. Change direction first.", getLastErrorMessage());
     }
@@ -255,7 +256,7 @@ class SyncCoordinatorTest {
 
         coordinator.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Cannot initiate sync while disconnected", getLastErrorMessage());
     }
 
@@ -266,7 +267,7 @@ class SyncCoordinatorTest {
 
         coordinator.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals(
                 "Cannot initiate sync until role negotiation completes", getLastErrorMessage());
     }
@@ -279,15 +280,12 @@ class SyncCoordinatorTest {
 
         coordinator.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Sync already in progress", getLastErrorMessage());
     }
 
     @Test
     void startSyncWithPlan_postsError_whenSyncFolderNotSelected() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
         // Use a supplier that returns null
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
@@ -308,15 +306,12 @@ class SyncCoordinatorTest {
 
         coordinatorWithNullFolder.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Please select a sync folder first", getLastErrorMessage());
     }
 
     @Test
     void startSyncWithPlan_postsError_whenSyncFolderDoesNotExist() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
         // Use a supplier that returns non-existent folder
         File nonExistentFolder = new File("C:/non_existent_folder_12345");
         SyncCoordinator coordinatorWithNonExistentFolder =
@@ -337,7 +332,7 @@ class SyncCoordinatorTest {
 
         coordinatorWithNonExistentFolder.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Please select a sync folder first", getLastErrorMessage());
     }
 
@@ -354,8 +349,8 @@ class SyncCoordinatorTest {
 
         assertTrue(Files.exists(subDir));
         // handleMkdir posts 2 LogEvents: "Creating directory" + "Directory created"
-        verify(mockEventBus, atLeastOnce()).post(any(SyncEvent.LogEvent.class));
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -378,8 +373,6 @@ class SyncCoordinatorTest {
 
     @Test
     void handleMkdir_postsError_whenSyncFolderNull() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -400,7 +393,7 @@ class SyncCoordinatorTest {
         coordinatorWithNullFolder.handleMkdir("anyPath");
 
         // Should just return without error event (checks null before operations)
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -440,7 +433,7 @@ class SyncCoordinatorTest {
 
         assertFalse(Files.exists(dirToDelete));
         // handleRmdir posts 2 LogEvents: "Deleting directory" + "Directory deleted"
-        verify(mockEventBus, atLeastOnce()).post(any(SyncEvent.LogEvent.class));
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
     }
 
     @Test
@@ -452,7 +445,7 @@ class SyncCoordinatorTest {
         coordinator.handleRmdir(relativePath);
 
         // Should not throw, just log
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -471,8 +464,6 @@ class SyncCoordinatorTest {
 
     @Test
     void handleRmdir_postsError_whenSyncFolderNull() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -492,7 +483,7 @@ class SyncCoordinatorTest {
 
         coordinatorWithNullFolder.handleRmdir("anyPath");
 
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -523,8 +514,8 @@ class SyncCoordinatorTest {
 
         assertFalse(Files.exists(fileToDelete));
         // handleFileDelete posts 2 LogEvents: "Deleting file" + "File deleted"
-        verify(mockEventBus, atLeastOnce()).post(any(SyncEvent.LogEvent.class));
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -544,7 +535,7 @@ class SyncCoordinatorTest {
         coordinator.handleFileDelete(relativePath);
 
         // handleFileDelete skips directories (isFile() returns false), no error posted
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -556,7 +547,7 @@ class SyncCoordinatorTest {
         coordinator.handleFileDelete(relativePath);
 
         // Should not throw, no error should be posted since file doesn't exist
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -575,8 +566,6 @@ class SyncCoordinatorTest {
 
     @Test
     void handleFileDelete_postsError_whenSyncFolderNull() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -596,7 +585,7 @@ class SyncCoordinatorTest {
 
         coordinatorWithNullFolder.handleFileDelete("anyPath");
 
-        verify(mockEventBus, never()).post(any(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     // ========== Medium tests: handleFileRequest ==========
@@ -612,13 +601,11 @@ class SyncCoordinatorTest {
         coordinator.handleFileRequest(relativePath);
 
         verify(mockProtocol).sendFile(syncFolder, relativePath);
-        verify(mockEventBus).post(any(SyncEvent.LogEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
     }
 
     @Test
     void handleFileRequest_postsError_whenSyncFolderNull() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -652,7 +639,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleManifestRequest(null, null);
 
-        verify(mockProtocol).sendManifest(any(FileChangeDetector.FileManifest.class));
+        verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
         assertEquals(1, heartbeatTouches.get());
         assertEquals(1, syncIdleCalls.get());
     }
@@ -666,13 +653,11 @@ class SyncCoordinatorTest {
 
         coordinator.handleManifestRequest(true, false);
 
-        verify(mockProtocol).sendManifest(any(FileChangeDetector.FileManifest.class));
+        verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
     }
 
     @Test
     void handleManifestRequest_sendsError_whenSyncFolderNull() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -717,7 +702,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleIncomingBatch(100, 10);
 
-        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), any(), any(File.class));
+        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
         // handleIncomingBatch doesn't call touchHeartbeat() in success path
         assertEquals(0, heartbeatTouches.get());
     }
@@ -736,8 +721,6 @@ class SyncCoordinatorTest {
 
     @Test
     void handleIncomingBatch_callsSyncIdle_whenSyncFolderNull() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -758,7 +741,7 @@ class SyncCoordinatorTest {
         coordinatorWithNullFolder.handleIncomingBatch(100, 10);
 
         assertEquals(1, syncIdleCalls.get());
-        verify(mockProtocol, never()).receiveBatch(anyInt(), anyInt(), any(), any(File.class));
+        verify(mockProtocol, never()).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
     }
 
     @Test
@@ -768,7 +751,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleIncomingBatch(100, 10);
 
-        verify(mockEventBus).post(any(SyncEvent.LogEvent.class));
+        verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
     }
 
     // ========== Complex tests: handleIncomingBatchUnknownTotal ==========
@@ -780,7 +763,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleIncomingBatchUnknownTotal(100);
 
-        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), any(), any(File.class));
+        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
     }
 
     @Test
@@ -809,7 +792,7 @@ class SyncCoordinatorTest {
         coordinator.handleIncomingFileData(mockMsg);
 
         // handleIncomingFileData posts 2 LogEvents: "Receiving file" + "File received"
-        verify(mockEventBus, atLeastOnce()).post(any(SyncEvent.LogEvent.class));
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
     }
 
     @Test
@@ -825,13 +808,11 @@ class SyncCoordinatorTest {
         coordinator.handleIncomingFileData(mockMsg);
 
         verify(mockProtocol)
-                .receiveFile(any(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
     }
 
     @Test
     void handleIncomingFileData_callsSyncIdle_whenSyncFolderNull() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
@@ -875,13 +856,11 @@ class SyncCoordinatorTest {
         assertNotNull(plan);
         // createSyncPreviewPlan posts 3 LogEvents: "Generating...", "Requesting...", "Remote
         // manifest..."
-        verify(mockEventBus, atLeastOnce()).post(any(SyncEvent.LogEvent.class));
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
     }
 
     @Test
     void createSyncPreviewPlan_throwsException_whenSyncFolderNull() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
                 new SyncCoordinator(
