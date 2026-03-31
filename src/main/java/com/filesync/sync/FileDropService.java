@@ -73,9 +73,11 @@ public class FileDropService {
         try {
             protocol.sendDropFile(file);
             eventBus.post(new SyncEvent.LogEvent("Dropped file sent: " + file.getName()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to send dropped file: " + e.getMessage()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
         }
@@ -140,9 +142,11 @@ public class FileDropService {
             eventBus.post(
                     new SyncEvent.LogEvent(
                             "Dropped file received: " + savedFile.getAbsolutePath()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to receive dropped file: " + e.getMessage()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
         }

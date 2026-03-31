@@ -203,7 +203,9 @@ public class FileSyncManager {
      * during this time.
      */
     public boolean isTransferBusy() {
-        return syncCoordinator.isSyncing() || protocol.isXmodemInProgress();
+        return syncCoordinator.isSyncing()
+                || protocol.isXmodemInProgress()
+                || fileDropService.isTransferInProgress();
     }
 
     public boolean isConnectionAlive() {
