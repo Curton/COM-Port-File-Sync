@@ -130,9 +130,9 @@ public class ConflictAnalyzer {
                     boolean hasMeaningful = diff.hasMeaningfulChanges();
                     conflict.setHasMeaningfulDifferences(hasMeaningful);
                     if (!hasMeaningful) {
-                        // Mark trivial conflicts as SKIP so they're excluded from transfer list
-                        conflict.setResolution(ConflictInfo.Resolution.SKIP);
-                        return true; // Remove from the list
+                        // Mark trivial conflicts as KEEP_LOCAL to match direct sync behavior
+                        conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+                        return false; // Keep in the list - will sync local version
                     }
                     return false;
                 });
