@@ -30,6 +30,9 @@ Thumbs.db
 # Kilo
 .kilo/
 
+# Claude
+.claude/
+
 # Build
 *.class
 *.jar
