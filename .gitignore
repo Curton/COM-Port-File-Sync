@@ -27,6 +27,9 @@ buildNumber.properties
 .DS_Store
 Thumbs.db
 
+# Kilo
+.kilo/
+
 # Build
 *.class
 *.jar
