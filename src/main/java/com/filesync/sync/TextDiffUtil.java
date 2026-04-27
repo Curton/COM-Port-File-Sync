@@ -288,13 +288,13 @@ public final class TextDiffUtil {
         return sb.toString();
     }
 
-    /** Split text into lines, preserving line endings. */
+    /** Split text into lines, stripping carriage returns for cross-platform compatibility. */
     private static String[] splitLines(String text) {
         if (text == null || text.isEmpty()) {
             return new String[0];
         }
-        // Split on newline, preserving the content
-        return text.split("\n", -1);
+        // Strip \r before splitting so Windows and Unix line endings produce identical diffs
+        return text.replace("\r", "").split("\n", -1);
     }
 
     /**
@@ -418,7 +418,7 @@ public final class TextDiffUtil {
         return hunks;
     }
 
-    /** Find the local line number at the given index (for hunk header). */
+    /** Find the local line number where the hunk at the given index starts. */
     private static int findLocalStartLine(List<DiffLine> allLines, int idx) {
         for (int i = idx; i < allLines.size(); i++) {
             DiffLine line = allLines.get(i);
@@ -426,15 +426,31 @@ public final class TextDiffUtil {
                 return line.getLocalLineNumber();
             }
         }
+        // No subsequent line with a local line number — scan backward from idx
+        // to find the last context/removed line's local position
+        for (int i = idx - 1; i >= 0; i--) {
+            DiffLine line = allLines.get(i);
+            if (line.getLocalLineNumber() > 0) {
+                return line.getLocalLineNumber() + 1;
+            }
+        }
         return 1;
     }
 
-    /** Find the remote line number at the given index (for hunk header). */
+    /** Find the remote line number where the hunk at the given index starts. */
     private static int findRemoteStartLine(List<DiffLine> allLines, int idx) {
         for (int i = idx; i < allLines.size(); i++) {
             DiffLine line = allLines.get(i);
             if (line.getRemoteLineNumber() > 0) {
                 return line.getRemoteLineNumber();
+            }
+        }
+        // No subsequent line with a remote line number — scan backward from idx
+        // to find the last context/added line's remote position
+        for (int i = idx - 1; i >= 0; i--) {
+            DiffLine line = allLines.get(i);
+            if (line.getRemoteLineNumber() > 0) {
+                return line.getRemoteLineNumber() + 1;
             }
         }
         return 1;

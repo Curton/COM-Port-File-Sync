@@ -109,9 +109,10 @@ public class SharedTextService {
             if (!isNewerThanLatest(incoming.timestamp)) {
                 return;
             }
-            markTimestampIfNewer(incoming.timestamp);
-            latestSharedText.set(incoming);
-            eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+            if (markTimestampIfNewer(incoming.timestamp)) {
+                latestSharedText.set(incoming);
+                eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+            }
         } catch (IllegalArgumentException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to decode shared text: " + e.getMessage()));
@@ -127,9 +128,10 @@ public class SharedTextService {
             if (!isNewerThanLatest(incoming.timestamp)) {
                 return;
             }
-            markTimestampIfNewer(incoming.timestamp);
-            latestSharedText.set(incoming);
-            eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+            if (markTimestampIfNewer(incoming.timestamp)) {
+                latestSharedText.set(incoming);
+                eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+            }
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));
@@ -159,14 +161,14 @@ public class SharedTextService {
         return remoteTimestamp > latestAcceptedTimestamp.get();
     }
 
-    private void markTimestampIfNewer(long remoteTimestamp) {
+    private boolean markTimestampIfNewer(long remoteTimestamp) {
         while (true) {
             long current = latestAcceptedTimestamp.get();
             if (remoteTimestamp <= current) {
-                return;
+                return false;
             }
             if (latestAcceptedTimestamp.compareAndSet(current, remoteTimestamp)) {
-                return;
+                return true;
             }
         }
     }

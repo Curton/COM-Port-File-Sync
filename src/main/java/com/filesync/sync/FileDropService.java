@@ -89,6 +89,12 @@ public class FileDropService {
         }
 
         String fileName = msg.getParam(0);
+        if (fileName == null || fileName.trim().isEmpty()) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent("Dropped file transfer failed: no filename"));
+            return;
+        }
+        fileName = sanitizeFileName(fileName);
         int expectedSize = -1;
         if (msg.getParams().length > 1) {
             String expectedSizeParam = msg.getParam(1);
@@ -341,5 +347,21 @@ public class FileDropService {
         }
         return directory.getName().equalsIgnoreCase("Downloads")
                 || directory.getName().equalsIgnoreCase("Download");
+    }
+
+    /** Strip path separators and traversal sequences from a remote-supplied filename. */
+    private static String sanitizeFileName(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            return "file";
+        }
+        String sanitized = name.replace('\\', '/');
+        // strip any leading path components
+        int lastSlash = sanitized.lastIndexOf('/');
+        if (lastSlash >= 0 && lastSlash < sanitized.length() - 1) {
+            sanitized = sanitized.substring(lastSlash + 1);
+        }
+        // strip dangerous characters
+        sanitized = sanitized.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+        return sanitized.isBlank() ? "file" : sanitized;
     }
 }

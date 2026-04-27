@@ -82,7 +82,7 @@ public class RoleNegotiationService {
         handleRoleNegotiate(remotePriority, 0L);
     }
 
-    public void handleRoleNegotiate(long remotePriority, long remoteTieBreaker) {
+    public synchronized void handleRoleNegotiate(long remotePriority, long remoteTieBreaker) {
         if (roleNegotiated.get()) {
             return;
         }

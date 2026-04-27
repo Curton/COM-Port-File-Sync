@@ -2,7 +2,6 @@ package com.filesync.sync;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -59,7 +58,11 @@ public class GitignoreParser {
     private List<GitignorePattern> parseGitignoreFile(File gitignoreFile) throws IOException {
         List<GitignorePattern> patterns = new ArrayList<>();
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(gitignoreFile))) {
+        try (BufferedReader reader =
+                new BufferedReader(
+                        new java.io.InputStreamReader(
+                                new java.io.FileInputStream(gitignoreFile),
+                                java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 line = line.trim();

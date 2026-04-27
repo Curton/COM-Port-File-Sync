@@ -643,7 +643,7 @@ public class FileChangeDetector {
         try {
             String json = Files.readString(manifestFile.toPath());
             return manifestFromJson(json);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             System.err.println(
                     "Failed to load persisted manifest: "
                             + manifestFile.getAbsolutePath()

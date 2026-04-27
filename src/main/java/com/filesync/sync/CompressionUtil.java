@@ -220,17 +220,24 @@ public class CompressionUtil {
         return baos.toByteArray();
     }
 
-    /** Decompress GZIP data */
+    /** Decompress GZIP data. Rejects output exceeding 100 MB to prevent OOM. */
     public static byte[] decompress(byte[] compressedData) throws IOException {
         if (compressedData == null || compressedData.length == 0) {
             return compressedData;
         }
 
+        final long MAX_DECOMPRESSED_SIZE = 100L * 1024 * 1024;
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPInputStream gzis = new GZIPInputStream(new ByteArrayInputStream(compressedData))) {
             byte[] buffer = new byte[4096];
             int bytesRead;
+            long totalWritten = 0;
             while ((bytesRead = gzis.read(buffer)) != -1) {
+                totalWritten += bytesRead;
+                if (totalWritten > MAX_DECOMPRESSED_SIZE) {
+                    throw new IOException(
+                            "Decompressed data exceeds limit of " + MAX_DECOMPRESSED_SIZE + " bytes");
+                }
                 baos.write(buffer, 0, bytesRead);
             }
         }

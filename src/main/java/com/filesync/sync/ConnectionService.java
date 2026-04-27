@@ -99,8 +99,7 @@ public class ConnectionService {
         return connectionAlive.get();
     }
 
-    public void handleHeartbeat() throws IOException {
-        protocol.sendHeartbeatAck();
+    public void handleHeartbeat() {
         markAliveIfNeeded("Connection restored");
     }
 

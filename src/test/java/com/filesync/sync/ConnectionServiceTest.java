@@ -44,12 +44,11 @@ class ConnectionServiceTest {
     }
 
     @Test
-    void handleHeartbeatSendsAckAndMarksAlive() throws IOException {
+    void handleHeartbeatMarksAlive() {
         assertFalse(service.isConnectionAlive());
 
         service.handleHeartbeat();
 
-        assertTrue(protocol.heartbeatAckSent);
         assertTrue(service.isConnectionAlive());
         assertTrue(reconnectCalled);
     }
@@ -65,7 +64,7 @@ class ConnectionServiceTest {
     }
 
     @Test
-    void handleHeartbeatDoesNotRepostIfAlreadyAlive() throws IOException {
+    void handleHeartbeatDoesNotRepostIfAlreadyAlive() {
         service.handleHeartbeat();
         reconnectCalled = false;
         eventBus.clear();
@@ -129,7 +128,7 @@ class ConnectionServiceTest {
     }
 
     @Test
-    void handleHeartbeatPostsConnectionEvent() throws IOException {
+    void handleHeartbeatPostsConnectionEvent() {
         service.handleHeartbeat();
 
         assertTrue(
