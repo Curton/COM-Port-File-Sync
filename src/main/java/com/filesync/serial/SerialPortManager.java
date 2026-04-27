@@ -178,9 +178,6 @@ public class SerialPortManager {
 
         while (true) {
             if (System.currentTimeMillis() - startTime > timeoutMs) {
-                if (baos.size() > 0) {
-                    return baos.toString(StandardCharsets.UTF_8.name());
-                }
                 throw new IOException("Read timeout");
             }
 

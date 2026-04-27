@@ -28,7 +28,7 @@ public class BatchTransferSession {
     private static final byte[] MAGIC = new byte[] {0x42, 0x54, 0x48, 0x00};
 
     private static final int VERSION = 1;
-    private static final int MAX_ENTRIES_PER_BATCH = 64;
+    private static final int MAX_ENTRIES_PER_BATCH = 256;
 
     private BatchTransferSession() {}
 
@@ -173,6 +173,9 @@ public class BatchTransferSession {
             byte[] pathBytes = new byte[pathLen];
             readFully(in, pathBytes);
             String relativePath = new String(pathBytes, StandardCharsets.UTF_8);
+            if (relativePath.contains("..")) {
+                throw new IOException("Path traversal in batch entry: " + relativePath);
+            }
 
             // LAST_MODIFIED
             byte[] lmBuf = new byte[8];

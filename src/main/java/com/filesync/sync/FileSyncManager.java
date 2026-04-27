@@ -582,9 +582,27 @@ public class FileSyncManager {
             case SyncProtocol.CMD_FILE_CONTENT_REQ -> {
                 String relativePath = SyncProtocol.decodePathFromProtocol(msg.getParam(0));
                 if (relativePath != null && !relativePath.isEmpty()) {
-                    File file = new File(syncFolder, relativePath);
+                    File file;
+                    try {
+                        file = SyncCoordinator.resolveSafe(syncFolder, relativePath);
+                    } catch (IOException e) {
+                        eventBus.post(
+                                new SyncEvent.ErrorEvent(
+                                        "Invalid path in content request: " + e.getMessage()));
+                        return;
+                    }
                     if (file.exists() && file.isFile()) {
                         try {
+                            long fileSize = file.length();
+                            if (fileSize > 50 * 1024 * 1024) {
+                                eventBus.post(
+                                        new SyncEvent.LogEvent(
+                                                "File too large for content request: "
+                                                        + relativePath));
+                                protocol.sendError(
+                                        "File too large for content request: " + relativePath);
+                                return;
+                            }
                             byte[] content = Files.readAllBytes(file.toPath());
                             protocol.sendFileContentResponse(relativePath, content);
                         } catch (IOException e) {

@@ -139,7 +139,12 @@ public class SyncProtocol {
             return "";
         }
         return param.replace(String.valueOf(ESCAPE_CHAR), String.valueOf(ESCAPE_CHAR) + ESCAPE_CHAR)
-                .replace(SEPARATOR, String.valueOf(ESCAPE_CHAR) + SEPARATOR_CHAR);
+                .replace(SEPARATOR, String.valueOf(ESCAPE_CHAR) + SEPARATOR_CHAR)
+                .replace("\n", " ")
+                .replace(
+                        END_MARKER,
+                        String.valueOf(ESCAPE_CHAR) + END_MARKER.charAt(0)
+                                + END_MARKER.charAt(1));
     }
 
     private static String[] splitEscapedFields(String content) {
@@ -679,12 +684,6 @@ public class SyncProtocol {
             throw new IOException(
                     "Failed to receive dropped file " + fileName + " (" + detail + ")");
         }
-
-        // ACK is sent by caller (FileDropService) after receiving CMD_DROP_FILE and
-        // before this method is called. After XMODEM receive succeeds, we must send
-        // ACK here so the sender does not timeout waiting for a protocol response.
-        // If validation fails, ERROR is sent so the sender knows the transfer failed.
-        sendAck();
 
         // Verify sender-reported size before any transformation or disk write
         try {

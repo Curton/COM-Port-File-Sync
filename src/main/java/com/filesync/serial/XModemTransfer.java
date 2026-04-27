@@ -208,6 +208,15 @@ public class XModemTransfer {
 
             // Verify block number
             if (blockNum + blockNumComplement != 255) {
+                // Drain stale data block + CRC from the current (failed) block so
+                // they are not misread as block headers on subsequent loop iterations.
+                // Each misread would consume retries and eventually abort the transfer.
+                try {
+                    for (int i = 0; i < blockSize + 2 && serialPort.available() > 0; i++) {
+                        serialPort.read();
+                    }
+                } catch (IOException ignored) {
+                }
                 serialPort.write(NAK);
                 continue;
             }

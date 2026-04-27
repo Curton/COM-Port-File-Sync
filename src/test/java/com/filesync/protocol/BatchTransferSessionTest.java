@@ -244,7 +244,7 @@ class BatchTransferSessionTest {
         dir.mkdirs();
 
         List<Object[]> files = new ArrayList<>();
-        for (int i = 0; i < 72; i++) {
+        for (int i = 0; i < 260; i++) {
             File f = new File(dir, "file_" + i + ".txt");
             Files.writeString(f.toPath(), "content " + i);
             files.add(new Object[] {f, "file_" + i + ".txt"});
@@ -256,7 +256,7 @@ class BatchTransferSessionTest {
         extractDir.mkdirs();
 
         int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(64, written, "Should be limited to MAX_ENTRIES_PER_BATCH (64)");
+        assertEquals(256, written, "Should be limited to MAX_ENTRIES_PER_BATCH (256)");
     }
 
     @Test

@@ -288,6 +288,7 @@ public class SyncCoordinator {
             protocol.sendError("Sync folder not configured");
             return;
         }
+        resolveSafe(syncFolder, relativePath);
         eventBus.post(new SyncEvent.LogEvent("Sending file: " + relativePath));
         protocol.sendFile(syncFolder, relativePath);
     }
@@ -370,6 +371,7 @@ public class SyncCoordinator {
         eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
         protocol.sendAck();
         try {
+            resolveSafe(syncFolder, relativePath);
             protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
             eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
             touchHeartbeat();
@@ -394,7 +396,7 @@ public class SyncCoordinator {
         if (syncFolder == null) {
             return;
         }
-        File fileToDelete = new File(syncFolder, relativePath);
+        File fileToDelete = resolveSafe(syncFolder, relativePath);
         if (fileToDelete.exists() && fileToDelete.isFile()) {
             eventBus.post(new SyncEvent.LogEvent("Deleting file: " + relativePath));
             if (fileToDelete.delete()) {
@@ -412,7 +414,13 @@ public class SyncCoordinator {
         if (syncFolder == null) {
             return;
         }
-        File dirToCreate = new File(syncFolder, relativePath);
+        File dirToCreate;
+        try {
+            dirToCreate = resolveSafe(syncFolder, relativePath);
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Invalid path: " + e.getMessage()));
+            return;
+        }
         if (!dirToCreate.exists()) {
             eventBus.post(new SyncEvent.LogEvent("Creating directory: " + relativePath));
             if (dirToCreate.mkdirs()) {
@@ -430,7 +438,13 @@ public class SyncCoordinator {
         if (syncFolder == null) {
             return;
         }
-        File dirToDelete = new File(syncFolder, relativePath);
+        File dirToDelete;
+        try {
+            dirToDelete = resolveSafe(syncFolder, relativePath);
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.ErrorEvent("Invalid path: " + e.getMessage()));
+            return;
+        }
         if (dirToDelete.exists() && dirToDelete.isDirectory()) {
             eventBus.post(new SyncEvent.LogEvent("Deleting directory: " + relativePath));
             if (deleteDirectoryRecursively(dirToDelete)) {
@@ -477,11 +491,21 @@ public class SyncCoordinator {
             List<FileChangeDetector.FileInfo> regularFiles = new ArrayList<>();
             List<FileChangeDetector.FileInfo> conflictFiles = new ArrayList<>();
             for (FileChangeDetector.FileInfo fi : filesToTransfer) {
-                if (syncPlan.getConflict(fi.getPath()) != null
-                        && syncPlan.getConflict(fi.getPath()).getResolution()
-                                == ConflictInfo.Resolution.MERGE
-                        && syncPlan.getConflict(fi.getPath()).getMergedContentAsBytes() != null) {
+                ConflictInfo conflict = syncPlan.getConflict(fi.getPath());
+                if (conflict != null
+                        && conflict.getResolution() == ConflictInfo.Resolution.MERGE
+                        && conflict.getMergedContentAsBytes() != null) {
                     conflictFiles.add(fi);
+                } else if (conflict != null
+                        && conflict.getApplyTarget() == ConflictInfo.ApplyTarget.REMOTE_ONLY
+                        && (conflict.getResolution() == ConflictInfo.Resolution.KEEP_REMOTE
+                                || conflict.getResolution() == ConflictInfo.Resolution.SKIP)) {
+                    // KEEP_REMOTE or SKIP with REMOTE_ONLY target: do not send local
+                    // version (which is the older local file) to the remote.
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Skipping transfer for " + fi.getPath() + " ("
+                                            + conflict.getResolution() + ")"));
                 } else {
                     regularFiles.add(fi);
                 }
@@ -961,5 +985,20 @@ public class SyncCoordinator {
             }
         }
         return totalRead < fileSize ? java.util.Arrays.copyOf(sample, totalRead) : sample;
+    }
+
+    /**
+     * Resolve a remote-supplied relative path against a base directory, rejecting paths that
+     * attempt to escape the base directory via {@code ../} segments.
+     */
+    static File resolveSafe(File baseDir, String relativePath) throws IOException {
+        String normalized = relativePath.replace('\\', '/');
+        if (normalized.startsWith("/")
+                || normalized.contains("../")
+                || normalized.contains("..\\")) {
+            throw new IOException(
+                    "Path traversal rejected: " + relativePath);
+        }
+        return new File(baseDir, relativePath);
     }
 }
