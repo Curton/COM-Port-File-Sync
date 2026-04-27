@@ -497,11 +497,12 @@ public class SyncCoordinator {
                         && conflict.getMergedContentAsBytes() != null) {
                     conflictFiles.add(fi);
                 } else if (conflict != null
-                        && conflict.getApplyTarget() == ConflictInfo.ApplyTarget.REMOTE_ONLY
                         && (conflict.getResolution() == ConflictInfo.Resolution.KEEP_REMOTE
-                                || conflict.getResolution() == ConflictInfo.Resolution.SKIP)) {
-                    // KEEP_REMOTE or SKIP with REMOTE_ONLY target: do not send local
-                    // version (which is the older local file) to the remote.
+                                || conflict.getResolution()
+                                        == ConflictInfo.Resolution.SKIP)) {
+                    // Do not transfer files where the user chose to keep the remote
+                    // version or skip entirely. Sending the local version would
+                    // overwrite the remote's newer content.
                     eventBus.post(
                             new SyncEvent.LogEvent(
                                     "Skipping transfer for " + fi.getPath() + " ("
