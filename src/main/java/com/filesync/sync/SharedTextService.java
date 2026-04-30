@@ -144,8 +144,6 @@ public class SharedTextService {
 
     public void clearPendingSharedText() {
         pendingSharedText.set(null);
-        latestSharedText.set(null);
-        latestAcceptedTimestamp.set(0);
     }
 
     private SharedTextPayload decodeSharedTextPayload(long remoteTimestamp, String encodedPayload) {
