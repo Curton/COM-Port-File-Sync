@@ -498,15 +498,17 @@ public class SyncCoordinator {
                     conflictFiles.add(fi);
                 } else if (conflict != null
                         && (conflict.getResolution() == ConflictInfo.Resolution.KEEP_REMOTE
-                                || conflict.getResolution()
-                                        == ConflictInfo.Resolution.SKIP)) {
+                                || conflict.getResolution() == ConflictInfo.Resolution.SKIP)) {
                     // Do not transfer files where the user chose to keep the remote
                     // version or skip entirely. Sending the local version would
                     // overwrite the remote's newer content.
                     eventBus.post(
                             new SyncEvent.LogEvent(
-                                    "Skipping transfer for " + fi.getPath() + " ("
-                                            + conflict.getResolution() + ")"));
+                                    "Skipping transfer for "
+                                            + fi.getPath()
+                                            + " ("
+                                            + conflict.getResolution()
+                                            + ")"));
                 } else {
                     regularFiles.add(fi);
                 }
@@ -997,8 +999,7 @@ public class SyncCoordinator {
         if (normalized.startsWith("/")
                 || normalized.contains("../")
                 || normalized.contains("..\\")) {
-            throw new IOException(
-                    "Path traversal rejected: " + relativePath);
+            throw new IOException("Path traversal rejected: " + relativePath);
         }
         return new File(baseDir, relativePath);
     }

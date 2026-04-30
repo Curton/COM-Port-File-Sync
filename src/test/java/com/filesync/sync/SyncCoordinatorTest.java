@@ -702,7 +702,12 @@ class SyncCoordinatorTest {
 
         coordinator.handleIncomingBatch(100, 10);
 
-        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
+        verify(mockProtocol)
+                .receiveBatch(
+                        anyInt(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class));
         // handleIncomingBatch doesn't call touchHeartbeat() in success path
         assertEquals(0, heartbeatTouches.get());
     }
@@ -741,7 +746,12 @@ class SyncCoordinatorTest {
         coordinatorWithNullFolder.handleIncomingBatch(100, 10);
 
         assertEquals(1, syncIdleCalls.get());
-        verify(mockProtocol, never()).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
+        verify(mockProtocol, never())
+                .receiveBatch(
+                        anyInt(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class));
     }
 
     @Test
@@ -763,7 +773,12 @@ class SyncCoordinatorTest {
 
         coordinator.handleIncomingBatchUnknownTotal(100);
 
-        verify(mockProtocol).receiveBatch(anyInt(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), isA(File.class));
+        verify(mockProtocol)
+                .receiveBatch(
+                        anyInt(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class));
     }
 
     @Test

@@ -22,7 +22,6 @@ import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingConstants;
-import javax.swing.SwingUtilities;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
@@ -437,11 +436,10 @@ public class SyncPreviewRenderer {
             return true; // All conflicts were trivial, nothing to resolve
         }
 
-        final ConflictResolutionDialog.Result[] resultHolder = new ConflictResolutionDialog.Result[1];
+        final ConflictResolutionDialog.Result[] resultHolder =
+                new ConflictResolutionDialog.Result[1];
         try {
-            SwingUtilities.invokeAndWait(
-                    () -> resultHolder[0] =
-                            ConflictResolutionDialog.showDialog(owner, toResolve));
+            resultHolder[0] = ConflictResolutionDialog.showDialog(owner, toResolve);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to show conflict resolution dialog: " + e.getMessage(), e);

@@ -40,6 +40,7 @@ public class FileSyncManager {
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
     private final AtomicBoolean wasManuallyDisconnected = new AtomicBoolean(false);
+    private final AtomicBoolean syncCancelInProgress = new AtomicBoolean(false);
 
     private final AtomicLong threadIdGenerator =
             new AtomicLong(0); // names FileSync-N threads in executor
@@ -287,6 +288,7 @@ public class FileSyncManager {
         if (portToReopen != null && serialPort.open(portToReopen)) {
             startListening(portToReopen);
         }
+        syncCancelInProgress.set(false);
     }
 
     /**
@@ -336,6 +338,7 @@ public class FileSyncManager {
 
     public void cancelSync() {
         syncCoordinator.cancelOngoingSync();
+        syncCancelInProgress.set(true);
         restartListening();
     }
 
@@ -716,6 +719,11 @@ public class FileSyncManager {
     }
 
     private void onConnectionLost() {
+        // If connection lost due to sync cancellation, don't stop listening again
+        // (restartListening already handles the restart)
+        if (syncCancelInProgress.get()) {
+            return;
+        }
         // Keep any pending shared text so it can be re-sent when connectivity returns.
         resetSyncStateForLinkTransition(false);
         stopListening();

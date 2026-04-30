@@ -98,6 +98,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     private void onSyncButtonClicked() {
+        logController.log("[DEBUG] onSyncButtonClicked: syncing=" + syncManager.isSyncing());
         if (syncManager.isSyncing()) {
             cancelSync();
             return;
@@ -144,18 +145,22 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     public void startSync() {
+        logController.log("[DEBUG] startSync: sender=" + state.isSender());
         if (!ensureSenderRoleReady()) {
             logController.log("Waiting for sync from sender...");
             return;
         }
+        logController.log("[DEBUG] startSync: running preflight -> doStartSync");
         runSyncWithPreflight(this::doStartSync);
     }
 
     public void previewSync() {
+        logController.log("[DEBUG] previewSync: entered");
         if (!ensureSenderRoleReady()) {
             logController.log("Waiting for sync from sender...");
             return;
         }
+        logController.log("[DEBUG] previewSync: starting preflight -> runSyncPreview");
         runSyncWithPreflight(this::runSyncPreview);
     }
 
@@ -198,6 +203,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     protected void done() {
                         try {
                             String remotePath = get();
+                            logController.log(
+                                    "[DEBUG] preflight done: remotePath="
+                                            + (remotePath != null ? remotePath : "null"));
                             String nLocal = SettingsManager.normalizeFolderPath(localPath);
                             String nRemote = SettingsManager.normalizeFolderPath(remotePath);
                             List<String[]> rememberedMappings =
@@ -213,6 +221,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
                             if (match) {
                                 state.setPendingMappingRemotePath(nRemote);
+                                logController.log("[DEBUG] preflight: folder match, calling onProceed (" + onProceed.getClass().getSimpleName() + ")");
                                 onProceed.run();
                                 return;
                             }
@@ -290,7 +299,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     private void runSyncPreview() {
+        logController.log("[DEBUG] runSyncPreview: entered");
         if (state.isPreviewInProgress()) {
+            logController.log("[DEBUG] runSyncPreview: preview already in progress, returning");
             return;
         }
 
@@ -301,23 +312,39 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                 new SwingWorker<SyncPreviewPlan, Void>() {
                     @Override
                     protected SyncPreviewPlan doInBackground() {
+                        logController.log("[DEBUG] runSyncPreview: doInBackground calling previewSync");
                         return syncManager.previewSync();
                     }
 
                     @Override
                     protected void done() {
+                        logController.log("[DEBUG] runSyncPreview: done() called");
                         state.setPreviewInProgress(false);
                         updateSyncButtonState();
 
                         try {
                             SyncPreviewPlan syncPreview = get();
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: plan="
+                                            + (syncPreview != null ? "non-null" : "null"));
                             if (syncPreview == null) {
                                 showNoChangesPreview("Sync preview could not be computed.");
                                 return;
                             }
 
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: conflicts="
+                                            + syncPreview.getConflicts().size()
+                                            + ", filesToTransfer="
+                                            + syncPreview.getFilesToTransfer().size()
+                                            + ", totalOps="
+                                            + syncPreview.getTotalOperations());
+
                             SyncPreviewRenderer.SyncPreviewResult previewResult =
                                     previewRenderer.showSyncPreviewDialogWithResult(syncPreview);
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: previewResult="
+                                            + (previewResult != null ? "non-null" : "null (cancelled)"));
                             if (previewResult == null) {
                                 return;
                             }
@@ -325,29 +352,51 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                             DefaultTableModel previewModel = previewResult.getModel();
                             List<SyncPreviewRow> previewRows = previewResult.getRows();
 
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: selectedPlan conflicts="
+                                            + selectedPlan.getConflicts().size()
+                                            + ", filesToTransfer="
+                                            + selectedPlan.getFilesToTransfer().size());
+
                             // Resolve conflicts for selected files before starting sync
                             if (!selectedPlan.getConflicts().isEmpty()) {
+                                logController.log(
+                                        "[DEBUG] runSyncPreview: calling resolveConflictsForSelectedFiles");
                                 boolean conflictsResolved =
                                         previewRenderer.resolveConflictsForSelectedFiles(
                                                 selectedPlan, previewModel, previewRows);
+                                logController.log(
+                                        "[DEBUG] runSyncPreview: conflictsResolved=" + conflictsResolved);
                                 if (!conflictsResolved) {
-                                    // User cancelled conflict resolution
+                                    logController.log(
+                                            "[DEBUG] runSyncPreview: user cancelled conflict resolution");
                                     return;
                                 }
                                 // Re-create filtered plan now that conflicts have resolutions
                                 // (SKIP/KEEP_REMOTE exclude from transfer)
+                                logController.log(
+                                        "[DEBUG] runSyncPreview: re-creating filtered plan");
                                 selectedPlan =
                                         previewRenderer.createFilteredSyncPlan(
                                                 syncPreview, previewModel, previewRows);
+                                logController.log(
+                                        "[DEBUG] runSyncPreview: after resolution filesToTransfer="
+                                                + selectedPlan.getFilesToTransfer().size());
                             }
 
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: calling initiateSync");
                             components.getSyncButton().setEnabled(false);
                             components.getPreviewSyncButton().setEnabled(false);
                             components.getProgressBar().setValue(0);
                             syncManager.initiateSync(selectedPlan);
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: initiateSync returned");
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             String message = "Sync preview was interrupted";
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: InterruptedException: " + message);
                             JOptionPane.showMessageDialog(
                                     owner,
                                     "Could not prepare sync preview.\n" + message,
@@ -360,12 +409,20 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                             if (message == null || message.isEmpty()) {
                                 message = "Failed to generate sync preview";
                             }
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: ExecutionException: " + message);
                             JOptionPane.showMessageDialog(
                                     owner,
                                     "Could not prepare sync preview.\n" + message,
                                     "Sync Preview Failed",
                                     JOptionPane.ERROR_MESSAGE);
                             logController.log("Sync preview failed: " + message);
+                        } catch (Exception e) {
+                            logController.log(
+                                    "[DEBUG] runSyncPreview: unexpected exception: "
+                                            + e.getClass().getSimpleName()
+                                            + ": " + e.getMessage());
+                            e.printStackTrace();
                         }
                     }
                 };

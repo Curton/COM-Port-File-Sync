@@ -90,8 +90,7 @@ public class FileDropService {
 
         String fileName = msg.getParam(0);
         if (fileName == null || fileName.trim().isEmpty()) {
-            eventBus.post(
-                    new SyncEvent.ErrorEvent("Dropped file transfer failed: no filename"));
+            eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer failed: no filename"));
             return;
         }
         fileName = sanitizeFileName(fileName);

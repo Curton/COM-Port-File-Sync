@@ -5,7 +5,7 @@
 
     <groupId>com.filesync</groupId>
     <artifactId>com-file-sync</artifactId>
-    <version>1.6.17</version>
+    <version>1.6.19</version>
     <packaging>jar</packaging>
 
     <name>COM Port File Sync</name>

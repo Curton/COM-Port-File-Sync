@@ -236,7 +236,9 @@ public class CompressionUtil {
                 totalWritten += bytesRead;
                 if (totalWritten > MAX_DECOMPRESSED_SIZE) {
                     throw new IOException(
-                            "Decompressed data exceeds limit of " + MAX_DECOMPRESSED_SIZE + " bytes");
+                            "Decompressed data exceeds limit of "
+                                    + MAX_DECOMPRESSED_SIZE
+                                    + " bytes");
                 }
                 baos.write(buffer, 0, bytesRead);
             }

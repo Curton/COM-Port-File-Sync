@@ -1,4 +1,7 @@
 {
+  "skillOverrides": {
+    "review-changes": "user-invocable-only"
+  },
   "permissions": {
     "allow": [
       "Bash(git show:*)",

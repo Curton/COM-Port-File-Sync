@@ -143,8 +143,7 @@ public class SyncProtocol {
                 .replace("\n", " ")
                 .replace(
                         END_MARKER,
-                        String.valueOf(ESCAPE_CHAR) + END_MARKER.charAt(0)
-                                + END_MARKER.charAt(1));
+                        String.valueOf(ESCAPE_CHAR) + END_MARKER.charAt(0) + END_MARKER.charAt(1));
     }
 
     private static String[] splitEscapedFields(String content) {
