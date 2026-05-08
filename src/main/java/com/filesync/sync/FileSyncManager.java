@@ -241,12 +241,18 @@ public class FileSyncManager {
      * @param portName the serial port name (e.g. "COM3") used for re-opening on restart
      */
     public void startListening(String portName) {
+        startListeningInternal(portName, true);
+    }
+
+    private void startListeningInternal(String portName, boolean isFreshConnect) {
         if (running.get()) {
             return;
         }
 
-        wasManuallyDisconnected.set(false);
-        reconnectAttempted.set(false);
+        if (isFreshConnect) {
+            wasManuallyDisconnected.set(false);
+            reconnectAttempted.set(false);
+        }
         this.lastPortName = portName;
         running.set(true);
         connectionAlive.set(false);
@@ -786,7 +792,12 @@ public class FileSyncManager {
                             return;
                         }
 
-                        startListening(portName);
+                        if (wasManuallyDisconnected.get()) {
+                            serialPort.close();
+                            return;
+                        }
+
+                        startListeningInternal(portName, false);
 
                         boolean connected =
                                 connectionService.waitForConnection(RECONNECT_TIMEOUT_MS);

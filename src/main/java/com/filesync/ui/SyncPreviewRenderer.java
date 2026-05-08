@@ -217,7 +217,9 @@ public class SyncPreviewRenderer {
                     }
                 };
         for (SyncPreviewRow row : rows) {
-            boolean autoSelect = row.getSizeBytes() <= 256 * 1024;
+            boolean autoSelect =
+                    row.getOperationType() != SyncPreviewOperationType.CREATE_DIR
+                            && row.getSizeBytes() <= 256 * 1024;
             model.addRow(
                     new Object[] {
                         autoSelect, row.getTypeLabel(), row.getSizeText(), row.getPath()
