@@ -217,9 +217,10 @@ public class SyncPreviewRenderer {
                     }
                 };
         for (SyncPreviewRow row : rows) {
+            boolean autoSelect = row.getSizeBytes() <= 256 * 1024;
             model.addRow(
                     new Object[] {
-                        Boolean.TRUE, row.getTypeLabel(), row.getSizeText(), row.getPath()
+                        autoSelect, row.getTypeLabel(), row.getSizeText(), row.getPath()
                     });
         }
         return model;

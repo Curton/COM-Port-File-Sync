@@ -541,8 +541,14 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                         components.getPortComboBox().setEnabled(false);
                         components.getRefreshPortsButton().setEnabled(false);
                         components.getSettingsButton().setEnabled(false);
-                        /* Re-enable Sync Control when connection restored; connect() disables them during connect */
                         components.getDirectionButton().setEnabled(true);
+                    } else if (syncManager.isReconnectInProgress()) {
+                        components.getStatusLabel().setText("Reconnecting...");
+                        components.getStatusLabel().setForeground(java.awt.Color.ORANGE);
+                        components.getConnectButton().setText("Connect");
+                        components.getPortComboBox().setEnabled(false);
+                        components.getRefreshPortsButton().setEnabled(false);
+                        components.getSettingsButton().setEnabled(false);
                     } else {
                         components.getStatusLabel().setText("Disconnected");
                         components

@@ -392,8 +392,8 @@ class SyncCoordinatorTest {
 
         coordinatorWithNullFolder.handleMkdir("anyPath");
 
-        // Should just return without error event (checks null before operations)
-        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
+        // Should log an error when sync folder is null
+        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test

@@ -412,6 +412,11 @@ public class SyncCoordinator {
     public void handleMkdir(String relativePath) {
         File syncFolder = syncFolderSupplier.get();
         if (syncFolder == null) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent(
+                            "Cannot create directory '"
+                                    + relativePath
+                                    + "': sync folder not configured"));
             return;
         }
         File dirToCreate;
@@ -421,15 +426,24 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.ErrorEvent("Invalid path: " + e.getMessage()));
             return;
         }
-        if (!dirToCreate.exists()) {
-            eventBus.post(new SyncEvent.LogEvent("Creating directory: " + relativePath));
-            if (dirToCreate.mkdirs()) {
-                eventBus.post(new SyncEvent.LogEvent("Directory created: " + relativePath));
-                flushSharedTextBetweenOperations();
-            } else {
-                eventBus.post(
-                        new SyncEvent.ErrorEvent("Failed to create directory: " + relativePath));
-            }
+        if (dirToCreate.isDirectory()) {
+            // Already exists as a directory - nothing to do
+            return;
+        }
+        if (dirToCreate.exists()) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent(
+                            "Cannot create directory '"
+                                    + relativePath
+                                    + "': a file exists at this path"));
+            return;
+        }
+        eventBus.post(new SyncEvent.LogEvent("Creating directory: " + relativePath));
+        if (dirToCreate.mkdirs()) {
+            eventBus.post(new SyncEvent.LogEvent("Directory created: " + relativePath));
+            flushSharedTextBetweenOperations();
+        } else {
+            eventBus.post(new SyncEvent.ErrorEvent("Failed to create directory: " + relativePath));
         }
     }
 

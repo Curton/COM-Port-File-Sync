@@ -8,6 +8,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Base64;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -23,6 +24,8 @@ public class FileSyncManager {
 
     private static final long INITIAL_CONNECT_TIMEOUT_MS =
             60000; // 60 seconds timeout for initial connection
+    private static final long RECONNECT_DELAY_MS = 5000L;
+    private static final long RECONNECT_TIMEOUT_MS = 60000L;
 
     private final SerialPortManager serialPort;
     private final SyncProtocol protocol;
@@ -41,6 +44,7 @@ public class FileSyncManager {
     private final AtomicBoolean isSender = new AtomicBoolean(true);
     private final AtomicBoolean wasManuallyDisconnected = new AtomicBoolean(false);
     private final AtomicBoolean syncCancelInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean reconnectAttempted = new AtomicBoolean(false);
 
     private final AtomicLong threadIdGenerator =
             new AtomicLong(0); // names FileSync-N threads in executor
@@ -55,6 +59,7 @@ public class FileSyncManager {
     private ScheduledExecutorService executor;
     private Future<?> listenerFuture;
     private volatile String lastPortName;
+    private volatile ScheduledExecutorService reconnectExecutor;
 
     public FileSyncManager(SerialPortManager serialPort, SettingsManager settings) {
         this.serialPort = serialPort;
@@ -221,6 +226,11 @@ public class FileSyncManager {
         return wasManuallyDisconnected.get();
     }
 
+    public boolean isReconnectInProgress() {
+        ScheduledExecutorService recExec = reconnectExecutor;
+        return recExec != null && !recExec.isShutdown();
+    }
+
     public boolean confirmCurrentRoleIfNeeded(boolean isSender) {
         return roleNegotiationService.confirmCurrentRoleIfNeeded(isSender);
     }
@@ -236,6 +246,7 @@ public class FileSyncManager {
         }
 
         wasManuallyDisconnected.set(false);
+        reconnectAttempted.set(false);
         this.lastPortName = portName;
         running.set(true);
         connectionAlive.set(false);
@@ -298,6 +309,7 @@ public class FileSyncManager {
      */
     public void disconnect(boolean notifyRemote) {
         wasManuallyDisconnected.set(true);
+        cancelPendingReconnect();
         if (notifyRemote && running.get() && serialPort.isOpen()) {
             try {
                 protocol.sendDisconnect();
@@ -713,20 +725,84 @@ public class FileSyncManager {
     }
 
     private void onConnectionRestored() {
+        reconnectAttempted.set(false);
         resetSyncStateForLinkTransition(false);
         roleNegotiationService.sendRoleNegotiation();
         sharedTextService.resendLatestSharedText();
     }
 
     private void onConnectionLost() {
-        // If connection lost due to sync cancellation, don't stop listening again
-        // (restartListening already handles the restart)
         if (syncCancelInProgress.get()) {
             return;
         }
-        // Keep any pending shared text so it can be re-sent when connectivity returns.
+        if (wasManuallyDisconnected.get()) {
+            resetSyncStateForLinkTransition(false);
+            stopListening();
+            return;
+        }
+        if (reconnectAttempted.getAndSet(true)) {
+            resetSyncStateForLinkTransition(false);
+            stopListening();
+            return;
+        }
+
         resetSyncStateForLinkTransition(false);
         stopListening();
+
+        String portName = this.lastPortName;
+        if (portName == null) {
+            return;
+        }
+
+        eventBus.post(new SyncEvent.LogEvent("Connection lost. Will try to reconnect in 5s..."));
+
+        ScheduledExecutorService recExec =
+                Executors.newSingleThreadScheduledExecutor(
+                        r -> {
+                            Thread t = new Thread(r);
+                            t.setName("FileSync-Reconnect");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        this.reconnectExecutor = recExec;
+
+        recExec.schedule(
+                () -> {
+                    try {
+                        if (wasManuallyDisconnected.get()) {
+                            return;
+                        }
+
+                        eventBus.post(
+                                new SyncEvent.LogEvent(
+                                        "Attempting to reconnect on " + portName + "..."));
+
+                        serialPort.close();
+                        if (!serialPort.open(portName)) {
+                            eventBus.post(
+                                    new SyncEvent.LogEvent(
+                                            "Reconnect failed: could not open " + portName));
+                            eventBus.post(new SyncEvent.ConnectionEvent(false));
+                            return;
+                        }
+
+                        startListening(portName);
+
+                        boolean connected =
+                                connectionService.waitForConnection(RECONNECT_TIMEOUT_MS);
+                        if (!connected) {
+                            eventBus.post(
+                                    new SyncEvent.LogEvent(
+                                            "Reconnect failed: no response from remote"));
+                            stopListening();
+                            eventBus.post(new SyncEvent.ConnectionEvent(false));
+                        }
+                    } finally {
+                        recExec.shutdownNow();
+                    }
+                },
+                RECONNECT_DELAY_MS,
+                TimeUnit.MILLISECONDS);
     }
 
     private void resetSyncStateForLinkTransition(boolean clearBufferedText) {
@@ -736,6 +812,13 @@ public class FileSyncManager {
         roleNegotiationService.resetForReconnect();
         if (clearBufferedText) {
             sharedTextService.clearPendingSharedText();
+        }
+    }
+
+    private void cancelPendingReconnect() {
+        if (reconnectExecutor != null) {
+            reconnectExecutor.shutdownNow();
+            reconnectExecutor = null;
         }
     }
 

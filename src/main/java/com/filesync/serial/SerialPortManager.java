@@ -78,6 +78,18 @@ public class SerialPortManager {
             if (serialPort.openPort()) {
                 inputStream = serialPort.getInputStream();
                 outputStream = serialPort.getOutputStream();
+                // Drain any stale data that may be lingering in hardware/driver
+                // buffers from a previous session. On reconnect, the UART FIFO
+                // can hold residual bytes that clearInputBuffer alone won't
+                // catch because they haven't yet been delivered to the stream.
+                // A short settling delay lets all in-flight bytes arrive so
+                // they can be purged before any protocol communication begins.
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                clearInputBuffer();
                 return true;
             }
             return false;
