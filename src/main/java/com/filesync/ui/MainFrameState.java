@@ -8,7 +8,6 @@ public class MainFrameState {
     private volatile boolean isConnected = false;
     private volatile boolean isPreviewInProgress = false;
     private volatile boolean suppressFolderSelectionEvents = false;
-    private volatile boolean suppressSharedTextEvents = false;
     private volatile String pendingMappingRemotePath;
 
     public boolean isSender() {
@@ -41,14 +40,6 @@ public class MainFrameState {
 
     public void setSuppressFolderSelectionEvents(boolean suppressFolderSelectionEvents) {
         this.suppressFolderSelectionEvents = suppressFolderSelectionEvents;
-    }
-
-    public boolean isSuppressSharedTextEvents() {
-        return suppressSharedTextEvents;
-    }
-
-    public void setSuppressSharedTextEvents(boolean suppressSharedTextEvents) {
-        this.suppressSharedTextEvents = suppressSharedTextEvents;
     }
 
     public String getPendingMappingRemotePath() {

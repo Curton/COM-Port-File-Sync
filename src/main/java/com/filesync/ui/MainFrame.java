@@ -174,7 +174,6 @@ public class MainFrame extends JFrame {
     }
 
     private void cleanup() {
-        sharedTextController.shutdown();
         if (eventBus != null && eventBusListener != null) {
             eventBus.unregister(eventBusListener);
         }

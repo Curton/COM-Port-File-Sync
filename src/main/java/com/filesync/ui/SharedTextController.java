@@ -6,18 +6,14 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
 import java.awt.datatransfer.UnsupportedFlavorException;
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 import javax.swing.event.MouseInputAdapter;
 
-/** Shared text area behavior, clipboard actions and debounced outbound sync. */
+/** Shared text area behavior, clipboard actions and manual send. */
 public class SharedTextController {
     private final MainFrameComponents components;
     private final MainFrameState state;
     private final FileSyncManager syncManager;
     private final LogController logController;
-    private final Timer sharedTextSyncTimer;
 
     public SharedTextController(
             MainFrameComponents components,
@@ -28,33 +24,9 @@ public class SharedTextController {
         this.state = state;
         this.syncManager = syncManager;
         this.logController = logController;
-
-        sharedTextSyncTimer = new Timer(2000, e -> pushSharedTextToRemote());
-        sharedTextSyncTimer.setRepeats(false);
     }
 
     public void initEventHandlers() {
-        components
-                .getSharedTextArea()
-                .getDocument()
-                .addDocumentListener(
-                        new DocumentListener() {
-                            @Override
-                            public void insertUpdate(DocumentEvent e) {
-                                onSharedTextEdited();
-                            }
-
-                            @Override
-                            public void removeUpdate(DocumentEvent e) {
-                                onSharedTextEdited();
-                            }
-
-                            @Override
-                            public void changedUpdate(DocumentEvent e) {
-                                onSharedTextEdited();
-                            }
-                        });
-
         components
                 .getSharedTextArea()
                 .addMouseListener(
@@ -70,6 +42,14 @@ public class SharedTextController {
                                     logController.log("Shared text copied to clipboard");
                                 }
                             }
+                        });
+
+        components
+                .getSendSharedTextButton()
+                .addActionListener(
+                        event -> {
+                            pushSharedTextToRemote();
+                            logController.log("Shared text sent");
                         });
 
         components
@@ -129,23 +109,7 @@ public class SharedTextController {
     }
 
     public void onSharedTextReceived(String text) {
-        SwingUtilities.invokeLater(
-                () -> {
-                    state.setSuppressSharedTextEvents(true);
-                    try {
-                        sharedTextSyncTimer.stop();
-                        components.getSharedTextArea().setText(text);
-                    } finally {
-                        state.setSuppressSharedTextEvents(false);
-                    }
-                });
-    }
-
-    private void onSharedTextEdited() {
-        if (state.isSuppressSharedTextEvents()) {
-            return;
-        }
-        sharedTextSyncTimer.restart();
+        SwingUtilities.invokeLater(() -> components.getSharedTextArea().setText(text));
     }
 
     public void pushSharedTextToRemote() {
@@ -153,9 +117,5 @@ public class SharedTextController {
             return;
         }
         syncManager.sendSharedText(components.getSharedTextArea().getText());
-    }
-
-    public void shutdown() {
-        sharedTextSyncTimer.stop();
     }
 }

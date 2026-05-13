@@ -42,6 +42,7 @@ public class MainFrameComponents {
     private final JCheckBox fastModeCheckBox;
     private final JProgressBar progressBar;
     private final JTextArea sharedTextArea;
+    private final JButton sendSharedTextButton;
     private final JButton overwriteFromClipboardButton;
     private final JButton appendFromClipboardButton;
     private final JButton copyFromClipboardButton;
@@ -95,6 +96,7 @@ public class MainFrameComponents {
         sharedTextArea.setWrapStyleWord(true);
         sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
 
+        sendSharedTextButton = new JButton("Send");
         overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
         appendFromClipboardButton = new JButton("Append from Clipboard");
         copyFromClipboardButton = new JButton("Copy to Clipboard");
@@ -202,6 +204,7 @@ public class MainFrameComponents {
         sharedPanel.add(sharedScroll, BorderLayout.CENTER);
 
         JPanel clipboardButtonsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 5));
+        clipboardButtonsPanel.add(sendSharedTextButton);
         clipboardButtonsPanel.add(overwriteFromClipboardButton);
         clipboardButtonsPanel.add(appendFromClipboardButton);
         clipboardButtonsPanel.add(copyFromClipboardButton);
@@ -318,6 +321,10 @@ public class MainFrameComponents {
 
     public JTextArea getSharedTextArea() {
         return sharedTextArea;
+    }
+
+    public JButton getSendSharedTextButton() {
+        return sendSharedTextButton;
     }
 
     public JButton getOverwriteFromClipboardButton() {
