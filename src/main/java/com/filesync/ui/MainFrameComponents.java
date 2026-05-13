@@ -96,7 +96,7 @@ public class MainFrameComponents {
         sharedTextArea.setWrapStyleWord(true);
         sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
 
-        sendSharedTextButton = new JButton("Send");
+        sendSharedTextButton = new JButton("Send Text");
         overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
         appendFromClipboardButton = new JButton("Append from Clipboard");
         copyFromClipboardButton = new JButton("Copy to Clipboard");
