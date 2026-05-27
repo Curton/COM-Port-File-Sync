@@ -656,6 +656,7 @@ public class FileSyncManager {
                                     "Ignoring direction change during data transfer"));
                 } else {
                     roleNegotiationService.handleDirectionChange(msg.getParamAsBoolean(0));
+                    sharedTextService.flushIfIdle();
                 }
             }
             case SyncProtocol.CMD_SYNC_COMPLETE -> syncCoordinator.handleSyncComplete();
@@ -732,7 +733,6 @@ public class FileSyncManager {
 
     private void onConnectionRestored() {
         reconnectAttempted.set(false);
-        resetSyncStateForLinkTransition(false);
         roleNegotiationService.sendRoleNegotiation();
         sharedTextService.resendLatestSharedText();
     }

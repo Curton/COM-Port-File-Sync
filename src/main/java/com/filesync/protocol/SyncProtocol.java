@@ -98,7 +98,7 @@ public class SyncProtocol {
     }
 
     /** Send a command message */
-    public void sendCommand(String command, String... params) throws IOException {
+    public synchronized void sendCommand(String command, String... params) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append(START_MARKER).append(command);
         for (String param : params) {
