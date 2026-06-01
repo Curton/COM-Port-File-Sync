@@ -1,5 +1,10 @@
 package com.filesync.sync;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+
 /**
  * Represents a conflict when the same file has been modified on both sender and receiver. Contains
  * information about both versions and allows tracking the user's resolution.
@@ -28,11 +33,15 @@ public final class ConflictInfo {
         BOTH
     }
 
+    private static final long MAX_FULL_READ_BYTES = 1024 * 1024;
+
     private final String path;
     private final FileChangeDetector.FileInfo localInfo;
     private final FileChangeDetector.FileInfo remoteInfo;
     private final boolean binary;
-    private final byte[] localContent;
+    private File localFile;
+    private byte[] localContentBytes;
+    private boolean localContentLoaded;
     private byte[] remoteContent;
     private String mergedContent;
     private Resolution resolution = Resolution.UNRESOLVED;
@@ -52,7 +61,16 @@ public final class ConflictInfo {
         this.localInfo = localInfo;
         this.remoteInfo = remoteInfo;
         this.binary = binary;
-        this.localContent = localContent;
+        this.localFile = null;
+        this.localContentBytes = localContent;
+        this.localContentLoaded = true;
+    }
+
+    /** Enable lazy loading from the given file. Overrides any pre-loaded content. */
+    public void setLazyLocalFile(File file) {
+        this.localFile = file;
+        this.localContentBytes = null;
+        this.localContentLoaded = false;
     }
 
     public String getPath() {
@@ -72,7 +90,20 @@ public final class ConflictInfo {
     }
 
     public byte[] getLocalContent() {
-        return localContent;
+        if (!localContentLoaded && localFile != null) {
+            try {
+                long fileSize = localFile.length();
+                if (fileSize > MAX_FULL_READ_BYTES || fileSize > Integer.MAX_VALUE) {
+                    localContentBytes = null;
+                } else {
+                    localContentBytes = Files.readAllBytes(localFile.toPath());
+                }
+            } catch (IOException e) {
+                localContentBytes = null;
+            }
+            localContentLoaded = true;
+        }
+        return localContentBytes;
     }
 
     public byte[] getRemoteContent() {
@@ -119,10 +150,11 @@ public final class ConflictInfo {
     }
 
     public String getLocalContentAsString() {
-        if (localContent == null) {
+        byte[] content = getLocalContent();
+        if (content == null || content.length == 0) {
             return "";
         }
-        return new String(localContent, java.nio.charset.StandardCharsets.UTF_8);
+        return new String(content, StandardCharsets.UTF_8);
     }
 
     public String getRemoteContentAsString() {

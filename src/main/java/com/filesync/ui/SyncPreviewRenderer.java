@@ -423,8 +423,8 @@ public class SyncPreviewRenderer {
             return true;
         }
 
-        // Fetch remote content for all conflicts before showing dialog
-        // (text: needed for merge UI; binary: needed for KEEP_REMOTE to write to local later)
+        // Fetch remote content and filter trivial conflicts one at a time to bound memory
+        List<ConflictInfo> nonTrivial = new ArrayList<>();
         for (ConflictInfo conflict : toResolve) {
             byte[] remoteContent = effectiveResolver.fetchRemoteContent(conflict.getPath());
             if (remoteContent != null) {
@@ -434,15 +434,25 @@ public class SyncPreviewRenderer {
 
         // Filter out trivial conflicts (whitespace-only changes) after remote content is available
         ConflictAnalyzer.filterTrivialConflicts(toResolve);
+        for (ConflictInfo conflict : toResolve) {
+            if (conflict.isResolved()
+                    && conflict.getResolution() == ConflictInfo.Resolution.KEEP_LOCAL
+                    && !conflict.hasMeaningfulDifferences()) {
+                // Trivial conflict already marked KEEP_LOCAL — release remote content
+                conflict.setRemoteContent(null);
+            } else {
+                nonTrivial.add(conflict);
+            }
+        }
 
-        if (toResolve.isEmpty()) {
+        if (nonTrivial.isEmpty()) {
             return true; // All conflicts were trivial, nothing to resolve
         }
 
         final ConflictResolutionDialog.Result[] resultHolder =
                 new ConflictResolutionDialog.Result[1];
         try {
-            resultHolder[0] = ConflictResolutionDialog.showDialog(owner, toResolve);
+            resultHolder[0] = ConflictResolutionDialog.showDialog(owner, nonTrivial);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to show conflict resolution dialog: " + e.getMessage(), e);

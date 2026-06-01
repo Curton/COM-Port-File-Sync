@@ -6,8 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ConflictInfoTest {
 
@@ -205,5 +210,87 @@ class ConflictInfoTest {
                 new FileChangeDetector.FileInfo("test.txt", 200L, 0L, "md5-b");
         return new ConflictInfo(
                 "test.txt", localInfo, remoteInfo, false, "local".getBytes(StandardCharsets.UTF_8));
+    }
+
+    // ========== Lazy loading tests ==========
+
+    @Test
+    void lazyLoading_readsFromFileOnFirstAccess(@TempDir Path tempDir) throws IOException {
+        Path localFile = tempDir.resolve("test.txt");
+        Files.writeString(localFile, "lazy loaded content");
+
+        FileChangeDetector.FileInfo localInfo =
+                new FileChangeDetector.FileInfo("test.txt", 18L, 0L, null);
+        FileChangeDetector.FileInfo remoteInfo =
+                new FileChangeDetector.FileInfo("test.txt", 0L, 0L, null);
+        ConflictInfo info =
+                new ConflictInfo("test.txt", localInfo, remoteInfo, false, (byte[]) null);
+        info.setLazyLocalFile(localFile.toFile());
+
+        assertEquals("lazy loaded content", info.getLocalContentAsString());
+    }
+
+    @Test
+    void lazyLoading_cachesContentAfterFirstRead(@TempDir Path tempDir) throws IOException {
+        Path localFile = tempDir.resolve("test.txt");
+        Files.writeString(localFile, "original content");
+
+        ConflictInfo info = new ConflictInfo("test.txt", null, null, false, (byte[]) null);
+        info.setLazyLocalFile(localFile.toFile());
+
+        // First access reads from file
+        assertArrayEquals(
+                "original content".getBytes(StandardCharsets.UTF_8), info.getLocalContent());
+
+        // Modify file on disk after first access
+        Files.writeString(localFile, "modified content");
+
+        // Second access should return cached (original) content
+        assertArrayEquals(
+                "original content".getBytes(StandardCharsets.UTF_8), info.getLocalContent());
+    }
+
+    @Test
+    void lazyLoading_returnsNullForTooLargeFile(@TempDir Path tempDir) throws IOException {
+        // Write a file that exceeds MAX_FULL_READ_BYTES (1MB)
+        Path localFile = tempDir.resolve("large.bin");
+        long targetSize = 2 * 1024 * 1024L;
+        try (java.io.RandomAccessFile raf =
+                new java.io.RandomAccessFile(localFile.toFile(), "rw")) {
+            raf.setLength(targetSize);
+        }
+
+        FileChangeDetector.FileInfo localInfo =
+                new FileChangeDetector.FileInfo("large.bin", targetSize, 0L, null);
+        FileChangeDetector.FileInfo remoteInfo =
+                new FileChangeDetector.FileInfo("large.bin", 0L, 0L, null);
+        ConflictInfo info =
+                new ConflictInfo("large.bin", localInfo, remoteInfo, false, (byte[]) null);
+        info.setLazyLocalFile(localFile.toFile());
+
+        assertNull(info.getLocalContent());
+        assertEquals("", info.getLocalContentAsString());
+    }
+
+    @Test
+    void lazyLoading_returnsNullForNonexistentFile() {
+        ConflictInfo info = new ConflictInfo("nope.txt", null, null, false, (byte[]) null);
+        info.setLazyLocalFile(new File("nonexistent.txt"));
+
+        assertNull(info.getLocalContent());
+    }
+
+    @Test
+    void lazyLoading_setLazyLocalFileOverridesPreloadedContent(@TempDir Path tempDir)
+            throws IOException {
+        Path localFile = tempDir.resolve("test.txt");
+        Files.writeString(localFile, "file content");
+
+        ConflictInfo info = new ConflictInfo("test.txt", null, null, false, "preloaded".getBytes());
+        assertArrayEquals("preloaded".getBytes(), info.getLocalContent());
+
+        // Override with lazy loading — next access reads from file
+        info.setLazyLocalFile(localFile.toFile());
+        assertEquals("file content", info.getLocalContentAsString());
     }
 }

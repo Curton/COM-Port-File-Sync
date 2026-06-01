@@ -1,6 +1,8 @@
 package com.filesync.sync;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -226,11 +228,7 @@ public final class TextDiffUtil {
         String[] localLines = splitLines(local);
         String[] remoteLines = splitLines(remote);
 
-        // Compute LCS
-        int[][] lcs = computeLCS(localLines, remoteLines);
-
-        // Backtrack to find the diff operations
-        List<DiffLine> allDiffLines = backtrackDiff(lcs, localLines, remoteLines);
+        List<DiffLine> allDiffLines = myersDiff(localLines, remoteLines);
 
         // Count changes
         int addedCount = 0;
@@ -258,13 +256,57 @@ public final class TextDiffUtil {
      * @return true if there are content changes beyond whitespace
      */
     public static boolean hasMeaningfulDifferences(String local, String remote) {
+        // Quick equality check on normalized forms
         String localNormalized = normalizeForComparison(local);
         String remoteNormalized = normalizeForComparison(remote);
         if (localNormalized.equals(remoteNormalized)) {
             return false;
         }
-        DiffResult diff = computeDiff(local, remote);
-        return diff.hasMeaningfulChanges();
+
+        // Streaming scan: compare normalized lines without building a full diff
+        String[] localLines = splitAndNormalizeLines(local);
+        String[] remoteLines = splitAndNormalizeLines(remote);
+
+        int i = 0, j = 0;
+        while (i < localLines.length && j < remoteLines.length) {
+            if (localLines[i].equals(remoteLines[j])) {
+                i++;
+                j++;
+            } else {
+                // Lines differ — check if the difference is non-whitespace
+                if (!localLines[i].trim().isEmpty() || !remoteLines[j].trim().isEmpty()) {
+                    return true;
+                }
+                // Skip whitespace-only lines on both sides
+                if (localLines[i].trim().isEmpty()) i++;
+                if (remoteLines[j].trim().isEmpty()) j++;
+            }
+        }
+        // Check remaining lines
+        while (i < localLines.length) {
+            if (!localLines[i].trim().isEmpty()) return true;
+            i++;
+        }
+        while (j < remoteLines.length) {
+            if (!remoteLines[j].trim().isEmpty()) return true;
+            j++;
+        }
+        return false;
+    }
+
+    /** Split text into lines and normalize each (strip trailing whitespace, skip blank). */
+    private static String[] splitAndNormalizeLines(String text) {
+        if (text == null || text.isEmpty()) {
+            return new String[0];
+        }
+        String raw = text.replace("\r", "");
+        String[] rawLines = raw.split("\n", -1);
+        List<String> result = new ArrayList<>();
+        for (String line : rawLines) {
+            String normalized = line.stripTrailing();
+            result.add(normalized);
+        }
+        return result.toArray(new String[0]);
     }
 
     /**
@@ -298,59 +340,121 @@ public final class TextDiffUtil {
     }
 
     /**
-     * Compute the LCS (Longest Common Subsequence) table. Returns a 2D array where lcs[i][j] is the
-     * length of LCS of localLines[0..i-1] and remoteLines[0..j-1].
+     * Myers' O(ND) diff algorithm. Returns diff lines directly, avoiding the quadratic-space LCS
+     * table. Time: O((N+M)*D), Space: O(D*(N+M)) where D is the edit distance.
      */
-    private static int[][] computeLCS(String[] localLines, String[] remoteLines) {
-        int m = localLines.length;
-        int n = remoteLines.length;
-        int[][] lcs = new int[m + 1][n + 1];
+    private static List<DiffLine> myersDiff(String[] a, String[] b) {
+        int n = a.length;
+        int m = b.length;
 
-        for (int i = 1; i <= m; i++) {
-            for (int j = 1; j <= n; j++) {
-                if (localLines[i - 1].equals(remoteLines[j - 1])) {
-                    lcs[i][j] = lcs[i - 1][j - 1] + 1;
+        if (n == 0 && m == 0) {
+            return List.of();
+        }
+        if (n == 0) {
+            List<DiffLine> result = new ArrayList<>();
+            for (int j = 0; j < m; j++) {
+                result.add(new DiffLine(DiffLineType.ADDED, b[j], -1, j + 1));
+            }
+            return result;
+        }
+        if (m == 0) {
+            List<DiffLine> result = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                result.add(new DiffLine(DiffLineType.REMOVED, a[i], i + 1, -1));
+            }
+            return result;
+        }
+
+        int max = n + m;
+        int offset = max;
+        int[] v = new int[2 * max + 1];
+        Arrays.fill(v, -1);
+        v[offset + 1] = 0;
+
+        List<int[]> trace = new ArrayList<>();
+        int foundD = -1;
+
+        forward:
+        for (int d = 0; d <= max; d++) {
+            trace.add(v.clone());
+            for (int k = -d; k <= d; k += 2) {
+                int x;
+                if (k == -d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
+                    x = v[k + 1 + offset];
                 } else {
-                    lcs[i][j] = Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+                    x = v[k - 1 + offset] + 1;
+                }
+                int y = x - k;
+
+                while (x < n && y < m && a[x].equals(b[y])) {
+                    x++;
+                    y++;
+                }
+
+                v[k + offset] = x;
+
+                if (x >= n && y >= m) {
+                    foundD = d;
+                    break forward;
                 }
             }
         }
 
-        return lcs;
-    }
+        if (foundD == -1) {
+            return List.of();
+        }
 
-    /** Backtrack through the LCS table to produce the list of diff operations. */
-    private static List<DiffLine> backtrackDiff(
-            int[][] lcs, String[] localLines, String[] remoteLines) {
+        // Backtrack through the trace to produce diff lines
         List<DiffLine> result = new ArrayList<>();
-        int i = localLines.length;
-        int j = remoteLines.length;
+        int cx = n, cy = m;
 
-        // We need to backtrack from (m,n) to (0,0), collecting operations in reverse order
-        List<DiffLine> reversed = new ArrayList<>();
+        for (int d = foundD; d > 0; d--) {
+            int[] vPrev = trace.get(d);
+            int k = cx - cy;
 
-        while (i > 0 || j > 0) {
-            if (i > 0 && j > 0 && localLines[i - 1].equals(remoteLines[j - 1])) {
-                // Lines match
-                reversed.add(new DiffLine(DiffLineType.UNCHANGED, localLines[i - 1], i, j));
-                i--;
-                j--;
-            } else if (j > 0 && (i == 0 || lcs[i][j - 1] >= lcs[i - 1][j])) {
-                // Line added in remote (or we came from the left)
-                reversed.add(new DiffLine(DiffLineType.ADDED, remoteLines[j - 1], -1, j));
-                j--;
-            } else if (i > 0) {
-                // Line removed from local (or we came from above)
-                reversed.add(new DiffLine(DiffLineType.REMOVED, localLines[i - 1], i, -1));
-                i--;
+            boolean fromAbove;
+            if (k == -d) {
+                fromAbove = true;
+            } else if (k == d) {
+                fromAbove = false;
+            } else {
+                fromAbove = vPrev[k - 1 + offset] < vPrev[k + 1 + offset];
             }
+
+            int prevK = fromAbove ? k + 1 : k - 1;
+            int prevX = vPrev[prevK + offset];
+            int prevY = prevX - prevK;
+
+            int midX = fromAbove ? prevX : prevX + 1;
+            int midY = fromAbove ? prevY + 1 : prevY;
+
+            // Snake from (midX, midY) to (cx, cy) — all UNCHANGED
+            int sx = cx, sy = cy;
+            while (sx > midX && sy > midY) {
+                sx--;
+                sy--;
+                result.add(new DiffLine(DiffLineType.UNCHANGED, a[sx], sx + 1, sy + 1));
+            }
+
+            // The edit step
+            if (fromAbove) {
+                result.add(new DiffLine(DiffLineType.ADDED, b[prevY], -1, prevY + 1));
+            } else {
+                result.add(new DiffLine(DiffLineType.REMOVED, a[prevX], prevX + 1, -1));
+            }
+
+            cx = prevX;
+            cy = prevY;
         }
 
-        // Reverse to get correct order
-        for (int k = reversed.size() - 1; k >= 0; k--) {
-            result.add(reversed.get(k));
+        // Initial snake from (0, 0) to (cx, cy)
+        while (cx > 0 && cy > 0) {
+            cx--;
+            cy--;
+            result.add(new DiffLine(DiffLineType.UNCHANGED, a[cx], cx + 1, cy + 1));
         }
 
+        Collections.reverse(result);
         return result;
     }
 

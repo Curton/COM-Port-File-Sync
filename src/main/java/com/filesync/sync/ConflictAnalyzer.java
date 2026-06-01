@@ -21,7 +21,7 @@ public class ConflictAnalyzer {
     private static final Set<String> BINARY_EXTENSIONS = new HashSet<>();
 
     // 50MB threshold - files larger than this will use sampling for content analysis
-    private static final long MAX_FULL_READ_BYTES = 50 * 1024 * 1024;
+    private static final long MAX_FULL_READ_BYTES = 1024 * 1024;
 
     static {
         // Common binary file extensions (no duplicates)
@@ -80,24 +80,12 @@ public class ConflictAnalyzer {
                     }
                     boolean isBinary = isBinaryExtension(path);
                     File localFile = new File(localFolder, path);
-                    byte[] localContent = readFileContent(localFile);
 
                     ConflictInfo conflict =
-                            new ConflictInfo(path, localInfo, remoteInfo, isBinary, localContent);
+                            new ConflictInfo(path, localInfo, remoteInfo, isBinary, (byte[]) null);
+                    conflict.setLazyLocalFile(localFile);
 
-                    // For text files, compute diff and filter out trivial conflicts
-                    if (!isBinary && localContent != null) {
-                        String localText = conflict.getLocalContentAsString();
-                        // Remote content will be fetched later via protocol when needed for merge
-                        // UI
-                        // For now, we can only check local content
-                        // The meaningful differences check will be done when remote content is
-                        // available
-                        conflicts.add(conflict);
-                    } else {
-                        // Binary files or files without local content are always conflicts
-                        conflicts.add(conflict);
-                    }
+                    conflicts.add(conflict);
                 }
             }
             // Files that exist on only one side are not conflicts - normal sync direction

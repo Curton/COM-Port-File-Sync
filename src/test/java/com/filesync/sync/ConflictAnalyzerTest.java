@@ -457,4 +457,32 @@ class ConflictAnalyzerTest {
         assertEquals("", conflict.getRemoteContentAsString());
         assertNull(conflict.getMergedContentAsBytes());
     }
+
+    @Test
+    void findConflicts_contentLoadedOnDemand_lazyLoading(@TempDir Path tempDir) throws IOException {
+        // Verify that content is loaded lazily from disk (not eagerly in findConflicts)
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+
+        Path localFile = localDir.resolve("file.txt");
+        Path remoteFile = remoteDir.resolve("file.txt");
+        Files.writeString(localFile, "local version");
+        Files.writeString(remoteFile, "remote version");
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(5000L));
+
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        assertEquals(1, conflicts.size());
+
+        // Content loaded on first access
+        assertEquals("local version", conflicts.get(0).getLocalContentAsString());
+    }
 }

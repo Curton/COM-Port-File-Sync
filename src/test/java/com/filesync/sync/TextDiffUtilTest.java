@@ -227,4 +227,90 @@ class TextDiffUtilTest {
         assertTrue(result.hasChanges());
         assertEquals(1, result.getRemovedCount());
     }
+
+    // ========== hasMeaningfulDifferences streaming pre-check ==========
+
+    @Test
+    void hasMeaningfulDifferences_identicalTexts_normalized() {
+        String text = "hello  \nworld   \n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(text, text));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_allNewLines_only() {
+        String local = "\n\n\n";
+        String remote = "\n\n\n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+
+        // Different whitespace-only content across newlines
+        String local2 = "   \n   \n";
+        String remote2 = "\n\n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local2, remote2));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_mixedWhitespaceAndContent() {
+        // Lines added but only whitespace
+        String local = "hello\nworld";
+        String remote = "hello\n   \nworld";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+
+        // Lines added with actual content interspersed with whitespace-only
+        String remote2 = "hello\n   \nreal change\nworld";
+        assertTrue(TextDiffUtil.hasMeaningfulDifferences(local, remote2));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_onlyWhitespaceOnBothSides() {
+        String local = "   \n\t\t\n";
+        String remote = "\n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_bothNull() {
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(null, null));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_oneNull() {
+        assertTrue(TextDiffUtil.hasMeaningfulDifferences(null, "hello"));
+        assertTrue(TextDiffUtil.hasMeaningfulDifferences("hello", null));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_carriageReturns() {
+        String local = "hello\r\nworld\r\n";
+        String remote = "hello\r\nworld\r\n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+
+        // Only whitespace difference with CRLF
+        String local2 = "hello  \r\nworld\r\n";
+        String remote2 = "hello\r\nworld\r\n";
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local2, remote2));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_largeIdenticalTexts() {
+        // Build 2000 lines of identical text to verify streaming pre-check works
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 2000; i++) {
+            sb.append("line ").append(i).append("\n");
+        }
+        String text = sb.toString();
+        assertFalse(TextDiffUtil.hasMeaningfulDifferences(text, text));
+    }
+
+    @Test
+    void hasMeaningfulDifferences_largeWithOneMeaningfulChange() {
+        // 2000 lines with 1 real change
+        StringBuilder localSb = new StringBuilder();
+        StringBuilder remoteSb = new StringBuilder();
+        for (int i = 0; i < 2000; i++) {
+            localSb.append("line ").append(i).append("\n");
+            remoteSb.append("line ").append(i).append("\n");
+        }
+        remoteSb.append("real change\n");
+        assertTrue(TextDiffUtil.hasMeaningfulDifferences(localSb.toString(), remoteSb.toString()));
+    }
 }
