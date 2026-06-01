@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -239,24 +240,23 @@ class BatchTransferSessionTest {
     }
 
     @Test
-    void buildBatchEnforcesMaxEntriesLimit() throws IOException {
+    void buildBatchRejectsOverMaxEntries() {
         File dir = tempDir.resolve("input").toFile();
         dir.mkdirs();
 
         List<Object[]> files = new ArrayList<>();
         for (int i = 0; i < 260; i++) {
             File f = new File(dir, "file_" + i + ".txt");
-            Files.writeString(f.toPath(), "content " + i);
+            try {
+                Files.writeString(f.toPath(), "content " + i);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
             files.add(new Object[] {f, "file_" + i + ".txt"});
         }
 
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(256, written, "Should be limited to MAX_ENTRIES_PER_BATCH (256)");
+        assertThrows(IllegalArgumentException.class,
+                () -> BatchTransferSession.buildBatch(files, 65536));
     }
 
     @Test

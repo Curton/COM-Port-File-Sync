@@ -50,7 +50,14 @@ public class BatchTransferSession {
         out.write(MAGIC[3]);
         out.write(VERSION);
 
-        int count = Math.min(files.size(), MAX_ENTRIES_PER_BATCH);
+        if (files.size() > MAX_ENTRIES_PER_BATCH) {
+            throw new IllegalArgumentException(
+                    "Batch exceeds maximum entries: "
+                            + files.size()
+                            + " > "
+                            + MAX_ENTRIES_PER_BATCH);
+        }
+        int count = files.size();
         byte[] countBytes = ByteBuffer.allocate(4).putInt(count).array();
         out.write(countBytes[0]);
         out.write(countBytes[1]);
