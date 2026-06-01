@@ -484,8 +484,8 @@ public class SyncCoordinator {
             // writes
             applyConflictResolutionsToLocalFiles(syncPlan, syncFolder);
 
-            int totalOperations = syncPlan.getTotalOperations();
-            if (totalOperations == 0) {
+            int rawTotalOperations = syncPlan.getTotalOperations();
+            if (rawTotalOperations == 0) {
                 eventBus.post(new SyncEvent.LogEvent("No files need to be synced or deleted"));
                 eventBus.post(new SyncEvent.SyncCompleteEvent());
                 syncing.set(false);
@@ -504,6 +504,7 @@ public class SyncCoordinator {
             List<FileChangeDetector.FileInfo> filesToTransfer = syncPlan.getFilesToTransfer();
             List<FileChangeDetector.FileInfo> regularFiles = new ArrayList<>();
             List<FileChangeDetector.FileInfo> conflictFiles = new ArrayList<>();
+            int skippedCount = 0;
             for (FileChangeDetector.FileInfo fi : filesToTransfer) {
                 ConflictInfo conflict = syncPlan.getConflict(fi.getPath());
                 if (conflict != null
@@ -516,6 +517,7 @@ public class SyncCoordinator {
                     // Do not transfer files where the user chose to keep the remote
                     // version or skip entirely. Sending the local version would
                     // overwrite the remote's newer content.
+                    skippedCount++;
                     eventBus.post(
                             new SyncEvent.LogEvent(
                                     "Skipping transfer for "
@@ -527,6 +529,12 @@ public class SyncCoordinator {
                     regularFiles.add(fi);
                 }
             }
+            // totalOperations is derived from filesToTransfer.size() and includes
+            // KEEP_REMOTE/SKIP files that we just dropped above, so adjust the
+            // denominator to match the work actually being performed. Wrapped in
+            // a 1-element array so batch progress lambdas can capture the latest
+            // value (they're defined further down and read the current total).
+            final int[] totalOperationsRef = {rawTotalOperations - skippedCount};
 
             // Send conflicted/merged files individually (each may have unique merged content)
             for (FileChangeDetector.FileInfo fileInfo : conflictFiles) {
@@ -543,14 +551,15 @@ public class SyncCoordinator {
                         "Syncing (merged) ["
                                 + operationIndex
                                 + "/"
-                                + totalOperations
+                                + totalOperationsRef[0]
                                 + "]: "
                                 + filePath;
                 if (wasCompressed) msg += " (compressed)";
                 msg += String.format(" [%dms]", fileSendMs);
                 eventBus.post(new SyncEvent.LogEvent(msg));
                 eventBus.post(
-                        new SyncEvent.FileProgressEvent(operationIndex, totalOperations, filePath));
+                        new SyncEvent.FileProgressEvent(
+                                operationIndex, totalOperationsRef[0], filePath));
                 flushSharedTextBetweenOperations();
             }
 
@@ -579,12 +588,12 @@ public class SyncCoordinator {
                                                     "Batch ["
                                                             + current
                                                             + "/"
-                                                            + totalOperations
+                                                            + totalOperationsRef[0]
                                                             + "]: "
                                                             + relPath));
                                     eventBus.post(
                                             new SyncEvent.FileProgressEvent(
-                                                    current, totalOperations, relPath));
+                                                    current, totalOperationsRef[0], relPath));
                                 };
                         long batchStart = System.currentTimeMillis();
                         int inBatch = batch.size();
@@ -633,14 +642,14 @@ public class SyncCoordinator {
                                                     "Syncing (fallback) ["
                                                             + savedOpIndex
                                                             + "/"
-                                                            + totalOperations
+                                                            + totalOperationsRef[0]
                                                             + "]: "
                                                             + rp
                                                             + String.format(" [%dms]", ms)));
                                 }
                                 eventBus.post(
                                         new SyncEvent.FileProgressEvent(
-                                                savedOpIndex, totalOperations, rp));
+                                                savedOpIndex, totalOperationsRef[0], rp));
                             }
                             if (anyFileFailed) {
                                 protocol.sendTransferCancel();
@@ -676,12 +685,12 @@ public class SyncCoordinator {
                                                 "Batch ["
                                                         + current
                                                         + "/"
-                                                        + totalOperations
+                                                        + totalOperationsRef[0]
                                                         + "]: "
                                                         + relPath));
                                 eventBus.post(
                                         new SyncEvent.FileProgressEvent(
-                                                current, totalOperations, relPath));
+                                                current, totalOperationsRef[0], relPath));
                             };
                     int inBatch = batch.size();
                     long batchStart = System.currentTimeMillis();
@@ -727,14 +736,14 @@ public class SyncCoordinator {
                                                 "Syncing (fallback) ["
                                                         + savedOpIndex
                                                         + "/"
-                                                        + totalOperations
+                                                        + totalOperationsRef[0]
                                                         + "]: "
                                                         + rp
                                                         + String.format(" [%dms]", ms)));
                             }
                             eventBus.post(
                                     new SyncEvent.FileProgressEvent(
-                                            savedOpIndex, totalOperations, rp));
+                                            savedOpIndex, totalOperationsRef[0], rp));
                         }
                         if (anyFileFailed) {
                             protocol.sendTransferCancel();
@@ -768,12 +777,12 @@ public class SyncCoordinator {
                                 "Creating dir ["
                                         + operationIndex
                                         + "/"
-                                        + totalOperations
+                                        + totalOperationsRef[0]
                                         + "]: "
                                         + dirPath));
                 eventBus.post(
                         new SyncEvent.FileProgressEvent(
-                                operationIndex, totalOperations, "[DIR] " + dirPath));
+                                operationIndex, totalOperationsRef[0], "[DIR] " + dirPath));
                 protocol.sendMkdir(dirPath);
                 flushSharedTextBetweenOperations();
             }
@@ -787,12 +796,12 @@ public class SyncCoordinator {
                                 "Deleting ["
                                         + operationIndex
                                         + "/"
-                                        + totalOperations
+                                        + totalOperationsRef[0]
                                         + "]: "
                                         + pathToDelete));
                 eventBus.post(
                         new SyncEvent.FileProgressEvent(
-                                operationIndex, totalOperations, "[DEL] " + pathToDelete));
+                                operationIndex, totalOperationsRef[0], "[DEL] " + pathToDelete));
                 protocol.sendFileDelete(pathToDelete);
                 flushSharedTextBetweenOperations();
             }
@@ -806,12 +815,12 @@ public class SyncCoordinator {
                                 "Deleting dir ["
                                         + operationIndex
                                         + "/"
-                                        + totalOperations
+                                        + totalOperationsRef[0]
                                         + "]: "
                                         + dirToDelete));
                 eventBus.post(
                         new SyncEvent.FileProgressEvent(
-                                operationIndex, totalOperations, "[RMDIR] " + dirToDelete));
+                                operationIndex, totalOperationsRef[0], "[RMDIR] " + dirToDelete));
                 protocol.sendRmdir(dirToDelete);
                 flushSharedTextBetweenOperations();
             }

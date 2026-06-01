@@ -4,8 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.isA;
@@ -23,6 +25,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -898,6 +901,101 @@ class SyncCoordinatorTest {
         } catch (IOException e) {
             assertEquals("Please select a sync folder first", e.getMessage());
         }
+    }
+
+    // ========== Bug reproduction: progress counting when conflicts are SKIP / KEEP_REMOTE ==========
+
+    @Test
+    void performSync_progressEventReachesTotalOperations_evenWithSkippedConflicts() throws IOException {
+        // Build a plan with 5 files: 2 of them are KEEP_REMOTE (skipped), 3 are normal.
+        // The bug is that totalOperations is computed from filesToTransfer.size() (=5),
+        // but the 2 KEEP_REMOTE files are silently dropped, so the progress index
+        // never advances past 3, breaking the [i/N] reporting and the progress bar.
+        List<FileChangeDetector.FileInfo> filesToTransfer = new ArrayList<>();
+        filesToTransfer.add(new FileChangeDetector.FileInfo("keepRemote1.txt", 10L, 1L, "h1"));
+        filesToTransfer.add(new FileChangeDetector.FileInfo("normal1.txt", 10L, 1L, "h2"));
+        filesToTransfer.add(new FileChangeDetector.FileInfo("keepRemote2.txt", 10L, 1L, "h3"));
+        filesToTransfer.add(new FileChangeDetector.FileInfo("normal2.txt", 10L, 1L, "h4"));
+        filesToTransfer.add(new FileChangeDetector.FileInfo("normal3.txt", 10L, 1L, "h5"));
+
+        for (FileChangeDetector.FileInfo fi : filesToTransfer) {
+            Files.writeString(new File(syncFolder, fi.getPath()).toPath(), "x");
+        }
+
+        List<ConflictInfo> conflicts = new ArrayList<>();
+        ConflictInfo keepRemoteA = new ConflictInfo("keepRemote1.txt", filesToTransfer.get(0),
+                filesToTransfer.get(0), false, "x".getBytes());
+        keepRemoteA.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+        keepRemoteA.setApplyTarget(ConflictInfo.ApplyTarget.REMOTE_ONLY);
+        keepRemoteA.setRemoteContent("remote".getBytes());
+        conflicts.add(keepRemoteA);
+
+        ConflictInfo keepRemoteB = new ConflictInfo("keepRemote2.txt", filesToTransfer.get(2),
+                filesToTransfer.get(2), false, "x".getBytes());
+        keepRemoteB.setResolution(ConflictInfo.Resolution.SKIP);
+        conflicts.add(keepRemoteB);
+
+        SyncPreviewPlan plan = new SyncPreviewPlan(
+                filesToTransfer,
+                Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                50L,
+                false,
+                conflicts);
+
+        assertEquals(5, plan.getTotalOperations(),
+                "Sanity check: totalOperations should count all 5 filesToTransfer pre-filter");
+
+        // Mock protocol: sendBatch returns true and invokes the callback once per file
+        // so progress events are emitted exactly as they would be in a real run.
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class)))
+                .thenAnswer(
+                        invocation -> {
+                            BatchTransferSession.BatchProgressCallback cb =
+                                    invocation.getArgument(2);
+                            @SuppressWarnings("unchecked")
+                            List<Object[]> batch = invocation.getArgument(0);
+                            int size = batch.size();
+                            for (int i = 0; i < size; i++) {
+                                String relPath = (String) batch.get(i)[1];
+                                cb.onEntryProcessed(i, size, relPath);
+                            }
+                            return true;
+                        });
+
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.setExecutor(null);
+
+        coordinator.startSyncWithPlan(plan);
+
+        // Find the maximum currentFile across all FileProgressEvents.
+        int maxCurrent = 0;
+        int totalFilesReported = -1;
+        boolean anyProgressEvent = false;
+        for (SyncEvent e : postedEvents) {
+            if (e instanceof SyncEvent.FileProgressEvent) {
+                anyProgressEvent = true;
+                SyncEvent.FileProgressEvent fpe = (SyncEvent.FileProgressEvent) e;
+                if (fpe.getCurrentFile() > maxCurrent) {
+                    maxCurrent = fpe.getCurrentFile();
+                }
+                totalFilesReported = fpe.getTotalFiles();
+            }
+        }
+
+        assertTrue(anyProgressEvent, "Expected at least one FileProgressEvent");
+        // The bug: totalFilesReported is 5 (pre-filter) but maxCurrent caps at 3.
+        // After the fix, totalFilesReported should equal the number of operations
+        // actually executed (5 - 2 skipped = 3) and maxCurrent should match it.
+        assertEquals(totalFilesReported, maxCurrent,
+                "max currentFile should reach totalFiles (got max=" + maxCurrent
+                        + ", total=" + totalFilesReported + ")");
     }
 
     // ========== Helper method ==========
