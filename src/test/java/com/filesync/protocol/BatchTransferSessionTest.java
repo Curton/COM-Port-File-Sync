@@ -342,4 +342,119 @@ class BatchTransferSessionTest {
                 thrown.getMessage().contains("Unexpected end of batch stream"),
                 "Should report truncated data");
     }
+
+    @Test
+    void decodeBatchRejectsHugeEntryDataLength() {
+        // Magic(4) + Version(1) + Count(4) = 9 bytes header, then 1 entry with bogus huge LEN.
+        // LEN is set to Integer.MAX_VALUE which would OOM if accepted.
+        byte[] batch = new byte[] {
+            0x42, 0x54, 0x48, 0x00, // magic
+            0x01,                   // version
+            0x00, 0x00, 0x00, 0x01, // count = 1
+            0x00, 0x01,             // path len = 1
+            (byte) 'a',             // path
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // lastModified
+            0x00,                   // flags
+            (byte) 0x7F, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF // dataLen = Integer.MAX_VALUE
+        };
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Invalid data length"),
+                "Should reject oversized data length, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void decodeBatchRejectsNegativeEntryDataLength() {
+        byte[] batch = new byte[] {
+            0x42, 0x54, 0x48, 0x00, // magic
+            0x01,                   // version
+            0x00, 0x00, 0x00, 0x01, // count = 1
+            0x00, 0x01,             // path len = 1
+            (byte) 'a',             // path
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // lastModified
+            0x00,                   // flags
+            (byte) 0x80, 0x00, 0x00, 0x00 // dataLen = Integer.MIN_VALUE
+        };
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Invalid data length"),
+                "Should reject negative data length, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void decodeBatchRejectsEntryCountOverMax() {
+        // count = 257 (one over MAX_ENTRIES_PER_BATCH = 256)
+        byte[] batch = new byte[] {
+            0x42, 0x54, 0x48, 0x00, // magic
+            0x01,                   // version
+            0x00, 0x00, 0x01, 0x01  // count = 257
+        };
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Invalid batch entry count"),
+                "Should reject entry count over max, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void decodeBatchRejectsNegativeEntryCount() {
+        byte[] batch = new byte[] {
+            0x42, 0x54, 0x48, 0x00, // magic
+            0x01,                   // version
+            (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF // count = -1
+        };
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Invalid batch entry count"),
+                "Should reject negative entry count, got: " + thrown.getMessage());
+    }
+
+    @Test
+    void decodeBatchRejectsHugePathLength() {
+        // pathLen = 65535 (max of unsigned 2-byte) but no actual path bytes follow
+        byte[] batch = new byte[] {
+            0x42, 0x54, 0x48, 0x00, // magic
+            0x01,                   // version
+            0x00, 0x00, 0x00, 0x01, // count = 1
+            (byte) 0xFF, (byte) 0xFF // path len = 65535
+        };
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Invalid path length"),
+                "Should reject oversized path length, got: " + thrown.getMessage());
+    }
 }

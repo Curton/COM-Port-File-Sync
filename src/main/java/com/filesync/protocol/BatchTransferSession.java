@@ -30,6 +30,15 @@ public class BatchTransferSession {
     private static final int VERSION = 1;
     private static final int MAX_ENTRIES_PER_BATCH = 256;
 
+    /** Hard ceiling on total decoded batch size (defense in depth against OOM). */
+    private static final int MAX_BATCH_TOTAL_BYTES = 64 * 1024 * 1024; // 64 MB
+
+    /** Hard ceiling on a single entry's data payload. */
+    private static final int MAX_ENTRY_DATA_BYTES = 64 * 1024 * 1024; // 64 MB
+
+    /** Reasonable upper bound for a relative path within a batch entry. */
+    private static final int MAX_PATH_LENGTH = 4096;
+
     private BatchTransferSession() {}
 
     /**
@@ -148,6 +157,10 @@ public class BatchTransferSession {
             int totalEntries,
             BatchProgressCallback progressCallback)
             throws IOException {
+        if (batch.length > MAX_BATCH_TOTAL_BYTES) {
+            throw new IOException(
+                    "Batch payload too large: " + batch.length + " bytes (max: " + MAX_BATCH_TOTAL_BYTES + ")");
+        }
         java.io.ByteArrayInputStream in = new java.io.ByteArrayInputStream(batch);
 
         // Verify magic
@@ -168,6 +181,10 @@ public class BatchTransferSession {
         byte[] countBuf = new byte[4];
         readFully(in, countBuf);
         int count = ByteBuffer.wrap(countBuf).getInt();
+        if (count < 0 || count > MAX_ENTRIES_PER_BATCH) {
+            throw new IOException(
+                    "Invalid batch entry count: " + count + " (max: " + MAX_ENTRIES_PER_BATCH + ")");
+        }
 
         int written = 0;
         for (int i = 0; i < count; i++) {
@@ -175,6 +192,10 @@ public class BatchTransferSession {
             byte[] pathLenBuf = new byte[2];
             readFully(in, pathLenBuf);
             int pathLen = ByteBuffer.wrap(pathLenBuf).getShort() & 0xFFFF;
+            if (pathLen < 0 || pathLen > MAX_PATH_LENGTH || pathLen > in.available()) {
+                throw new IOException(
+                        "Invalid path length in batch entry: " + pathLen);
+            }
 
             // PATH
             byte[] pathBytes = new byte[pathLen];
@@ -197,6 +218,12 @@ public class BatchTransferSession {
             byte[] lenBuf = new byte[4];
             readFully(in, lenBuf);
             int dataLen = ByteBuffer.wrap(lenBuf).getInt();
+            if (dataLen < 0 || dataLen > MAX_ENTRY_DATA_BYTES || dataLen > in.available()) {
+                throw new IOException(
+                        "Invalid data length in batch entry: " + dataLen
+                                + " (max: " + MAX_ENTRY_DATA_BYTES
+                                + ", remaining: " + in.available() + ")");
+            }
 
             // DATA
             byte[] data = new byte[dataLen];
