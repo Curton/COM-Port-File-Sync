@@ -46,6 +46,7 @@ public class FileSyncManager {
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
     private final AtomicBoolean wasManuallyDisconnected = new AtomicBoolean(false);
+    private final AtomicBoolean remoteInitiatedDisconnect = new AtomicBoolean(false);
     private final AtomicBoolean syncCancelInProgress = new AtomicBoolean(false);
     private final AtomicBoolean reconnectAttempted = new AtomicBoolean(false);
 
@@ -254,6 +255,7 @@ public class FileSyncManager {
 
         if (isFreshConnect) {
             wasManuallyDisconnected.set(false);
+            remoteInitiatedDisconnect.set(false);
             reconnectAttempted.set(false);
         }
         this.lastPortName = portName;
@@ -719,8 +721,12 @@ public class FileSyncManager {
             }
             case SyncProtocol.CMD_HEARTBEAT -> connectionService.handleHeartbeat();
             case SyncProtocol.CMD_HEARTBEAT_ACK -> connectionService.handleHeartbeatAck();
-            case SyncProtocol.CMD_DISCONNECT ->
-                    connectionService.reportCommunicationFailure("Connection closed by remote");
+            case SyncProtocol.CMD_DISCONNECT -> {
+                // The remote side intentionally closed the connection. Mark it so that
+                // onConnectionLost tears down without attempting an automatic reconnect.
+                remoteInitiatedDisconnect.set(true);
+                connectionService.reportCommunicationFailure("Connection closed by remote");
+            }
             case SyncProtocol.CMD_ROLE_NEGOTIATE -> {
                 long remotePriority = msg.getParamAsLong(0);
                 long remoteTieBreaker = msg.getParamAsLong(1);
@@ -789,7 +795,9 @@ public class FileSyncManager {
         if (syncCancelInProgress.get()) {
             return;
         }
-        if (wasManuallyDisconnected.get()) {
+        if (wasManuallyDisconnected.get() || remoteInitiatedDisconnect.get()) {
+            // Either the local user disconnected, or the remote side actively closed the
+            // connection. In both cases we tear down cleanly without auto-reconnecting.
             resetSyncStateForLinkTransition(false);
             stopListening();
             return;
