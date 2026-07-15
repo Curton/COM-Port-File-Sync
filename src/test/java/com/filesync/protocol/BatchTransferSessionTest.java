@@ -255,7 +255,8 @@ class BatchTransferSessionTest {
             files.add(new Object[] {f, "file_" + i + ".txt"});
         }
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> BatchTransferSession.buildBatch(files, 65536));
     }
 
@@ -347,16 +348,34 @@ class BatchTransferSessionTest {
     void decodeBatchRejectsHugeEntryDataLength() {
         // Magic(4) + Version(1) + Count(4) = 9 bytes header, then 1 entry with bogus huge LEN.
         // LEN is set to Integer.MAX_VALUE which would OOM if accepted.
-        byte[] batch = new byte[] {
-            0x42, 0x54, 0x48, 0x00, // magic
-            0x01,                   // version
-            0x00, 0x00, 0x00, 0x01, // count = 1
-            0x00, 0x01,             // path len = 1
-            (byte) 'a',             // path
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // lastModified
-            0x00,                   // flags
-            (byte) 0x7F, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF // dataLen = Integer.MAX_VALUE
-        };
+        byte[] batch =
+                new byte[] {
+                    0x42,
+                    0x54,
+                    0x48,
+                    0x00, // magic
+                    0x01, // version
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x01, // count = 1
+                    0x00,
+                    0x01, // path len = 1
+                    (byte) 'a', // path
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00, // lastModified
+                    0x00, // flags
+                    (byte) 0x7F,
+                    (byte) 0xFF,
+                    (byte) 0xFF,
+                    (byte) 0xFF // dataLen = Integer.MAX_VALUE
+                };
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -372,16 +391,34 @@ class BatchTransferSessionTest {
 
     @Test
     void decodeBatchRejectsNegativeEntryDataLength() {
-        byte[] batch = new byte[] {
-            0x42, 0x54, 0x48, 0x00, // magic
-            0x01,                   // version
-            0x00, 0x00, 0x00, 0x01, // count = 1
-            0x00, 0x01,             // path len = 1
-            (byte) 'a',             // path
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // lastModified
-            0x00,                   // flags
-            (byte) 0x80, 0x00, 0x00, 0x00 // dataLen = Integer.MIN_VALUE
-        };
+        byte[] batch =
+                new byte[] {
+                    0x42,
+                    0x54,
+                    0x48,
+                    0x00, // magic
+                    0x01, // version
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x01, // count = 1
+                    0x00,
+                    0x01, // path len = 1
+                    (byte) 'a', // path
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00, // lastModified
+                    0x00, // flags
+                    (byte) 0x80,
+                    0x00,
+                    0x00,
+                    0x00 // dataLen = Integer.MIN_VALUE
+                };
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -398,11 +435,18 @@ class BatchTransferSessionTest {
     @Test
     void decodeBatchRejectsEntryCountOverMax() {
         // count = 257 (one over MAX_ENTRIES_PER_BATCH = 256)
-        byte[] batch = new byte[] {
-            0x42, 0x54, 0x48, 0x00, // magic
-            0x01,                   // version
-            0x00, 0x00, 0x01, 0x01  // count = 257
-        };
+        byte[] batch =
+                new byte[] {
+                    0x42,
+                    0x54,
+                    0x48,
+                    0x00, // magic
+                    0x01, // version
+                    0x00,
+                    0x00,
+                    0x01,
+                    0x01 // count = 257
+                };
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -418,11 +462,18 @@ class BatchTransferSessionTest {
 
     @Test
     void decodeBatchRejectsNegativeEntryCount() {
-        byte[] batch = new byte[] {
-            0x42, 0x54, 0x48, 0x00, // magic
-            0x01,                   // version
-            (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF // count = -1
-        };
+        byte[] batch =
+                new byte[] {
+                    0x42,
+                    0x54,
+                    0x48,
+                    0x00, // magic
+                    0x01, // version
+                    (byte) 0xFF,
+                    (byte) 0xFF,
+                    (byte) 0xFF,
+                    (byte) 0xFF // count = -1
+                };
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -439,12 +490,20 @@ class BatchTransferSessionTest {
     @Test
     void decodeBatchRejectsHugePathLength() {
         // pathLen = 65535 (max of unsigned 2-byte) but no actual path bytes follow
-        byte[] batch = new byte[] {
-            0x42, 0x54, 0x48, 0x00, // magic
-            0x01,                   // version
-            0x00, 0x00, 0x00, 0x01, // count = 1
-            (byte) 0xFF, (byte) 0xFF // path len = 65535
-        };
+        byte[] batch =
+                new byte[] {
+                    0x42,
+                    0x54,
+                    0x48,
+                    0x00, // magic
+                    0x01, // version
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x01, // count = 1
+                    (byte) 0xFF,
+                    (byte) 0xFF // path len = 65535
+                };
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();

@@ -159,7 +159,11 @@ public class BatchTransferSession {
             throws IOException {
         if (batch.length > MAX_BATCH_TOTAL_BYTES) {
             throw new IOException(
-                    "Batch payload too large: " + batch.length + " bytes (max: " + MAX_BATCH_TOTAL_BYTES + ")");
+                    "Batch payload too large: "
+                            + batch.length
+                            + " bytes (max: "
+                            + MAX_BATCH_TOTAL_BYTES
+                            + ")");
         }
         java.io.ByteArrayInputStream in = new java.io.ByteArrayInputStream(batch);
 
@@ -183,7 +187,11 @@ public class BatchTransferSession {
         int count = ByteBuffer.wrap(countBuf).getInt();
         if (count < 0 || count > MAX_ENTRIES_PER_BATCH) {
             throw new IOException(
-                    "Invalid batch entry count: " + count + " (max: " + MAX_ENTRIES_PER_BATCH + ")");
+                    "Invalid batch entry count: "
+                            + count
+                            + " (max: "
+                            + MAX_ENTRIES_PER_BATCH
+                            + ")");
         }
 
         int written = 0;
@@ -193,8 +201,7 @@ public class BatchTransferSession {
             readFully(in, pathLenBuf);
             int pathLen = ByteBuffer.wrap(pathLenBuf).getShort() & 0xFFFF;
             if (pathLen < 0 || pathLen > MAX_PATH_LENGTH || pathLen > in.available()) {
-                throw new IOException(
-                        "Invalid path length in batch entry: " + pathLen);
+                throw new IOException("Invalid path length in batch entry: " + pathLen);
             }
 
             // PATH
@@ -220,9 +227,13 @@ public class BatchTransferSession {
             int dataLen = ByteBuffer.wrap(lenBuf).getInt();
             if (dataLen < 0 || dataLen > MAX_ENTRY_DATA_BYTES || dataLen > in.available()) {
                 throw new IOException(
-                        "Invalid data length in batch entry: " + dataLen
-                                + " (max: " + MAX_ENTRY_DATA_BYTES
-                                + ", remaining: " + in.available() + ")");
+                        "Invalid data length in batch entry: "
+                                + dataLen
+                                + " (max: "
+                                + MAX_ENTRY_DATA_BYTES
+                                + ", remaining: "
+                                + in.available()
+                                + ")");
             }
 
             // DATA

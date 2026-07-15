@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -903,10 +902,12 @@ class SyncCoordinatorTest {
         }
     }
 
-    // ========== Bug reproduction: progress counting when conflicts are SKIP / KEEP_REMOTE ==========
+    // ========== Bug reproduction: progress counting when conflicts are SKIP / KEEP_REMOTE
+    // ==========
 
     @Test
-    void performSync_progressEventReachesTotalOperations_evenWithSkippedConflicts() throws IOException {
+    void performSync_progressEventReachesTotalOperations_evenWithSkippedConflicts()
+            throws IOException {
         // Build a plan with 5 files: 2 of them are KEEP_REMOTE (skipped), 3 are normal.
         // The bug is that totalOperations is computed from filesToTransfer.size() (=5),
         // but the 2 KEEP_REMOTE files are silently dropped, so the progress index
@@ -923,28 +924,41 @@ class SyncCoordinatorTest {
         }
 
         List<ConflictInfo> conflicts = new ArrayList<>();
-        ConflictInfo keepRemoteA = new ConflictInfo("keepRemote1.txt", filesToTransfer.get(0),
-                filesToTransfer.get(0), false, "x".getBytes());
+        ConflictInfo keepRemoteA =
+                new ConflictInfo(
+                        "keepRemote1.txt",
+                        filesToTransfer.get(0),
+                        filesToTransfer.get(0),
+                        false,
+                        "x".getBytes());
         keepRemoteA.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
         keepRemoteA.setApplyTarget(ConflictInfo.ApplyTarget.REMOTE_ONLY);
         keepRemoteA.setRemoteContent("remote".getBytes());
         conflicts.add(keepRemoteA);
 
-        ConflictInfo keepRemoteB = new ConflictInfo("keepRemote2.txt", filesToTransfer.get(2),
-                filesToTransfer.get(2), false, "x".getBytes());
+        ConflictInfo keepRemoteB =
+                new ConflictInfo(
+                        "keepRemote2.txt",
+                        filesToTransfer.get(2),
+                        filesToTransfer.get(2),
+                        false,
+                        "x".getBytes());
         keepRemoteB.setResolution(ConflictInfo.Resolution.SKIP);
         conflicts.add(keepRemoteB);
 
-        SyncPreviewPlan plan = new SyncPreviewPlan(
-                filesToTransfer,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                Collections.emptyList(),
-                50L,
-                false,
-                conflicts);
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        filesToTransfer,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        50L,
+                        false,
+                        conflicts);
 
-        assertEquals(5, plan.getTotalOperations(),
+        assertEquals(
+                5,
+                plan.getTotalOperations(),
                 "Sanity check: totalOperations should count all 5 filesToTransfer pre-filter");
 
         // Mock protocol: sendBatch returns true and invokes the callback once per file
@@ -993,9 +1007,14 @@ class SyncCoordinatorTest {
         // The bug: totalFilesReported is 5 (pre-filter) but maxCurrent caps at 3.
         // After the fix, totalFilesReported should equal the number of operations
         // actually executed (5 - 2 skipped = 3) and maxCurrent should match it.
-        assertEquals(totalFilesReported, maxCurrent,
-                "max currentFile should reach totalFiles (got max=" + maxCurrent
-                        + ", total=" + totalFilesReported + ")");
+        assertEquals(
+                totalFilesReported,
+                maxCurrent,
+                "max currentFile should reach totalFiles (got max="
+                        + maxCurrent
+                        + ", total="
+                        + totalFilesReported
+                        + ")");
     }
 
     // ========== Helper method ==========
