@@ -46,6 +46,7 @@ public class SyncProtocol {
     public static final String CMD_FOLDER_CHANGE = "FOLDER_CHANGE";
     public static final String CMD_FILE_CONTENT_REQ = "FILE_CONTENT_REQ";
     public static final String CMD_FILE_CONTENT_DATA = "FILE_CONTENT_DATA";
+    public static final String CMD_FILE_CONTENT_XFER = "FILE_CONTENT_XFER";
     public static final String CMD_DISCONNECT = "DISCONNECT";
     public static final String CMD_CANCEL = "CANCEL";
     public static final String CMD_BATCH_DATA = "BATCH_DATA";
@@ -822,6 +823,55 @@ public class SyncProtocol {
             }
         }
         return null;
+    }
+
+    /**
+     * Send file content via XMODEM for conflict resolution (large files). Sends a
+     * CMD_FILE_CONTENT_XFER with the file size, waits for ACK, then transfers via XMODEM.
+     *
+     * @param data the file content bytes
+     * @param fileSize the exact file size in bytes
+     */
+    public void sendFileContentViaXmodem(byte[] data, int fileSize) throws IOException {
+        sendCommand(CMD_FILE_CONTENT_XFER, String.valueOf(fileSize));
+        waitForCommand(CMD_ACK);
+        xmodemInProgress.set(true);
+        try {
+            boolean success = xmodem.send(data);
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to send file content via XMODEM (" + detail + ")");
+            }
+        } finally {
+            xmodemInProgress.set(false);
+        }
+    }
+
+    /**
+     * Receive file content via XMODEM for conflict resolution. Sends ACK, then receives via XMODEM.
+     *
+     * @param expectedSize the expected file size in bytes
+     * @return the file content bytes
+     */
+    public byte[] receiveFileContentViaXmodem(int expectedSize) throws IOException {
+        sendAck();
+        xmodemInProgress.set(true);
+        try {
+            byte[] data = xmodem.receive(expectedSize);
+            if (data == null) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "no detailed XMODEM error available";
+                }
+                throw new IOException("Failed to receive file content via XMODEM (" + detail + ")");
+            }
+            return data;
+        } finally {
+            xmodemInProgress.set(false);
+        }
     }
 
     /** Send direction change notification */

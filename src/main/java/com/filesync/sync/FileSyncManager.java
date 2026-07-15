@@ -27,6 +27,9 @@ public class FileSyncManager {
     private static final long RECONNECT_DELAY_MS = 5000L;
     private static final long RECONNECT_TIMEOUT_MS = 60000L;
 
+    /** Files above this size use XMODEM instead of inline Base64 for content requests. */
+    private static final long XMODEM_CONTENT_THRESHOLD = 64 * 1024;
+
     private final SerialPortManager serialPort;
     private final SyncProtocol protocol;
     private final SettingsManager settings;
@@ -475,9 +478,43 @@ public class FileSyncManager {
                     SyncProtocol.CMD_FILE_CONTENT_REQ,
                     SyncProtocol.encodePathForProtocol(relativePath));
 
-            String contentBase64 = protocol.waitForFileContentResponse(TIMEOUT_MS);
-            if (contentBase64 != null && !contentBase64.isEmpty()) {
-                return Base64.getDecoder().decode(contentBase64);
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < TIMEOUT_MS) {
+                SyncProtocol.Message msg = protocol.receiveCommand();
+                if (msg == null) {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                    continue;
+                }
+                String cmd = msg.getCommand();
+                if (SyncProtocol.CMD_FILE_CONTENT_DATA.equals(cmd)) {
+                    String contentBase64 = msg.getParam(1);
+                    if (contentBase64 != null && !contentBase64.isEmpty()) {
+                        return Base64.getDecoder().decode(contentBase64);
+                    }
+                    return null;
+                }
+                if (SyncProtocol.CMD_FILE_CONTENT_XFER.equals(cmd)) {
+                    int fileSize = msg.getParamAsInt(1);
+                    return protocol.receiveFileContentViaXmodem(fileSize);
+                }
+                if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
+                    return null;
+                }
+                if (SyncProtocol.CMD_ERROR.equals(cmd)) {
+                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException("Remote error during file content request: " + errMsg);
+                }
+                if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
+                    protocol.sendHeartbeatAck();
+                    connectionService.recordMessageActivity();
+                } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
+                    connectionService.recordMessageActivity();
+                }
             }
         } catch (IOException e) {
             eventBus.post(
@@ -625,7 +662,18 @@ public class FileSyncManager {
                                 return;
                             }
                             byte[] content = Files.readAllBytes(file.toPath());
-                            protocol.sendFileContentResponse(relativePath, content);
+                            if (fileSize > XMODEM_CONTENT_THRESHOLD) {
+                                eventBus.post(
+                                        new SyncEvent.LogEvent(
+                                                "Sending large file via XMODEM: "
+                                                        + relativePath
+                                                        + " ("
+                                                        + fileSize
+                                                        + " bytes)"));
+                                protocol.sendFileContentViaXmodem(content, (int) fileSize);
+                            } else {
+                                protocol.sendFileContentResponse(relativePath, content);
+                            }
                         } catch (IOException e) {
                             eventBus.post(
                                     new SyncEvent.LogEvent(
