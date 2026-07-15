@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Runs {@code git status --short --porcelain} in a working directory and parses the output into a
@@ -21,16 +22,35 @@ public final class GitStatusUtil {
 
     private GitStatusUtil() {}
 
+    /** Default deadline (ms) for a {@code git status} run; matches the folder-context timeout. */
+    static final long DEFAULT_TIMEOUT_MS = 5000L;
+
     /**
      * Run {@code git -C <workingDir> status --short --porcelain} and return the set of changed
-     * paths (relative to {@code workingDir}, forward-slash separated).
+     * paths (relative to {@code workingDir}, forward-slash separated). Enforces a 5s deadline.
      *
      * @param workingDir the repository working tree root (or any path inside it)
      * @return a possibly-empty set of changed relative paths
      * @throws IOException if git is not installed, {@code workingDir} is not inside a git
-     *     repository, or the command fails
+     *     repository, the command fails, or it does not finish within 5 seconds
      */
     public static Set<String> getChangedFiles(File workingDir) throws IOException {
+        return getChangedFiles(workingDir, DEFAULT_TIMEOUT_MS);
+    }
+
+    /**
+     * Run {@code git status --short --porcelain} in {@code workingDir} with an explicit deadline.
+     *
+     * <p>Output is drained on a daemon background thread so a hung or verbose process cannot
+     * deadlock the OS pipe buffer, and so the foreground {@link Process#waitFor(long, TimeUnit)}
+     * can actually enforce {@code timeoutMs}. If the deadline elapses the process is destroyed
+     * (then destroyed forcibly if still alive) and an {@link IOException} is thrown.
+     *
+     * @param timeoutMs maximum time to wait for git to terminate; {@code 0} reports a timeout
+     *     immediately when the just-started process has not yet exited (used by tests)
+     * @throws IOException on null working dir, git failure, interruption, or timeout
+     */
+    static Set<String> getChangedFiles(File workingDir, long timeoutMs) throws IOException {
         if (workingDir == null) {
             throw new IOException("workingDir is null");
         }
@@ -46,21 +66,54 @@ public final class GitStatusUtil {
                         .redirectErrorStream(true);
         pb.directory(dir);
         Process process = pb.start();
+
+        // Drain stdout/stderr on a daemon thread so a hung or chatty git can't block the pipe and
+        // waitFor(timeoutMs) below enforces the deadline rather than waiting on EOF.
         StringBuilder output = new StringBuilder();
-        try (BufferedReader reader =
-                new BufferedReader(
-                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append('\n');
-            }
-        }
-        int exitCode;
+        Thread drain =
+                new Thread(
+                        () -> {
+                            try (BufferedReader reader =
+                                    new BufferedReader(
+                                            new InputStreamReader(
+                                                    process.getInputStream(),
+                                                    StandardCharsets.UTF_8))) {
+                                String line;
+                                while ((line = reader.readLine()) != null) {
+                                    output.append(line).append('\n');
+                                }
+                            } catch (IOException ignored) {
+                                // Best-effort drain; failures surface via exit code or timeout.
+                            }
+                        },
+                        "GitStatusUtil-drain");
+        drain.setDaemon(true);
+        drain.start();
+
+        boolean finished;
         try {
-            exitCode = process.waitFor();
+            finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            process.destroy();
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
             throw new IOException("git status interrupted", e);
+        }
+        if (!finished) {
+            process.destroy();
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+            throw new IOException("timed out after " + (timeoutMs / 1000) + "s");
+        }
+        int exitCode = process.exitValue();
+        // The process has terminated; let the drain thread reach EOF and finish capturing output.
+        try {
+            drain.join(1000L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
         if (exitCode != 0) {
             String msg = output.toString().trim();

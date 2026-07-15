@@ -8,7 +8,6 @@ import com.filesync.sync.SyncPreviewPlan;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
-import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -22,7 +21,6 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
-import javax.swing.JTextArea;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
@@ -72,33 +70,19 @@ public class SyncPreviewRenderer {
         this(owner, null);
     }
 
-    public SyncPreviewPlan showSyncPreviewDialog(
-            SyncPreviewPlan syncPreview, boolean requireConfirmation) {
-        if (!requireConfirmation) {
-            JTextArea previewArea = createSyncPreviewTextArea(syncPreview);
-            JOptionPane.showMessageDialog(
-                    owner, previewArea, "Sync Preview", JOptionPane.INFORMATION_MESSAGE);
-            return syncPreview;
-        }
-
-        List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
-        DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
-
-        JPanel previewPanel = createPreviewPanel(previewModel, rows, null);
-        int response = showPreviewOptionDialog(previewPanel);
-
-        if (response != 0) {
-            return null;
-        }
-        return createFilteredSyncPlan(syncPreview, previewModel, rows);
-    }
-
     public SyncPreviewResult showSyncPreviewDialogWithResult(
             SyncPreviewPlan syncPreview, File syncFolder) {
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
 
-        JPanel previewPanel = createPreviewPanel(previewModel, rows, syncFolder);
+        JLabel selectionSummary = new JLabel();
+        JPanel previewPanel = createPreviewPanel(previewModel, rows, syncFolder, selectionSummary);
+
+        // Auto-default: launch the git-based selection off the EDT right before showing the modal
+        // dialog. The SwingWorker's done() is dispatched by the modal dialog's nested event pump,
+        // flipping checkboxes to git's changed set (or leaving them unchecked on failure/timeout).
+        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary);
+
         int response = showPreviewOptionDialog(previewPanel);
 
         if (response != 0) {
@@ -109,9 +93,11 @@ public class SyncPreviewRenderer {
     }
 
     private JPanel createPreviewPanel(
-            DefaultTableModel previewModel, List<SyncPreviewRow> rows, File syncFolder) {
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            File syncFolder,
+            JLabel selectionSummary) {
         JTable previewTable = createPreviewTable(previewModel);
-        JLabel selectionSummary = new JLabel();
         updateSyncPreviewSummary(selectionSummary, previewModel, rows);
         previewModel.addTableModelListener(
                 event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
@@ -171,8 +157,7 @@ public class SyncPreviewRenderer {
                 "Select only files reported by 'git status --short' in the sync folder");
         selectGitButton.addActionListener(
                 event ->
-                        runGitBasedSelection(
-                                previewModel, rows, syncFolder, selectionSummary, selectGitButton));
+                        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary));
 
         javax.swing.JButton deselectAllButton = new javax.swing.JButton("Deselect All");
         deselectAllButton.addActionListener(event -> setPreviewSelection(previewModel, false));
@@ -188,20 +173,19 @@ public class SyncPreviewRenderer {
     /**
      * Run {@code git status --short} in {@code syncFolder} off the EDT, then set the preview
      * checkboxes to exactly the reported paths (matching rows are checked, all others unchecked).
-     * Errors (git not installed / not a repository) are reported inline via {@code summaryLabel} so
-     * the modal dialog is not disrupted.
+     * Errors (git not installed / not a repository / timeout) are reported inline via {@code
+     * summaryLabel} so the modal dialog is not disrupted. Used both by the "Select Changes (git)"
+     * button and as the dialog's auto-default selection.
      */
-    private void runGitBasedSelection(
+    private void triggerGitBasedSelection(
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             File syncFolder,
-            JLabel summaryLabel,
-            javax.swing.JButton triggerButton) {
+            JLabel summaryLabel) {
         if (syncFolder == null) {
             summaryLabel.setText("git: sync folder unknown");
             return;
         }
-        triggerButton.setEnabled(false);
         summaryLabel.setText("git: checking...");
         SwingWorker<Set<String>, Void> worker =
                 new SwingWorker<>() {
@@ -228,8 +212,6 @@ public class SyncPreviewRenderer {
                                 msg = cause.getClass().getSimpleName();
                             }
                             summaryLabel.setText("git: " + msg);
-                        } finally {
-                            triggerButton.setEnabled(true);
                         }
                     }
                 };
@@ -267,52 +249,6 @@ public class SyncPreviewRenderer {
                 "Start Sync");
     }
 
-    public JTextArea createSyncPreviewTextArea(SyncPreviewPlan syncPreview) {
-        StringBuilder previewText = new StringBuilder();
-        previewText.append("Sync Preview\n\n");
-
-        previewText
-                .append("Total size to transfer: ")
-                .append(UiFormatting.formatBytes(syncPreview.getTotalBytesToTransfer()))
-                .append("\n\n");
-
-        previewText
-                .append("Files to transfer (")
-                .append(syncPreview.getFilesToTransfer().size())
-                .append("):\n");
-        for (FileChangeDetector.FileInfo fileInfo : syncPreview.getFilesToTransfer()) {
-            previewText
-                    .append("  ")
-                    .append(fileInfo.getPath())
-                    .append(" (")
-                    .append(UiFormatting.formatBytes(fileInfo.getSize()))
-                    .append(")")
-                    .append("\n");
-        }
-        if (syncPreview.getFilesToTransfer().isEmpty()) {
-            previewText.append("  (none)\n");
-        }
-
-        previewText
-                .append("\nFiles to delete (Strict Mode, ")
-                .append(syncPreview.getFilesToDelete().size())
-                .append("):\n");
-        for (String path : syncPreview.getFilesToDelete()) {
-            previewText.append("  ").append(path).append("\n");
-        }
-        if (!syncPreview.isStrictSyncMode()) {
-            previewText.append("  (strict mode disabled; no remote-only files will be deleted)\n");
-        } else if (syncPreview.getFilesToDelete().isEmpty()) {
-            previewText.append("  (none)\n");
-        }
-
-        JTextArea previewArea = new JTextArea(previewText.toString(), 24, 100);
-        previewArea.setEditable(false);
-        previewArea.setLineWrap(false);
-        previewArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        return previewArea;
-    }
-
     public DefaultTableModel createSyncPreviewTableModel(List<SyncPreviewRow> rows) {
         DefaultTableModel model =
                 new DefaultTableModel(new String[] {"Sync", "Type", "Size", "Path"}, 0) {
@@ -326,13 +262,12 @@ public class SyncPreviewRenderer {
                         return column == 0;
                     }
                 };
+        // All rows start unchecked; the git-based auto-default (and the "Select Changes (git)"
+        // button) flips checkboxes after the dialog opens. No size-based pre-selection heuristic.
         for (SyncPreviewRow row : rows) {
-            boolean autoSelect =
-                    row.getOperationType() != SyncPreviewOperationType.CREATE_DIR
-                            && row.getSizeBytes() <= 256 * 1024;
             model.addRow(
                     new Object[] {
-                        autoSelect, row.getTypeLabel(), row.getSizeText(), row.getPath()
+                        Boolean.FALSE, row.getTypeLabel(), row.getSizeText(), row.getPath()
                     });
         }
         return model;

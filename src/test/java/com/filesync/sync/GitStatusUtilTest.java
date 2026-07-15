@@ -171,6 +171,23 @@ class GitStatusUtilTest {
         }
     }
 
+    @Test
+    void getChangedFilesTimesOutWhenDeadlineIsZero(@TempDir Path tempDir) throws Exception {
+        assumeTrue(isGitAvailable(), "git is not installed; skipping integration test");
+        // A real (empty) repository keeps `git status` a valid runnable command. With timeoutMs=0
+        // the package-private overload calls Process.waitFor(0, MILLISECONDS) immediately after
+        // start(), when the just-launched git process has not yet terminated, so waitFor returns
+        // false deterministically (no race with a fast exit) and the timeout path is taken.
+        File repo = tempDir.toFile();
+        runGit(repo, "init");
+        IOException ex =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        IOException.class, () -> GitStatusUtil.getChangedFiles(repo, 0L));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                ex.getMessage().contains("timed out"),
+                "expected a timeout message, got: " + ex.getMessage());
+    }
+
     /** Best-effort check that a {@code git} executable is on PATH. */
     private static boolean isGitAvailable() {
         try {
