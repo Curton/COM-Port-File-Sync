@@ -345,7 +345,8 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                                             + syncPreview.getTotalOperations());
 
                             SyncPreviewRenderer.SyncPreviewResult previewResult =
-                                    previewRenderer.showSyncPreviewDialogWithResult(syncPreview);
+                                    previewRenderer.showSyncPreviewDialogWithResult(
+                                            syncPreview, syncManager.getSyncFolder());
                             logController.log(
                                     "[DEBUG] runSyncPreview: previewResult="
                                             + (previewResult != null

@@ -3,12 +3,15 @@ package com.filesync.ui;
 import com.filesync.sync.ConflictAnalyzer;
 import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
+import com.filesync.sync.GitStatusUtil;
 import com.filesync.sync.SyncPreviewPlan;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.FontMetrics;
+import java.awt.event.MouseEvent;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -22,6 +25,8 @@ import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingConstants;
+import javax.swing.SwingWorker;
+import javax.swing.event.MouseInputAdapter;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
@@ -79,7 +84,7 @@ public class SyncPreviewRenderer {
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
 
-        JPanel previewPanel = createPreviewPanel(previewModel, rows);
+        JPanel previewPanel = createPreviewPanel(previewModel, rows, null);
         int response = showPreviewOptionDialog(previewPanel);
 
         if (response != 0) {
@@ -88,11 +93,12 @@ public class SyncPreviewRenderer {
         return createFilteredSyncPlan(syncPreview, previewModel, rows);
     }
 
-    public SyncPreviewResult showSyncPreviewDialogWithResult(SyncPreviewPlan syncPreview) {
+    public SyncPreviewResult showSyncPreviewDialogWithResult(
+            SyncPreviewPlan syncPreview, File syncFolder) {
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
 
-        JPanel previewPanel = createPreviewPanel(previewModel, rows);
+        JPanel previewPanel = createPreviewPanel(previewModel, rows, syncFolder);
         int response = showPreviewOptionDialog(previewPanel);
 
         if (response != 0) {
@@ -102,14 +108,15 @@ public class SyncPreviewRenderer {
         return new SyncPreviewResult(plan, previewModel, rows);
     }
 
-    private JPanel createPreviewPanel(DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
+    private JPanel createPreviewPanel(
+            DefaultTableModel previewModel, List<SyncPreviewRow> rows, File syncFolder) {
         JTable previewTable = createPreviewTable(previewModel);
         JLabel selectionSummary = new JLabel();
         updateSyncPreviewSummary(selectionSummary, previewModel, rows);
         previewModel.addTableModelListener(
                 event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
 
-        JPanel controlPanel = createControlPanel(previewModel, selectionSummary);
+        JPanel controlPanel = createControlPanel(previewModel, selectionSummary, rows, syncFolder);
         JScrollPane previewScroll = new JScrollPane(previewTable);
         previewScroll.setPreferredSize(new Dimension(720, 480));
 
@@ -129,20 +136,123 @@ public class SyncPreviewRenderer {
         previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
         previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        previewTable.addMouseListener(
+                new MouseInputAdapter() {
+                    @Override
+                    public void mouseClicked(MouseEvent e) {
+                        if (e.getClickCount() != 2) {
+                            return;
+                        }
+                        int row = previewTable.rowAtPoint(e.getPoint());
+                        if (row < 0) {
+                            return;
+                        }
+                        // Commit any in-progress checkbox edit so we read the latest value.
+                        if (previewTable.isEditing()) {
+                            previewTable.getCellEditor().stopCellEditing();
+                        }
+                        boolean current = Boolean.TRUE.equals(previewModel.getValueAt(row, 0));
+                        previewModel.setValueAt(!current, row, 0);
+                    }
+                });
         return previewTable;
     }
 
-    private JPanel createControlPanel(DefaultTableModel previewModel, JLabel selectionSummary) {
+    private JPanel createControlPanel(
+            DefaultTableModel previewModel,
+            JLabel selectionSummary,
+            List<SyncPreviewRow> rows,
+            File syncFolder) {
         javax.swing.JButton selectAllButton = new javax.swing.JButton("Select All");
         selectAllButton.addActionListener(event -> setPreviewSelection(previewModel, true));
+
+        javax.swing.JButton selectGitButton = new javax.swing.JButton("Select Changes (git)");
+        selectGitButton.setToolTipText(
+                "Select only files reported by 'git status --short' in the sync folder");
+        selectGitButton.addActionListener(
+                event ->
+                        runGitBasedSelection(
+                                previewModel, rows, syncFolder, selectionSummary, selectGitButton));
+
         javax.swing.JButton deselectAllButton = new javax.swing.JButton("Deselect All");
         deselectAllButton.addActionListener(event -> setPreviewSelection(previewModel, false));
 
         JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         controlPanel.add(selectAllButton);
+        controlPanel.add(selectGitButton);
         controlPanel.add(deselectAllButton);
         controlPanel.add(selectionSummary);
         return controlPanel;
+    }
+
+    /**
+     * Run {@code git status --short} in {@code syncFolder} off the EDT, then set the preview
+     * checkboxes to exactly the reported paths (matching rows are checked, all others unchecked).
+     * Errors (git not installed / not a repository) are reported inline via {@code summaryLabel} so
+     * the modal dialog is not disrupted.
+     */
+    private void runGitBasedSelection(
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            File syncFolder,
+            JLabel summaryLabel,
+            javax.swing.JButton triggerButton) {
+        if (syncFolder == null) {
+            summaryLabel.setText("git: sync folder unknown");
+            return;
+        }
+        triggerButton.setEnabled(false);
+        summaryLabel.setText("git: checking...");
+        SwingWorker<Set<String>, Void> worker =
+                new SwingWorker<>() {
+                    @Override
+                    protected Set<String> doInBackground() throws Exception {
+                        return GitStatusUtil.getChangedFiles(syncFolder);
+                    }
+
+                    @Override
+                    protected void done() {
+                        try {
+                            Set<String> changed = get();
+                            int matches = applyGitSelection(previewModel, rows, changed);
+                            summaryLabel.setText(
+                                    "git: matched "
+                                            + matches
+                                            + " of "
+                                            + changed.size()
+                                            + " changed file(s)");
+                        } catch (Exception e) {
+                            Throwable cause = e.getCause() != null ? e.getCause() : e;
+                            String msg = cause.getMessage();
+                            if (msg == null) {
+                                msg = cause.getClass().getSimpleName();
+                            }
+                            summaryLabel.setText("git: " + msg);
+                        } finally {
+                            triggerButton.setEnabled(true);
+                        }
+                    }
+                };
+        worker.execute();
+    }
+
+    /**
+     * Set each row's checkbox to true iff its path appears in {@code changedPaths}; all other rows
+     * are unchecked. Returns the number of rows that matched.
+     */
+    private int applyGitSelection(
+            DefaultTableModel previewModel, List<SyncPreviewRow> rows, Set<String> changedPaths) {
+        Set<String> effective = changedPaths != null ? changedPaths : Set.of();
+        int matches = 0;
+        for (int i = 0; i < previewModel.getRowCount(); i++) {
+            SyncPreviewRow row = rows.get(i);
+            boolean selected = row != null && effective.contains(row.getPath());
+            if (selected) {
+                matches++;
+            }
+            previewModel.setValueAt(selected, i, 0);
+        }
+        return matches;
     }
 
     private int showPreviewOptionDialog(JPanel previewPanel) {
