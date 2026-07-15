@@ -2,9 +2,12 @@ package com.filesync.sync;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -16,6 +19,7 @@ import java.nio.file.attribute.DosFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -307,10 +311,10 @@ public class FileChangeDetector {
             progressCallback.onStart(totalFiles.get());
         }
 
+        // Always create a hash pool: even in quick mode, text files are hashed (with line-ending
+        // normalization) so CRLF/LF differences are ignored; binary/unknown files skip hashing.
         ExecutorService hashExecutor =
-                resolvedOptions.isUseQuickHash()
-                        ? null
-                        : Executors.newFixedThreadPool(resolvedOptions.getHashThreadPoolSize());
+                Executors.newFixedThreadPool(resolvedOptions.getHashThreadPoolSize());
         List<Future<?>> hashTasks = new ArrayList<>();
 
         Files.walkFileTree(
@@ -367,21 +371,24 @@ public class FileChangeDetector {
                         long lastModified = fileObj.lastModified();
 
                         FileInfo cachedInfo = cachedFiles.get(relativePath);
-                        // Rsync-style: in quick mode we only rely on metadata and avoid per-file
-                        // checksums
-                        if (resolvedOptions.isUseQuickHash()
-                                || canReuseHash(cachedInfo, size, lastModified)) {
-                            String hash =
-                                    resolvedOptions.isUseQuickHash()
-                                            ? cachedInfo != null ? cachedInfo.getMd5() : null
-                                            : cachedInfo.getMd5();
+                        boolean quickMode = resolvedOptions.isUseQuickHash();
+                        // In quick mode only text-extension files are hashed (with line-ending
+                        // normalization) so CRLF/LF differences are ignored; binary and unknown
+                        // files rely on size + lastModified alone and are not read. In full mode
+                        // every file is hashed.
+                        boolean needsHash =
+                                !quickMode || CompressionUtil.isTextExtension(relativePath);
+
+                        if (needsHash && canReuseHash(cachedInfo, size, lastModified)) {
+                            // Metadata unchanged and a checksum is cached -> reuse without reading.
                             files.put(
                                     relativePath,
-                                    new FileInfo(relativePath, size, lastModified, hash));
+                                    new FileInfo(
+                                            relativePath, size, lastModified, cachedInfo.getMd5()));
                             markParentHasChild(relativePath, dirHasChildren);
                             reportProgress(
                                     relativePath, processedFiles, totalFiles, progressCallback);
-                        } else if (hashExecutor != null) {
+                        } else if (needsHash) {
                             Future<?> future =
                                     hashExecutor.submit(
                                             () -> {
@@ -410,7 +417,10 @@ public class FileChangeDetector {
                                             });
                             hashTasks.add(future);
                         } else {
-                            String hash = computeHash(resolvedOptions.getHasher(), fileObj);
+                            // Quick mode, non-text file: rely on size + lastModified only. Preserve
+                            // any previously cached checksum so a later full-mode pass can reuse
+                            // it.
+                            String hash = cachedInfo != null ? cachedInfo.getMd5() : null;
                             files.put(
                                     relativePath,
                                     new FileInfo(relativePath, size, lastModified, hash));
@@ -544,26 +554,133 @@ public class FileChangeDetector {
         return dirsToDelete;
     }
 
-    /** Calculate MD5 hash of a file */
+    /** Sample size (bytes) inspected to decide text vs. binary before hashing. */
+    private static final int BINARY_SAMPLE_SIZE = 4096;
+
+    /** Read buffer size for streaming file hashing. */
+    private static final int HASH_BUFFER_SIZE = 8192;
+
+    /**
+     * Calculate MD5 hash of a file.
+     *
+     * <p>For text files, line endings are normalized before hashing so that CRLF (Windows) and LF
+     * (Unix) variants of the same content produce identical hashes. Binary files are hashed using
+     * their raw bytes. The first {@value #BINARY_SAMPLE_SIZE} bytes are inspected to decide text
+     * vs. binary via {@link CompressionUtil#isLikelyBinaryContent(byte[])}.
+     */
     public static String calculateMD5(File file) throws IOException {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             try (FileInputStream fis = new FileInputStream(file)) {
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = fis.read(buffer)) != -1) {
-                    md.update(buffer, 0, bytesRead);
+                // Read a sample for binary detection.
+                byte[] sample = new byte[BINARY_SAMPLE_SIZE];
+                int sampleRead = readFully(fis, sample, 0, BINARY_SAMPLE_SIZE);
+
+                boolean binary = false;
+                if (sampleRead > 0) {
+                    // isLikelyBinaryContent inspects up to its own sample length, so pass an array
+                    // sized exactly to the bytes read (trailing zeros would skew the ratio).
+                    byte[] sampleForDetection =
+                            sampleRead == BINARY_SAMPLE_SIZE
+                                    ? sample
+                                    : Arrays.copyOf(sample, sampleRead);
+                    binary = CompressionUtil.isLikelyBinaryContent(sampleForDetection);
+                }
+
+                if (binary) {
+                    // Hash raw bytes: feed the sample we already consumed, then the remainder.
+                    if (sampleRead > 0) {
+                        md.update(sample, 0, sampleRead);
+                    }
+                    byte[] buffer = new byte[HASH_BUFFER_SIZE];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) != -1) {
+                        md.update(buffer, 0, bytesRead);
+                    }
+                } else {
+                    // Hash with line-ending normalization (CRLF / lone CR / LF all collapse to LF).
+                    byte[] outBuffer = new byte[HASH_BUFFER_SIZE];
+                    boolean pendingCR = false;
+                    if (sampleRead > 0) {
+                        pendingCR = updateNormalized(md, sample, sampleRead, outBuffer, pendingCR);
+                    }
+                    byte[] buffer = new byte[HASH_BUFFER_SIZE];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) != -1) {
+                        pendingCR = updateNormalized(md, buffer, bytesRead, outBuffer, pendingCR);
+                    }
+                    // Flush a trailing lone CR as LF.
+                    if (pendingCR) {
+                        md.update((byte) '\n');
+                    }
                 }
             }
-            byte[] digest = md.digest();
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return toHex(md.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("MD5 algorithm not available", e);
         }
+    }
+
+    /**
+     * Read up to {@code len} bytes into {@code buf[off..off+len)}, returning the number actually
+     * read. Unlike {@link java.io.InputStream#read(byte[], int, int)} this loops until either the
+     * requested length is filled or EOF is reached.
+     */
+    private static int readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
+        int total = 0;
+        while (total < len) {
+            int read = in.read(buf, off + total, len - total);
+            if (read == -1) {
+                break;
+            }
+            total += read;
+        }
+        return total;
+    }
+
+    /**
+     * Feed {@code chunk[0..len)} into {@code md} with line-ending normalization: CRLF, a lone CR,
+     * and a standalone LF all map to a single LF. Reuses {@code outBuffer} for normalized output
+     * (never larger than the input). Returns the updated pending-CR state so callers can carry it
+     * across chunk boundaries.
+     */
+    private static boolean updateNormalized(
+            MessageDigest md, byte[] chunk, int len, byte[] outBuffer, boolean pendingCR) {
+        int outLen = 0;
+        for (int i = 0; i < len; i++) {
+            int b = chunk[i] & 0xFF;
+            if (b == '\r') {
+                // A previous pending CR (lone CR not followed by LF) flushes as LF first.
+                if (pendingCR) {
+                    outBuffer[outLen++] = (byte) '\n';
+                }
+                pendingCR = true;
+            } else if (b == '\n') {
+                // Either CRLF (pending CR consumed) or a standalone LF -> single LF.
+                outBuffer[outLen++] = (byte) '\n';
+                pendingCR = false;
+            } else {
+                if (pendingCR) {
+                    // Lone CR followed by a non-LF byte -> LF then the byte.
+                    outBuffer[outLen++] = (byte) '\n';
+                    pendingCR = false;
+                }
+                outBuffer[outLen++] = (byte) b;
+            }
+        }
+        if (outLen > 0) {
+            md.update(outBuffer, 0, outLen);
+        }
+        return pendingCR;
+    }
+
+    /** Format a digest as a lowercase hex string. */
+    private static String toHex(byte[] digest) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : digest) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     /** Serialize manifest to JSON */
@@ -642,6 +759,18 @@ public class FileChangeDetector {
         }
         try {
             String json = Files.readString(manifestFile.toPath());
+            // Reject manifests persisted by an incompatible schema (e.g. pre line-ending
+            // normalization, which used raw-byte hashes) so stale hashes are never reused as a
+            // cache. Reading the version from the JSON tree directly avoids depending on Gson's
+            // final-field overwrite semantics.
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            if (!obj.has("schemaVersion")
+                    || obj.get("schemaVersion").getAsInt() != FileManifest.CURRENT_VERSION) {
+                System.err.println(
+                        "Discarding persisted manifest with incompatible schema: "
+                                + manifestFile.getAbsolutePath());
+                return null;
+            }
             return manifestFromJson(json);
         } catch (IOException | RuntimeException e) {
             System.err.println(
@@ -690,23 +819,39 @@ public class FileChangeDetector {
 
     /** File manifest containing all file information for a directory */
     public static class FileManifest {
+        /**
+         * Persisted-manifest schema version. Bumped whenever the on-disk format or hash semantics
+         * change (e.g. line-ending normalization). Manifests with a different (or missing) version
+         * are discarded by {@link #loadPersistedManifest(File)} to avoid reusing stale,
+         * incompatible hashes as a cache.
+         */
+        public static final int CURRENT_VERSION = 2;
+
         private final Map<String, FileInfo> files;
         private final java.util.Set<String> emptyDirectories;
+        private final int schemaVersion;
 
         public FileManifest() {
             this.files = new HashMap<>();
             this.emptyDirectories = new java.util.HashSet<>();
+            this.schemaVersion = CURRENT_VERSION;
         }
 
         public FileManifest(Map<String, FileInfo> files) {
             this.files = files;
             this.emptyDirectories = new java.util.HashSet<>();
+            this.schemaVersion = CURRENT_VERSION;
         }
 
         public FileManifest(Map<String, FileInfo> files, java.util.Set<String> emptyDirectories) {
             this.files = files;
             this.emptyDirectories =
                     emptyDirectories != null ? emptyDirectories : new java.util.HashSet<>();
+            this.schemaVersion = CURRENT_VERSION;
+        }
+
+        public int getSchemaVersion() {
+            return schemaVersion;
         }
 
         public Map<String, FileInfo> getFiles() {
