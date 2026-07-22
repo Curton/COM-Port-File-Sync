@@ -163,14 +163,26 @@ public class SerialPortManager {
                         "Read timeout: expected " + length + " bytes, got " + bytesRead);
             }
 
-            int available = in.available();
-            if (available > 0) {
-                int toRead = Math.min(available, length - bytesRead);
+        int available = in.available();
+        if (available > 0) {
+            int toRead = Math.min(available, length - bytesRead);
+            try {
                 int read = in.read(buffer, bytesRead, toRead);
                 if (read > 0) {
                     bytesRead += read;
                 }
-            } else {
+            } catch (IOException e) {
+                // The underlying serial port read may throw IOException on native timeout.
+                // Continue waiting if still within the overall timeout window.
+                if (!isOpen()) {
+                    throw new IOException("Serial port closed during read", e);
+                }
+                if (System.currentTimeMillis() - startTime > timeoutMs) {
+                    throw new IOException(
+                            "Read timeout: expected " + length + " bytes, got " + bytesRead);
+                }
+            }
+        } else {
                 try {
                     Thread.sleep(POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
@@ -193,7 +205,28 @@ public class SerialPortManager {
                 throw new IOException("Read timeout");
             }
 
-            int b = in.read();
+            int b;
+            try {
+                b = in.read();
+            } catch (IOException e) {
+                // The underlying serial port read may throw IOException on native timeout
+                // (e.g. Windows ERROR_TIMEOUT) rather than returning -1. Catch it and
+                // continue waiting if still within the overall timeout window.
+                if (!isOpen()) {
+                    throw new IOException("Serial port closed during read", e);
+                }
+                if (System.currentTimeMillis() - startTime > timeoutMs) {
+                    throw new IOException("Read timeout");
+                }
+                try {
+                    Thread.sleep(POLL_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Read interrupted");
+                }
+                continue;
+            }
+
             if (b == -1) {
                 try {
                     Thread.sleep(POLL_INTERVAL_MS);

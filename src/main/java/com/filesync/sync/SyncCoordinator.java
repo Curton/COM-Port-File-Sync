@@ -145,17 +145,26 @@ public class SyncCoordinator {
 
         eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
         // Send our settings to the receiver so it generates manifest with the same options
-        protocol.requestManifest(respectGitignore, fastMode);
 
-        SyncProtocol.Message manifestMessage =
-                protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
-        protocol.sendAck();
-        int expectedManifestSize =
-                manifestMessage != null && manifestMessage.getParams().length > 0
-                        ? manifestMessage.getParamAsInt(0)
-                        : -1;
-        FileChangeDetector.FileManifest remoteManifest =
-                protocol.receiveManifest(expectedManifestSize);
+        // Use an extended timeout for the manifest exchange because the receiver may need
+        // significant time to walk and hash its folder (especially for large projects).
+        FileChangeDetector.FileManifest remoteManifest;
+        int savedTimeout = protocol.getTimeout();
+        protocol.setTimeout(120_000); // 120 seconds for large manifests
+        try {
+            protocol.requestManifest(respectGitignore, fastMode);
+
+            SyncProtocol.Message manifestMessage =
+                    protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
+            protocol.sendAck();
+            int expectedManifestSize =
+                    manifestMessage != null && manifestMessage.getParams().length > 0
+                            ? manifestMessage.getParamAsInt(0)
+                            : -1;
+            remoteManifest = protocol.receiveManifest(expectedManifestSize);
+        } finally {
+            protocol.setTimeout(savedTimeout);
+        }
 
         String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
         if (remoteManifest.getEmptyDirectoryCount() > 0) {

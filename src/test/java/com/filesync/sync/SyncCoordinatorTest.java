@@ -857,6 +857,7 @@ class SyncCoordinatorTest {
 
     @Test
     void createSyncPreviewPlan_generatesManifest() throws IOException {
+        when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncCoordinator coordinator =
                 createCoordinator(
                         () -> true, () -> true, () -> true, null, () -> false, () -> true);
@@ -874,6 +875,32 @@ class SyncCoordinatorTest {
         // createSyncPreviewPlan posts 3 LogEvents: "Generating...", "Requesting...", "Remote
         // manifest..."
         verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
+    }
+
+    @Test
+    void createSyncPreviewPlan_extendsTimeoutDuringManifestExchange() throws IOException {
+        // Verify the protocol timeout is temporarily extended to 120s for the manifest
+        // exchange and then restored afterwards.
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncCoordinator coordinator =
+                createCoordinator(
+                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
+        Path testFile = tempDir.resolve("timeoutTest.txt");
+        Files.writeString(testFile, "content");
+        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
+        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
+        when(mockProtocol.waitForCommand(anyString())).thenReturn(mockManifestMsg);
+        when(mockProtocol.receiveManifest(anyInt()))
+                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+
+        coordinator.createSyncPreviewPlan();
+
+        // Must have saved the original timeout via getTimeout()
+        verify(mockProtocol, atLeastOnce()).getTimeout();
+        // Must have set the extended timeout for the manifest exchange
+        verify(mockProtocol).setTimeout(120_000);
+        // Must have restored the original timeout
+        verify(mockProtocol).setTimeout(30000);
     }
 
     @Test

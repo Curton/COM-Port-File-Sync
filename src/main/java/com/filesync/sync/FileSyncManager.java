@@ -501,7 +501,7 @@ public class FileSyncManager {
                     return null;
                 }
                 if (SyncProtocol.CMD_FILE_CONTENT_XFER.equals(cmd)) {
-                    int fileSize = msg.getParamAsInt(1);
+                    int fileSize = msg.getParamAsInt(0);
                     return protocol.receiveFileContentViaXmodem(fileSize);
                 }
                 if (SyncProtocol.CMD_CANCEL.equals(cmd)) {

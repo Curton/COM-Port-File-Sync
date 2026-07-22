@@ -51,6 +51,25 @@ class SyncProtocolXmodemContentTest {
     }
 
     @Test
+    void sendFileContentViaXmodem_announcesSizeAsSoleFirstParameter() throws IOException {
+        FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
+        // The ACK waited for between the FILE_CONTENT_XFER announcement and the XMODEM send.
+        serial.enqueueLine("[[SYNC:ACK]]");
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        // The XMODEM send itself fails on the stub; only the announcement frame matters here.
+        assertThrows(
+                IOException.class, () -> protocol.sendFileContentViaXmodem(new byte[8], 70000));
+
+        // FileSyncManager.fetchRemoteFileContent parses the size from parameter index 0, so the
+        // announcement must carry it as the sole first parameter. A frame like
+        // "[[SYNC:FILE_CONTENT_XFER:<path>:70000]]" would break the requester.
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:FILE_CONTENT_XFER:70000]]"),
+                "Announcement must carry the file size as the sole first parameter (index 0)");
+    }
+
+    @Test
     void receiveFileContentViaXmodem_resetsInProgressFlagWhenXmodemFails() throws IOException {
         FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
         SyncProtocol protocol = new SyncProtocol(serial);
