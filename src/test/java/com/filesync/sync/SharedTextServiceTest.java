@@ -324,6 +324,186 @@ class SharedTextServiceTest {
                 "Nothing should be sent when role not negotiated");
     }
 
+    @Test
+    void queueSharedTextLogsSentWhenDelivered() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.queueSharedText("hello");
+
+        assertTrue(
+                logs.contains("Shared text sent"),
+                "Successful delivery should be logged, got: " + logs);
+    }
+
+    @Test
+    void flushIfIdleLogsDeferralReasonWhenRoleNotNegotiated() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> false); // role not negotiated
+
+        service.queueSharedText("held back");
+
+        assertTrue(protocol.getSentTexts().isEmpty());
+        assertTrue(
+                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + logs);
+    }
+
+    @Test
+    void flushIfIdleLogsDeferralReasonWhileSyncing() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> true, // syncing
+                        () -> false,
+                        () -> true);
+
+        service.queueSharedText("held back");
+
+        assertTrue(protocol.getSentTexts().isEmpty());
+        assertTrue(
+                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + logs);
+    }
+
+    @Test
+    void flushIfIdleLogsDeferralReasonWhileTransferBusy() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true, // transfer busy
+                        () -> true);
+
+        service.queueSharedText("held back");
+
+        assertTrue(protocol.getSentTexts().isEmpty());
+        assertTrue(
+                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + logs);
+    }
+
+    @Test
+    void handleIncomingSharedTextLogsReceived() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedText(100L, "some text");
+
+        assertTrue(
+                logs.contains("Shared text received"),
+                "Accepted text should be logged, got: " + logs);
+    }
+
+    @Test
+    void clearPendingSharedTextResetsAcceptedTimestamp() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> receivedText = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                        receivedText.add(sharedTextEvent.getText());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedText(300L, "newer");
+        // Simulate session teardown (stopListening) between connections.
+        service.clearPendingSharedText();
+        // After reconnect, a payload with an older timestamp (e.g. clock skew) must not be
+        // silently rejected anymore.
+        service.handleIncomingSharedText(100L, "older but fresh");
+
+        assertEquals(List.of("newer", "older but fresh"), receivedText);
+    }
+
     private static final class TestSharedTextProtocol extends SyncProtocol {
         private final AtomicBoolean sending = new AtomicBoolean(false);
         private final List<String> sentTexts = new ArrayList<>();

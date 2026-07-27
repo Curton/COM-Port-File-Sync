@@ -75,16 +75,26 @@ public class SharedTextService {
                 return;
             }
             if (!roleNegotiatedSupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Shared text queued - waiting for role negotiation"));
                 return;
             }
             if (!allowWhileSyncing && syncingSupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Shared text queued - will send when sync finishes"));
                 return;
             }
             if (transferBusySupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Shared text queued - will send when transfer finishes"));
                 return;
             }
             try {
                 protocol.sendSharedText(textToSend.timestamp, textToSend.text);
+                eventBus.post(new SyncEvent.LogEvent("Shared text sent"));
                 if (pendingSharedText.compareAndSet(textToSend, null)) {
                     return;
                 }
@@ -112,6 +122,7 @@ public class SharedTextService {
             if (markTimestampIfNewer(incoming.timestamp)) {
                 latestSharedText.set(incoming);
                 eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+                eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
         } catch (IllegalArgumentException e) {
             eventBus.post(
@@ -131,6 +142,7 @@ public class SharedTextService {
             if (markTimestampIfNewer(incoming.timestamp)) {
                 latestSharedText.set(incoming);
                 eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+                eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
         } catch (IOException e) {
             eventBus.post(
@@ -144,6 +156,11 @@ public class SharedTextService {
 
     public void clearPendingSharedText() {
         pendingSharedText.set(null);
+        // Reset the high-water mark so a reconnected session does not silently reject
+        // fresh texts whose timestamps compare poorly against stale state (e.g. clock
+        // skew between the two machines). Resent payloads carry their original
+        // timestamps, so re-delivery of the last text after reconnect still works.
+        latestAcceptedTimestamp.set(0);
     }
 
     private SharedTextPayload decodeSharedTextPayload(long remoteTimestamp, String encodedPayload) {

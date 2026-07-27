@@ -48,8 +48,9 @@ public class SharedTextController {
                 .getSendSharedTextButton()
                 .addActionListener(
                         event -> {
+                            // Send result ("Shared text sent" / "queued - reason") is logged
+                            // by SharedTextService so the log reflects what actually happened.
                             pushSharedTextToRemote();
-                            logController.log("Shared text sent");
                         });
 
         components
@@ -114,6 +115,7 @@ public class SharedTextController {
 
     public void pushSharedTextToRemote() {
         if (!state.isConnected() || !syncManager.isConnectionAlive()) {
+            logController.log("Cannot send shared text - not connected");
             return;
         }
         syncManager.sendSharedText(components.getSharedTextArea().getText());

@@ -263,6 +263,7 @@ public class FileSyncManager {
         connectionAlive.set(false);
         roleNegotiated.set(false);
         syncing.set(false);
+        protocol.clearStashedMessages();
 
         ensureExecutor();
         connectionService.setExecutor(executor);
@@ -290,6 +291,7 @@ public class FileSyncManager {
         syncing.set(false);
         connectionService.stop();
         sharedTextService.clearPendingSharedText();
+        protocol.clearStashedMessages();
         serialPort.close();
 
         if (listenerFuture != null) {
@@ -516,6 +518,8 @@ public class FileSyncManager {
                     connectionService.recordMessageActivity();
                 } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
                     connectionService.recordMessageActivity();
+                } else {
+                    protocol.stashAsyncMessage(msg);
                 }
             }
         } catch (IOException e) {
@@ -591,6 +595,15 @@ public class FileSyncManager {
                         && roleNegotiationService.isSender()) {
                     Thread.sleep(50);
                     continue;
+                }
+
+                // Dispatch messages stashed by synchronous exchanges (waitForCommand etc.)
+                // before reading new data, so async commands (e.g. SHARED_TEXT) that
+                // arrived mid-exchange are not lost.
+                SyncProtocol.Message stashed;
+                while ((stashed = protocol.pollStashedMessage()) != null) {
+                    connectionService.recordMessageActivity();
+                    handleIncomingMessage(stashed);
                 }
 
                 if (protocol.hasData()) {

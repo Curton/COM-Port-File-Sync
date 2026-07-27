@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -22,6 +24,11 @@ public class SyncProtocol {
     // Flag to indicate XMODEM transfer is in progress
     // When true, the listener thread should not read from serial port
     private final AtomicBoolean xmodemInProgress = new AtomicBoolean(false);
+
+    // Async messages (e.g. SHARED_TEXT, DIRECTION_CHANGE) that arrived while a synchronous
+    // exchange (waitForCommand / waitForFileContentResponse) was reading the stream. They are
+    // stashed here instead of being silently dropped, and drained by the listener loop.
+    private final Queue<Message> stashedMessages = new ConcurrentLinkedQueue<>();
 
     // Protocol commands
     public static final String CMD_MANIFEST_REQ = "MANIFEST_REQ";
@@ -820,6 +827,8 @@ public class SyncProtocol {
                 runMessageActivityCallback();
             } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
                 runMessageActivityCallback();
+            } else {
+                stashAsyncMessage(msg);
             }
         }
         return null;
@@ -1104,9 +1113,37 @@ public class SyncProtocol {
                 runMessageActivityCallback();
             } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
                 runMessageActivityCallback();
+            } else {
+                stashAsyncMessage(msg);
             }
         }
         throw new IOException("Timeout waiting for command: " + expectedCommand);
+    }
+
+    /**
+     * Stash an async message that arrived during a synchronous exchange so the listener loop can
+     * dispatch it later instead of silently dropping it.
+     */
+    public void stashAsyncMessage(Message msg) {
+        if (msg != null) {
+            stashedMessages.offer(msg);
+        }
+    }
+
+    /**
+     * Poll a message stashed during a synchronous exchange, or null if none. The listener loop
+     * drains these before reading new data from the serial stream.
+     */
+    public Message pollStashedMessage() {
+        return stashedMessages.poll();
+    }
+
+    /**
+     * Discard stashed messages. Called on session teardown so stale messages from a previous
+     * session are not delivered after a reconnect.
+     */
+    public void clearStashedMessages() {
+        stashedMessages.clear();
     }
 
     private void runMessageActivityCallback() {

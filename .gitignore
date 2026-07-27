@@ -34,6 +34,9 @@ Thumbs.db
 # Claude
 .claude/
 
+# ZCode
+.zcode/
+
 # Build
 *.class
 *.jar

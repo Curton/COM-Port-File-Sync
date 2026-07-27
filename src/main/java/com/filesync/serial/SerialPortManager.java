@@ -163,26 +163,26 @@ public class SerialPortManager {
                         "Read timeout: expected " + length + " bytes, got " + bytesRead);
             }
 
-        int available = in.available();
-        if (available > 0) {
-            int toRead = Math.min(available, length - bytesRead);
-            try {
-                int read = in.read(buffer, bytesRead, toRead);
-                if (read > 0) {
-                    bytesRead += read;
+            int available = in.available();
+            if (available > 0) {
+                int toRead = Math.min(available, length - bytesRead);
+                try {
+                    int read = in.read(buffer, bytesRead, toRead);
+                    if (read > 0) {
+                        bytesRead += read;
+                    }
+                } catch (IOException e) {
+                    // The underlying serial port read may throw IOException on native timeout.
+                    // Continue waiting if still within the overall timeout window.
+                    if (!isOpen()) {
+                        throw new IOException("Serial port closed during read", e);
+                    }
+                    if (System.currentTimeMillis() - startTime > timeoutMs) {
+                        throw new IOException(
+                                "Read timeout: expected " + length + " bytes, got " + bytesRead);
+                    }
                 }
-            } catch (IOException e) {
-                // The underlying serial port read may throw IOException on native timeout.
-                // Continue waiting if still within the overall timeout window.
-                if (!isOpen()) {
-                    throw new IOException("Serial port closed during read", e);
-                }
-                if (System.currentTimeMillis() - startTime > timeoutMs) {
-                    throw new IOException(
-                            "Read timeout: expected " + length + " bytes, got " + bytesRead);
-                }
-            }
-        } else {
+            } else {
                 try {
                     Thread.sleep(POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
