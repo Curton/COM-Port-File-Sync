@@ -58,6 +58,10 @@ public class SyncProtocol {
     public static final String CMD_CANCEL = "CANCEL";
     public static final String CMD_BATCH_DATA = "BATCH_DATA";
     public static final String CMD_BATCH_COMPLETE = "BATCH_COMPLETE";
+    public static final String CMD_LOG_REQ = "LOG_REQ";
+    public static final String CMD_LOG_DATA = "LOG_DATA";
+    public static final String CMD_LOG_XFER = "LOG_XFER";
+    public static final String CMD_LOG_MARKER_REQ = "LOG_MARKER_REQ";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -878,6 +882,50 @@ public class SyncProtocol {
                 throw new IOException("Failed to receive file content via XMODEM (" + detail + ")");
             }
             return data;
+        } finally {
+            xmodemInProgress.set(false);
+        }
+    }
+
+    /** Request the remote peer's log text (used by the combined-log save). */
+    public void sendLogRequest() throws IOException {
+        sendCommand(CMD_LOG_REQ);
+    }
+
+    /**
+     * Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the combined-log
+     * save can align the two machines' clocks. The peer answers with an ACK once the marker has
+     * been written to its log mirror.
+     */
+    public void sendLogMarkerRequest() throws IOException {
+        sendCommand(CMD_LOG_MARKER_REQ);
+    }
+
+    /** Send the log text inline, Base64 encoded, as a CMD_LOG_DATA response. */
+    public void sendLogData(String base64Log) throws IOException {
+        sendCommand(CMD_LOG_DATA, base64Log);
+    }
+
+    /**
+     * Send the log text via XMODEM for large logs. Sends a CMD_LOG_XFER announcement with the exact
+     * size, waits for ACK, then transfers via XMODEM (mirrors {@link #sendFileContentViaXmodem}).
+     *
+     * @param data the log text bytes
+     * @param logSize the exact log size in bytes
+     */
+    public void sendLogViaXmodem(byte[] data, int logSize) throws IOException {
+        sendCommand(CMD_LOG_XFER, String.valueOf(logSize));
+        waitForCommand(CMD_ACK);
+        xmodemInProgress.set(true);
+        try {
+            boolean success = xmodem.send(data);
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to send log via XMODEM (" + detail + ")");
+            }
         } finally {
             xmodemInProgress.set(false);
         }

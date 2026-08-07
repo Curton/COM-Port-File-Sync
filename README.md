@@ -38,6 +38,7 @@ COM Port File Sync enables reliable file transfer between two machines connected
 - **Dry-Run Preview** - Review planned file operations in a preview dialog before applying a sync
 - **Single-File Drag-and-Drop Sending** - Drop one file directly onto the main interface for immediate transfer when connected
 - **Drag-and-Drop File Send** - Quickly queue one local file for transfer by dragging it onto the main window
+- **Save Combined Log** - Right-click the log area to fetch the remote peer's log and save a merged, [LOCAL]/[REMOTE]-tagged copy (combined_log_yyyyMMdd_HHmmss.txt) into the selected sync folder. The save itself writes a fresh TIME-SYNC marker on both machines first (locally into the log, remotely via a marker request over the serial link), so the two logs are interleaved with the measured clock offset corrected (sender side; falls back to raw time-of-day ordering when the remote does not answer the marker request)
 
 **Connection**
 - **Role Negotiation** - Automatic sender/receiver role assignment on connection

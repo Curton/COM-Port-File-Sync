@@ -6,6 +6,7 @@ import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Base64;
 import java.util.concurrent.Executors;
@@ -15,6 +16,8 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Orchestrates file synchronization operations between two machines. Delegates to dedicated
@@ -52,6 +55,16 @@ public class FileSyncManager {
 
     private final AtomicLong threadIdGenerator =
             new AtomicLong(0); // names FileSync-N threads in executor
+
+    /** Provides this device's log text when the remote peer requests it. */
+    private volatile Supplier<String> logTextProvider;
+
+    /**
+     * Synchronous log-marker writer (wired to {@code LogController#logMarker} by the UI layer). The
+     * remote peer asks this device to log a TIME-SYNC marker via the serial listener thread, which
+     * must not wait on the EDT; the sink appends to the thread-safe log mirror directly.
+     */
+    private volatile Consumer<String> logMarkerSink;
 
     private final SyncEventBus eventBus;
     private final ConnectionService connectionService;
@@ -166,6 +179,24 @@ public class FileSyncManager {
 
     public File getSyncFolder() {
         return syncFolder;
+    }
+
+    /**
+     * Registers a provider for this device's log text. The provider is invoked on the listener
+     * thread when the remote peer requests the log (save combined log), so it must be safe to call
+     * from any thread.
+     */
+    public void setLogTextProvider(Supplier<String> logTextProvider) {
+        this.logTextProvider = logTextProvider;
+    }
+
+    /**
+     * Sets the synchronous log-marker writer used when the remote peer asks this device to log a
+     * TIME-SYNC marker (see {@link SyncProtocol#CMD_LOG_MARKER_REQ}). When no sink is set, the
+     * marker is posted as a regular log event instead.
+     */
+    public void setLogMarkerSink(Consumer<String> logMarkerSink) {
+        this.logMarkerSink = logMarkerSink;
     }
 
     public void setIsSender(boolean isSender) {
@@ -410,6 +441,40 @@ public class FileSyncManager {
         protocol.sendFolderContextResponse(path);
     }
 
+    /**
+     * Handles a remote TIME-SYNC marker request: log the marker (synchronously into the log mirror
+     * when a sink is wired, so it is guaranteed present when the requester fetches this device's
+     * log), then ACK so the requester knows the marker is in place.
+     */
+    private void handleLogMarkerRequest() throws IOException {
+        if (logMarkerSink != null) {
+            logMarkerSink.accept(TimeSyncMarker.markerMessage());
+        } else {
+            eventBus.post(new SyncEvent.LogEvent(TimeSyncMarker.markerMessage()));
+        }
+        protocol.sendAck();
+    }
+
+    private void handleLogRequest() throws IOException {
+        String logText = logTextProvider != null ? logTextProvider.get() : "";
+        if (logText == null) {
+            logText = "";
+        }
+        byte[] logBytes = logText.getBytes(StandardCharsets.UTF_8);
+        try {
+            if (logBytes.length > XMODEM_CONTENT_THRESHOLD) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Sending large log via XMODEM (" + logBytes.length + " bytes)"));
+                protocol.sendLogViaXmodem(logBytes, logBytes.length);
+            } else {
+                protocol.sendLogData(Base64.getEncoder().encodeToString(logBytes));
+            }
+        } catch (IOException e) {
+            eventBus.post(new SyncEvent.LogEvent("Failed to send log: " + e.getMessage()));
+        }
+    }
+
     private void handleFolderChange(String encodedPath) {
         // Only receiver should process folder change notifications
         if (roleNegotiationService.isSender()) {
@@ -526,6 +591,111 @@ public class FileSyncManager {
             eventBus.post(
                     new SyncEvent.ErrorEvent(
                             "Failed to fetch remote file content: " + e.getMessage()));
+        } finally {
+            senderBlockingProtocolExchange.set(false);
+        }
+        return null;
+    }
+
+    /** Default timeout for a remote log fetch (mirrors the file content fetch). */
+    private static final long LOG_FETCH_TIMEOUT_MS = 10000;
+
+    /**
+     * Fetch the remote peer's log text for the "save combined log" feature. Call only when this
+     * side is the sender (same protocol-exchange constraint as {@link #fetchRemoteFileContent}).
+     * Pauses the listener during the exchange to avoid message stealing.
+     *
+     * @return the remote log text, or null on timeout/error/guard failure
+     */
+    public String fetchRemoteLogText() {
+        return fetchRemoteLogText(LOG_FETCH_TIMEOUT_MS);
+    }
+
+    String fetchRemoteLogText(long timeoutMs) {
+        if (!isSender() || !connectionAlive.get()) {
+            return null;
+        }
+
+        senderBlockingProtocolExchange.set(true);
+        try {
+            // Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the
+            // combined-log save can align the two machines' clocks. Best-effort: a peer that does
+            // not ACK within the timeout (or an IO failure) falls back to a marker-less merge.
+            try {
+                protocol.sendLogMarkerRequest();
+                long markerDeadline = System.currentTimeMillis() + timeoutMs;
+                while (System.currentTimeMillis() < markerDeadline) {
+                    SyncProtocol.Message markerResponse = protocol.receiveCommand();
+                    if (markerResponse == null) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                        continue;
+                    }
+                    if (SyncProtocol.CMD_ACK.equals(markerResponse.getCommand())) {
+                        break;
+                    }
+                    // Any other frame during the marker exchange is not part of the log fetch;
+                    // ignore it rather than stash it (the fetch loop below never replays stashed
+                    // messages).
+                }
+            } catch (IOException e) {
+                // Fall back to fetching without a marker; the merge will use raw timestamps.
+            }
+
+            protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
+
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                SyncProtocol.Message msg = protocol.receiveCommand();
+                if (msg == null) {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                    continue;
+                }
+                String cmd = msg.getCommand();
+                if (SyncProtocol.CMD_LOG_DATA.equals(cmd)) {
+                    String logBase64 = msg.getParam(0);
+                    if (logBase64 == null) {
+                        return null;
+                    }
+                    if (logBase64.isEmpty()) {
+                        return "";
+                    }
+                    return new String(
+                            Base64.getDecoder().decode(logBase64), StandardCharsets.UTF_8);
+                }
+                if (SyncProtocol.CMD_LOG_XFER.equals(cmd)) {
+                    int logSize = msg.getParamAsInt(0);
+                    byte[] data = protocol.receiveFileContentViaXmodem(logSize);
+                    return data != null ? new String(data, StandardCharsets.UTF_8) : null;
+                }
+                if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
+                    return null;
+                }
+                if (SyncProtocol.CMD_ERROR.equals(cmd)) {
+                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException("Remote error during log request: " + errMsg);
+                }
+                if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
+                    protocol.sendHeartbeatAck();
+                    connectionService.recordMessageActivity();
+                } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
+                    connectionService.recordMessageActivity();
+                } else {
+                    protocol.stashAsyncMessage(msg);
+                }
+            }
+        } catch (IOException e) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
         } finally {
             senderBlockingProtocolExchange.set(false);
         }
@@ -652,6 +822,8 @@ public class FileSyncManager {
             }
             case SyncProtocol.CMD_FOLDER_CONTEXT_REQ -> handleFolderContextRequest();
             case SyncProtocol.CMD_FOLDER_CHANGE -> handleFolderChange(msg.getParam(0));
+            case SyncProtocol.CMD_LOG_MARKER_REQ -> handleLogMarkerRequest();
+            case SyncProtocol.CMD_LOG_REQ -> handleLogRequest();
             case SyncProtocol.CMD_FILE_CONTENT_REQ -> {
                 String relativePath = SyncProtocol.decodePathFromProtocol(msg.getParam(0));
                 if (relativePath != null && !relativePath.isEmpty()) {

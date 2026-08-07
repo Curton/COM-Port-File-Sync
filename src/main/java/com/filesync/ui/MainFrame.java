@@ -30,6 +30,7 @@ public class MainFrame extends JFrame {
     private final FolderController folderController;
     private final SyncController syncController;
     private final SharedTextController sharedTextController;
+    private final CombinedLogController combinedLogController;
     private final DragDropController dragDropController;
     private final JPanel mainPanel;
 
@@ -76,6 +77,16 @@ public class MainFrame extends JFrame {
                         syncController::updateSyncButtonState);
         sharedTextController =
                 new SharedTextController(components, state, syncManager, logController);
+        combinedLogController =
+                new CombinedLogController(
+                        components, syncManager, folderController, settings, logController);
+        // The remote peer requests this device's log via the serial listener thread; the
+        // controller's buffer snapshot is safe to read from any thread (unlike the JTextArea).
+        syncManager.setLogTextProvider(logController::getLogText);
+        // TIME-SYNC marker requests (sent before a combined-log save) must write the marker into
+        // the log mirror synchronously: the listener thread cannot wait for the EDT, and the marker
+        // must be present before the requester fetches this device's log.
+        syncManager.setLogMarkerSink(logController::logMarker);
 
         eventBusListener =
                 new SyncEventBridge(syncController, logController, sharedTextController)
@@ -99,6 +110,7 @@ public class MainFrame extends JFrame {
         connectionController.initEventHandlers(this::updateSettingsLabel);
         folderController.initEventHandlers();
         sharedTextController.initEventHandlers();
+        combinedLogController.initEventHandlers();
 
         connectionController.refreshPorts();
         loadSavedState();

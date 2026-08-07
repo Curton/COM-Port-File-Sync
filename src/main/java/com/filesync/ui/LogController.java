@@ -16,6 +16,12 @@ public class LogController {
     private SettingsManager settings;
     private boolean debugModeEnabled;
 
+    /**
+     * Mirror of the log document kept for thread-safe reads (e.g. by the remote peer's log request,
+     * which runs on the serial listener thread and must not touch the JTextArea).
+     */
+    private final StringBuffer logBuffer = new StringBuffer();
+
     public LogController(JTextArea logTextArea) {
         this.logTextArea = logTextArea;
     }
@@ -39,14 +45,47 @@ public class LogController {
         if (!debugModeEnabled && message.contains(DEBUG_PREFIX)) {
             return;
         }
+        String line = timestampedLine(message);
         SwingUtilities.invokeLater(
                 () -> {
-                    SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-                    String timestamp = sdf.format(new Date());
-                    logTextArea.append("[" + timestamp + "] " + message + "\n");
-                    trimLogLinesIfNeeded();
-                    logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+                    appendToLogBuffer(line);
+                    appendLineToUi(line);
                 });
+    }
+
+    /**
+     * Logs a line synchronously into the thread-safe log mirror and asynchronously into the UI.
+     * Used by the serial listener thread when the remote peer requests a TIME-SYNC marker: the
+     * marker must be visible in {@link #getLogText()} immediately, without waiting for the EDT.
+     */
+    public void logMarker(String message) {
+        String line = timestampedLine(message);
+        appendToLogBuffer(line);
+        SwingUtilities.invokeLater(() -> appendLineToUi(line));
+    }
+
+    private static String timestampedLine(String message) {
+        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
+        return "[" + sdf.format(new Date()) + "] " + message + "\n";
+    }
+
+    private void appendLineToUi(String line) {
+        logTextArea.append(line);
+        trimLogLinesIfNeeded();
+        logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+    }
+
+    /** Snapshot of the current log text, safe to call from any thread. */
+    public String getLogText() {
+        return logBuffer.toString();
+    }
+
+    void appendToLogBuffer(String line) {
+        logBuffer.append(line);
+    }
+
+    void trimLogBuffer(int charCount) {
+        logBuffer.delete(0, charCount);
     }
 
     public void logDebug(String message) {
@@ -65,6 +104,7 @@ public class LogController {
             int linesToTrim = lineCount - MAX_LOG_LINES;
             int endOffset = logTextArea.getLineEndOffset(linesToTrim - 1);
             logTextArea.getDocument().remove(0, endOffset);
+            trimLogBuffer(endOffset);
         } catch (BadLocationException ex) {
             // Ignore trimming failure and keep all log lines.
         }

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.SerialPortManager;
+import com.filesync.serial.XModemTransfer;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -86,6 +87,126 @@ class SyncProtocolXmodemContentTest {
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("ACK")),
                 "receiveFileContentViaXmodem should send an ACK before receiving");
         assertTrue(thrown.getMessage() != null, "Failure should carry a message");
+    }
+
+    // ========== Remote log transfer entry points ==========
+
+    @Test
+    void sendLogRequest_writesLogReqFrame() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        protocol.sendLogRequest();
+
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:LOG_REQ]]"),
+                "sendLogRequest must write a bare LOG_REQ frame");
+    }
+
+    @Test
+    void sendLogMarkerRequest_writesMarkerReqFrame() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        protocol.sendLogMarkerRequest();
+
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:LOG_MARKER_REQ]]"),
+                "sendLogMarkerRequest must write a bare LOG_MARKER_REQ frame");
+    }
+
+    @Test
+    void sendLogData_writesBase64Param() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        protocol.sendLogData("QUJD");
+
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:LOG_DATA:QUJD]]"),
+                "sendLogData must carry the base64 log as the sole parameter");
+    }
+
+    @Test
+    void sendLogViaXmodem_success_announcesAckAndTransfers() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        // Scripted peer: ACK the LOG_XFER announcement, then handshake with 'C' and ACK the single
+        // 128-byte SOH block and the EOT. The drain steps (extra handshake char, stale pre-block
+        // char) consume the middle ACKs.
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(
+                new byte[] {
+                    XModemTransfer.C,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK
+                });
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] data = "log text".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        protocol.sendLogViaXmodem(data, data.length);
+
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:LOG_XFER:" + data.length + "]]"),
+                "sendLogViaXmodem must announce the exact size as its sole parameter");
+        assertFalse(
+                protocol.isXmodemInProgress(),
+                "xmodemInProgress must be cleared after a successful send");
+    }
+
+    @Test
+    void sendLogViaXmodem_failure_resetsFlagAndThrows() throws IOException {
+        FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
+        // The ACK waited for between the LOG_XFER announcement and the XMODEM send.
+        serial.enqueueLine("[[SYNC:ACK]]");
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] data = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        IOException thrown =
+                assertThrows(IOException.class, () -> protocol.sendLogViaXmodem(data, data.length));
+
+        assertFalse(
+                protocol.isXmodemInProgress(),
+                "xmodemInProgress must be reset even when the log XMODEM send fails");
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("LOG_XFER")),
+                "sendLogViaXmodem should announce the transfer before sending");
+        assertTrue(thrown.getMessage() != null, "Failure should carry a message");
+    }
+
+    @Test
+    void sendLogViaXmodem_failure_whenPeerRejectsBlock_throwsWithDetail() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        // Scripted peer: ACK the LOG_XFER announcement, then handshake with 'C'. Each drain step
+        // (extra handshake char, stale pre-block char) consumes one non-C/NAK byte, so the third
+        // CAN is what readByteWithTimeout sees as the block response, failing sendBlock.
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] data = "log text".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        IOException thrown =
+                assertThrows(IOException.class, () -> protocol.sendLogViaXmodem(data, data.length));
+
+        assertTrue(
+                thrown.getMessage().contains("Failed to send log via XMODEM"),
+                "A rejected transfer must fail with the XMODEM error detail");
+        assertTrue(
+                thrown.getMessage().contains("Failed to send block"),
+                "The peer CAN must surface as the block-level failure detail");
+        assertFalse(
+                protocol.isXmodemInProgress(),
+                "xmodemInProgress must be reset even when the log XMODEM send fails");
+        assertTrue(
+                serial.getWrittenLines().contains("[[SYNC:LOG_XFER:" + data.length + "]]"),
+                "sendLogViaXmodem must announce the transfer before sending");
     }
 
     /**

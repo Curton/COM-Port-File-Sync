@@ -237,6 +237,40 @@ class SyncCoordinatorTest {
         verify(mockEventBus).post(isA(SyncEvent.SyncStartedEvent.class));
     }
 
+    @Test
+    void startSync_noExecutor_postsTimeSyncMarkerAfterSyncStarted() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.setExecutor(null);
+
+        // Mock protocol methods to avoid actual file operations
+        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
+        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
+        when(mockProtocol.waitForCommand(anyString())).thenReturn(mockManifestMsg);
+        when(mockProtocol.receiveManifest(anyInt()))
+                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+
+        coordinator.startSync();
+
+        int startedIndex = -1;
+        int markerIndex = -1;
+        for (int i = 0; i < postedEvents.size(); i++) {
+            SyncEvent event = postedEvents.get(i);
+            if (event instanceof SyncEvent.SyncStartedEvent) {
+                startedIndex = i;
+            }
+            if (event instanceof SyncEvent.LogEvent le
+                    && le.getMessage().startsWith("TIME-SYNC")
+                    && TimeSyncMarker.parseEpochMs(le.getMessage()) != null) {
+                markerIndex = i;
+            }
+        }
+        assertTrue(startedIndex >= 0, "SyncStartedEvent should be posted");
+        assertTrue(
+                markerIndex > startedIndex,
+                "The TIME-SYNC marker must be logged after the sync-start event");
+    }
+
     // ========== Medium tests: startSyncWithPlan validation ==========
 
     @Test
@@ -683,6 +717,52 @@ class SyncCoordinatorTest {
     }
 
     @Test
+    void handleManifestRequest_sendsError_whenSyncFolderMissingOnDisk() throws IOException {
+        // Non-null File that does not exist: exercises the !exists() side of the folder guard
+        // (the null side is covered by handleManifestRequest_sendsError_whenSyncFolderNull).
+        File missingFolder = tempDir.resolve("missing").toFile();
+        SyncCoordinator coordinatorWithMissingFolder =
+                new SyncCoordinator(
+                        mockProtocol,
+                        mockEventBus,
+                        () -> missingFolder,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        syncing,
+                        () -> syncIdleCalls.incrementAndGet(),
+                        () -> syncBoundaryCalls.incrementAndGet(),
+                        () -> heartbeatTouches.incrementAndGet());
+
+        coordinatorWithMissingFolder.handleManifestRequest(null, null);
+
+        verify(mockProtocol).sendError("Sync folder not configured");
+    }
+
+    @Test
+    void handleManifestRequest_logsEmptyDirectoryCount() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        Files.createDirectory(tempDir.resolve("emptyDir"));
+        Path testFile = tempDir.resolve("manifestTest.txt");
+        Files.writeString(testFile, "content");
+
+        coordinator.handleManifestRequest(null, null);
+
+        verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
+        assertTrue(
+                postedEvents.stream()
+                        .anyMatch(
+                                e ->
+                                        e instanceof SyncEvent.LogEvent le
+                                                && le.getMessage().contains("empty dirs")),
+                "Manifest completion must report the empty directory count");
+    }
+
+    @Test
     void handleManifestRequest_setsSyncingToTrue() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
@@ -693,6 +773,27 @@ class SyncCoordinatorTest {
 
         // After manifest request, syncing should be set to false (in finally block)
         assertFalse(syncing.get());
+    }
+
+    @Test
+    void handleManifestRequest_postsTimeSyncMarkerAtEntry() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        Path testFile = tempDir.resolve("manifestTest.txt");
+        Files.writeString(testFile, "content");
+
+        coordinator.handleManifestRequest(null, null);
+
+        assertTrue(
+                postedEvents.stream()
+                        .anyMatch(
+                                e ->
+                                        e instanceof SyncEvent.LogEvent le
+                                                && le.getMessage().startsWith("TIME-SYNC")
+                                                && TimeSyncMarker.parseEpochMs(le.getMessage())
+                                                        != null),
+                "handleManifestRequest must log a TIME-SYNC marker at entry so the receiver's log"
+                        + " can be aligned with the sender's");
     }
 
     // ========== Complex tests: handleIncomingBatch ==========

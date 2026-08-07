@@ -256,6 +256,9 @@ public class SyncCoordinator {
         // sends a manifest, the other receives it, then roles swap). The check is thus
         // unnecessary and this simplification ensures onSyncIdle always runs after completion.
         syncing.set(true);
+        // Time-sync marker paired with the sender's (posted in performSync) so the combined-log
+        // save can measure the clock offset between the two machines.
+        eventBus.post(new SyncEvent.LogEvent(TimeSyncMarker.markerMessage()));
         try {
             File syncFolder = syncFolderSupplier.get();
             if (syncFolder == null || !syncFolder.exists()) {
@@ -484,6 +487,9 @@ public class SyncCoordinator {
     private void performSync(SyncPreviewPlan providedPlan) {
         try {
             eventBus.post(new SyncEvent.SyncStartedEvent());
+            // Both peers log a time-sync marker at sync start so the combined-log save can align
+            // the two machines' clocks (they may differ) before merging their timestamps.
+            eventBus.post(new SyncEvent.LogEvent(TimeSyncMarker.markerMessage()));
             SyncPreviewPlan syncPlan =
                     providedPlan != null ? providedPlan : createSyncPreviewPlan();
             File syncFolder = syncFolderSupplier.get();
