@@ -276,6 +276,10 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                             if (response == 0) {
                                 state.setPendingMappingRemotePath(nRemote);
                                 onProceed.run();
+                            } else {
+                                // User cancelled the mapping prompt; re-evaluate the buttons in
+                                // case a previous flow left them disabled.
+                                updateSyncButtonState();
                             }
                         } catch (Exception e) {
                             logController.log(
@@ -353,6 +357,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                                                     ? "non-null"
                                                     : "null (cancelled)"));
                             if (previewResult == null) {
+                                // User cancelled the preview dialog; restore the button state so
+                                // the sync controls are usable again.
+                                updateSyncButtonState();
                                 return;
                             }
                             SyncPreviewPlan selectedPlan = previewResult.getPlan();
@@ -378,6 +385,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                                 if (!conflictsResolved) {
                                     logController.log(
                                             "[DEBUG] runSyncPreview: user cancelled conflict resolution");
+                                    // User cancelled conflict resolution; restore the button
+                                    // state so the sync controls are usable again.
+                                    updateSyncButtonState();
                                     return;
                                 }
                                 // Re-create filtered plan now that conflicts have resolutions

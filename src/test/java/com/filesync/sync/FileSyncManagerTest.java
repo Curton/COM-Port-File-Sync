@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.serial.XModemTransfer;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -353,6 +354,118 @@ class FileSyncManagerTest {
             assertTrue(
                     Arrays.equals(result, expected),
                     "Bytes received via XMODEM should match the scripted payload");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void incomingFileContentRequest_largeFile_xmodemSend_postsSyncControlRefresh() throws Exception {
+        File folder = tempDir.resolve("large-content-refresh").toFile();
+        folder.mkdirs();
+        // Just above XMODEM_CONTENT_THRESHOLD (64 KB) so the responder picks the XMODEM path.
+        byte[] bigContent = new byte[64 * 1024 + 1];
+        File big = new File(folder, "big.bin");
+        Files.write(big.toPath(), bigContent);
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+
+            // Scripted peer: request the large file, ACK the FILE_CONTENT_XFER announcement, then
+            // play the XMODEM receiver role — 'C' handshake plus a generous surplus of ACKs so
+            // every 4K/128-byte block (and the final EOT) is acknowledged.
+            String encodedPath = SyncProtocol.encodePathForProtocol("big.bin");
+            serial.feedLine("[[SYNC:FILE_CONTENT_REQ:" + encodedPath + "]]");
+            serial.feedLine("[[SYNC:ACK]]");
+            byte[] peerBytes = new byte[1 + 60];
+            peerBytes[0] = XModemTransfer.C;
+            Arrays.fill(peerBytes, 1, peerBytes.length, XModemTransfer.ACK);
+            serial.feedBytes(peerBytes);
+
+            // The refresh event is the regression guard: XMODEM progress events disable the sync
+            // controls while the transfer is in flight, and the refresh must restore them once it
+            // completes (fix for buttons staying gray after cancelling conflict resolution).
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.SyncControlRefreshEvent),
+                    Duration.ofSeconds(10));
+
+            assertTrue(
+                    serial.getWrittenLines()
+                            .contains("[[SYNC:FILE_CONTENT_XFER:" + bigContent.length + "]]"),
+                    "Large-file response must announce FILE_CONTENT_XFER with the exact size as"
+                            + " the sole first parameter");
+            assertFalse(
+                    fsm.isTransferBusy(),
+                    "isTransferBusy must be false after the XMODEM content transfer completes");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void fetchRemoteFileContent_xmodemXferResponse_postsSyncControlRefresh() throws Exception {
+        File folder = tempDir.resolve("root-xfer-refresh").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            byte[] expected = new byte[100];
+            for (int i = 0; i < expected.length; i++) {
+                expected[i] = (byte) i;
+            }
+
+            // Mirror the responder's sendFileContentViaXmodem: the announcement carries the size
+            // as the sole first parameter (index 0), followed by the raw XMODEM byte stream.
+            Thread feeder =
+                    new Thread(
+                            () -> {
+                                waitUntil(
+                                        () ->
+                                                serial.getWrittenLines().stream()
+                                                        .anyMatch(
+                                                                l ->
+                                                                        l.contains(
+                                                                                "FILE_CONTENT_REQ")),
+                                        Duration.ofSeconds(5));
+                                serial.feedLine(
+                                        "[[SYNC:FILE_CONTENT_XFER:" + expected.length + "]]");
+                                serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(expected));
+                            },
+                            "fsm-test-feeder-xfer-refresh");
+            feeder.start();
+
+            byte[] result = fsm.fetchRemoteFileContent("big.bin");
+            feeder.join(5_000);
+
+            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
+            assertTrue(result != null, "fetchRemoteFileContent should return XMODEM content");
+            assertTrue(
+                    Arrays.equals(result, expected),
+                    "Bytes received via XMODEM should match the scripted payload");
+            assertTrue(
+                    events.stream()
+                            .anyMatch(
+                                    e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
+                            + " completes");
         } finally {
             stopQuietly(fsm);
         }

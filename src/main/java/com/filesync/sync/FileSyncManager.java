@@ -467,6 +467,9 @@ public class FileSyncManager {
                         new SyncEvent.LogEvent(
                                 "Sending large log via XMODEM (" + logBytes.length + " bytes)"));
                 protocol.sendLogViaXmodem(logBytes, logBytes.length);
+                // XMODEM progress events disable the sync controls while the transfer is in
+                // flight; refresh them now that the transfer has completed.
+                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             } else {
                 protocol.sendLogData(Base64.getEncoder().encodeToString(logBytes));
             }
@@ -569,7 +572,11 @@ public class FileSyncManager {
                 }
                 if (SyncProtocol.CMD_FILE_CONTENT_XFER.equals(cmd)) {
                     int fileSize = msg.getParamAsInt(0);
-                    return protocol.receiveFileContentViaXmodem(fileSize);
+                    byte[] content = protocol.receiveFileContentViaXmodem(fileSize);
+                    // XMODEM progress events disable the sync controls while the transfer is in
+                    // flight; refresh them now that the transfer has completed.
+                    eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+                    return content;
                 }
                 if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
                     return null;
@@ -675,6 +682,9 @@ public class FileSyncManager {
                 if (SyncProtocol.CMD_LOG_XFER.equals(cmd)) {
                     int logSize = msg.getParamAsInt(0);
                     byte[] data = protocol.receiveFileContentViaXmodem(logSize);
+                    // XMODEM progress events disable the sync controls while the transfer is in
+                    // flight; refresh them now that the transfer has completed.
+                    eventBus.post(new SyncEvent.SyncControlRefreshEvent());
                     return data != null ? new String(data, StandardCharsets.UTF_8) : null;
                 }
                 if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
@@ -858,6 +868,10 @@ public class FileSyncManager {
                                                         + fileSize
                                                         + " bytes)"));
                                 protocol.sendFileContentViaXmodem(content, (int) fileSize);
+                                // XMODEM progress events disable the sync controls while the
+                                // transfer is in flight; refresh them now that the transfer has
+                                // completed.
+                                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
                             } else {
                                 protocol.sendFileContentResponse(relativePath, content);
                             }
