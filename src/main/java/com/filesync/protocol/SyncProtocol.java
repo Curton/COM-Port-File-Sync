@@ -335,6 +335,15 @@ public class SyncProtocol {
      * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
      * sourceSize} lets the receiver pre-size the output buffer.
      *
+     * <p>Recovery contract: the command/ACK handshake is retried up to {@code maxAttempts} times,
+     * because a failure there occurs before the receiver enters {@code xmodem.receive()} and a
+     * re-sent command is safe. Once the XMODEM phase is entered, any failure ({@code xmodem.send}
+     * returning {@code false} or throwing) is terminal: a transfer-cancel is sent to release the
+     * receiver from its blocking {@code xmodem.receive()} and no further attempts are made. A
+     * re-sent command after a mid-transfer failure would otherwise be consumed as XMODEM data,
+     * desynchronizing the peers; the cancel-driven reset (peer {@code restartListening}) is the
+     * intended recovery, and the file is re-evaluated on the next sync.
+     *
      * @return true if the delta was compressed, false otherwise
      */
     public boolean sendFileDelta(
@@ -350,8 +359,11 @@ public class SyncProtocol {
         long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
 
         final int maxAttempts = 3;
+        int attemptsUsed = 0;
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            boolean xmodemPhase = false;
             try {
                 sendCommand(
                         CMD_FILE_DELTA,
@@ -364,6 +376,7 @@ public class SyncProtocol {
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
+                xmodemPhase = true;
                 boolean success;
                 try {
                     success = xmodem.send(compressedData.getData());
@@ -377,6 +390,23 @@ public class SyncProtocol {
                 lastFailure = e;
             }
 
+            if (xmodemPhase) {
+                // XMODEM-phase failure: the receiver may still be blocked in xmodem.receive(),
+                // so a re-sent command would be swallowed as XMODEM data. Cancel the peer's
+                // receive and stop instead of retrying.
+                try {
+                    sendTransferCancel();
+                } catch (IOException ignored) {
+                }
+                try {
+                    serialPort.clearInputBuffer();
+                } catch (IOException ignored) {
+                }
+                break;
+            }
+
+            // Command/ACK-phase failure: the receiver has not entered xmodem.receive() yet, so
+            // re-sending the command is safe.
             try {
                 serialPort.clearInputBuffer();
             } catch (IOException ignored) {
@@ -400,8 +430,8 @@ public class SyncProtocol {
                         "Failed to send file delta for "
                                 + relativePath
                                 + " after "
-                                + maxAttempts
-                                + " attempts ("
+                                + attemptsUsed
+                                + " attempt(s) ("
                                 + detail
                                 + ")");
         if (lastFailure != null) {
@@ -521,14 +551,22 @@ public class SyncProtocol {
 
         byte[] batch = BatchTransferSession.buildBatch(files, maxBatchSizeBytes);
 
-        // Try once; unlike per-file retries, a failed batch is retried as a whole
-        for (int attempt = 1; attempt <= 3; attempt++) {
+        // Retry only the command/ACK handshake. Once the XMODEM phase is entered, a failure is
+        // terminal: the receiver may be blocked in xmodem.receive() and a re-sent command would
+        // be consumed as XMODEM data, desynchronizing the peers. See sendFileDelta for the full
+        // rationale; the cancel-driven reset (peer restartListening) is the intended recovery.
+        final int maxAttempts = 3;
+        int attemptsUsed = 0;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            boolean xmodemPhase = false;
             try {
                 sendCommand(CMD_BATCH_DATA, String.valueOf(batch.length));
 
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
+                xmodemPhase = true;
                 boolean success;
                 try {
                     success = xmodem.send(batch);
@@ -540,25 +578,41 @@ public class SyncProtocol {
                     return true;
                 }
             } catch (IOException e) {
-                if (attempt < 3) {
-                    try {
-                        Thread.sleep(200);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                // lastFailure tracking is unnecessary here: sendBatch returns false rather than
+                // reporting a cause, and the detail is not surfaced.
+            }
+
+            if (xmodemPhase) {
+                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
+                try {
+                    sendTransferCancel();
+                } catch (IOException ignored) {
                 }
-                // Best-effort cleanup
                 try {
                     serialPort.clearInputBuffer();
                 } catch (IOException ignored) {
                 }
+                break;
+            }
+
+            // Command/ACK-phase failure: safe to retry.
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException ignored) {
+            }
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
-        // All attempts failed. Notify the receiver so it exits its XMODEM receive loop
-        // and does not stay stuck waiting for data that will never come.
+        // All attempts failed. Notify the receiver so it exits any XMODEM receive loop still
+        // pending from a command-phase failure (an XMODEM-phase failure already sent a cancel).
         try {
-            sendError("Batch transfer failed after 3 attempts");
+            sendError("Batch transfer failed after " + attemptsUsed + " attempt(s)");
         } catch (IOException ignored) {
             // Best-effort; if this also fails, receiver will eventually timeout
         }
@@ -652,10 +706,15 @@ public class SyncProtocol {
         boolean wasCompressed = compressedData.isCompressed();
         long lastModified = file.lastModified();
 
-        // Try to send the file with limited retries in case of handshake issues
+        // Retry only the command/ACK handshake; an XMODEM-phase failure is terminal because the
+        // receiver may be blocked in xmodem.receive() and a re-sent command would be consumed as
+        // XMODEM data. See sendFileDelta for the full rationale.
         final int maxAttempts = 3;
+        int attemptsUsed = 0;
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            boolean xmodemPhase = false;
             try {
                 // Send file header for this attempt
                 sendCommand(
@@ -670,6 +729,7 @@ public class SyncProtocol {
 
                 // Send file data via XMODEM
                 xmodemInProgress.set(true);
+                xmodemPhase = true;
                 boolean success;
                 try {
                     success = xmodem.send(compressedData.getData());
@@ -681,11 +741,24 @@ public class SyncProtocol {
                     return wasCompressed;
                 }
             } catch (IOException e) {
-                // Failed attempt - continue to cleanup and retry logic below
+                // Failed attempt - continue to cleanup and retry/cancel logic below
                 lastFailure = e;
             }
 
-            // Best-effort cleanup between attempts
+            if (xmodemPhase) {
+                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
+                try {
+                    sendTransferCancel();
+                } catch (IOException ignored) {
+                }
+                try {
+                    serialPort.clearInputBuffer();
+                } catch (IOException ignored) {
+                }
+                break;
+            }
+
+            // Command/ACK-phase failure: safe to retry.
             try {
                 serialPort.clearInputBuffer();
             } catch (IOException e) {
@@ -712,14 +785,15 @@ public class SyncProtocol {
                         "Failed to send file "
                                 + relativePath
                                 + " after "
-                                + maxAttempts
-                                + " attempts ("
+                                + attemptsUsed
+                                + " attempt(s) ("
                                 + detail
                                 + ")");
         if (lastFailure != null) {
             finalEx.addSuppressed(lastFailure);
         }
-        // Notify the receiver so it exits its XMODEM receive loop and does not stay stuck.
+        // Notify the receiver so it exits any XMODEM receive loop still pending from a
+        // command-phase failure (an XMODEM-phase failure already sent a cancel).
         try {
             sendError("File send failed: " + relativePath);
         } catch (IOException ignored) {
@@ -766,10 +840,15 @@ public class SyncProtocol {
         boolean wasCompressed = compressedData.isCompressed();
         long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
 
-        // Try to send the file with limited retries in case of handshake issues
+        // Retry only the command/ACK handshake; an XMODEM-phase failure is terminal because the
+        // receiver may be blocked in xmodem.receive() and a re-sent command would be consumed as
+        // XMODEM data. See sendFileDelta for the full rationale.
         final int maxAttempts = 3;
+        int attemptsUsed = 0;
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            boolean xmodemPhase = false;
             try {
                 sendCommand(
                         CMD_FILE_DATA,
@@ -781,6 +860,7 @@ public class SyncProtocol {
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
+                xmodemPhase = true;
                 boolean success;
                 try {
                     success = xmodem.send(compressedData.getData());
@@ -795,6 +875,20 @@ public class SyncProtocol {
                 lastFailure = e;
             }
 
+            if (xmodemPhase) {
+                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
+                try {
+                    sendTransferCancel();
+                } catch (IOException ignored) {
+                }
+                try {
+                    serialPort.clearInputBuffer();
+                } catch (IOException ignored) {
+                }
+                break;
+            }
+
+            // Command/ACK-phase failure: safe to retry.
             try {
                 serialPort.clearInputBuffer();
             } catch (IOException e) {
@@ -819,14 +913,15 @@ public class SyncProtocol {
                         "Failed to send merged file "
                                 + relativePath
                                 + " after "
-                                + maxAttempts
-                                + " attempts ("
+                                + attemptsUsed
+                                + " attempt(s) ("
                                 + detail
                                 + ")");
         if (lastFailure != null) {
             finalEx.addSuppressed(lastFailure);
         }
-        // Notify the receiver so it exits its XMODEM receive loop and does not stay stuck.
+        // Notify the receiver so it exits any XMODEM receive loop still pending from a
+        // command-phase failure (an XMODEM-phase failure already sent a cancel).
         try {
             sendError("File send failed: " + relativePath);
         } catch (IOException ignored) {

@@ -8,11 +8,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.filesync.delta.BlockSignature;
 import com.filesync.delta.FileSignatures;
 import com.filesync.delta.SignatureSet;
+import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.XModemTransfer;
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Real-loop tests for the delta-sync protocol entry points on {@link SyncProtocol} (sendFileDelta,
@@ -106,22 +111,35 @@ class DeltaSyncProtocolTest {
     }
 
     @Test
-    void sendFileDelta_lastModifiedZeroAndXmodemFailureRetriesAndThrows() throws IOException {
+    void sendFileDelta_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         serial.feedLine("[[SYNC:ACK]]"); // ACK for the first attempt's waitForCommand
-        // Peer rejects the block with CAN -> xmodem.send returns false (not throw).
+        // Peer rejects the block with CAN -> xmodem.send returns false (XMODEM-phase failure).
         serial.feedBytes(
                 new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
         SyncProtocol protocol = new SyncProtocol(serial);
-        protocol.setTimeout(150); // fast timeout so retries 2/3 waitForCommand fail quickly
+        protocol.setTimeout(150);
 
-        // lastModified=0 exercises the System.currentTimeMillis() fallback; the rejected send
-        // drives the retry loop and the final error throw.
+        // lastModified=0 exercises the System.currentTimeMillis() fallback.
         IOException thrown =
                 assertThrows(
                         IOException.class,
                         () -> protocol.sendFileDelta("a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
         assertTrue(thrown.getMessage().contains("Failed to send file delta"));
+        // XMODEM-phase failure must not retry: exactly one FILE_DELTA frame was written.
+        assertEquals(
+                1,
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_DELTA:a.bin"))
+                        .count(),
+                "XMODEM-phase failure must not re-send the command");
+        // A transfer cancel (CMD_CANCEL) must be sent to release the receiver's blocked
+        // xmodem.receive(); the raw CAN byte is a no-op in the scripted port, but the CMD_CANCEL
+        // frame goes through writeLine and is observable here.
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
+                "must send a transfer cancel on XMODEM-phase failure: " + serial.getWrittenLines());
+        assertTrue(thrown.getMessage().contains("after 1 attempt(s)"));
         assertFalse(protocol.isXmodemInProgress());
     }
 
@@ -175,16 +193,10 @@ class DeltaSyncProtocolTest {
     }
 
     @Test
-    void sendFileDelta_allAttemptsRejectedByPeer_hasNoLastFailure() throws IOException {
+    void sendFileDelta_commandPhaseFailure_retriesThreeTimesWithoutCancel() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        // ACK + CAN rejection for each of the 3 attempts: xmodem.send returns false every time
-        // (no IOException), so lastFailure stays null and the final error uses the XMODEM detail.
-        for (int a = 0; a < 3; a++) {
-            serial.feedLine("[[SYNC:ACK]]");
-            serial.feedBytes(
-                    new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN,
-                            XModemTransfer.CAN});
-        }
+        // No ACK is fed, so every waitForCommand(CMD_ACK) times out -> command/ACK-phase failure,
+        // which is the safe-to-retry case. The receiver never entered xmodem.receive().
         SyncProtocol protocol = new SyncProtocol(serial);
         protocol.setTimeout(150);
 
@@ -193,6 +205,117 @@ class DeltaSyncProtocolTest {
                         IOException.class,
                         () -> protocol.sendFileDelta("a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
         assertTrue(thrown.getMessage().contains("Failed to send file delta"));
+        // Command/ACK-phase failure must retry up to maxAttempts = 3.
+        assertEquals(
+                3,
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_DELTA:a.bin"))
+                        .count(),
+                "command-phase failure must retry the command: " + serial.getWrittenLines());
+        // No transfer cancel is needed because the receiver never entered xmodem.receive().
+        assertTrue(
+                serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
+                "must not cancel on command-phase failure: " + serial.getWrittenLines());
+        assertTrue(thrown.getMessage().contains("after 3 attempt(s)"));
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendFile_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt(@TempDir Path tempDir)
+            throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(
+                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.sendFile(
+                                        tempDir.toFile(), "a.bin", new byte[] {1, 2, 3}, 1234L));
+        assertTrue(thrown.getMessage().contains("Failed to send merged file"));
+        assertEquals(
+                1,
+                serial.getWrittenLines().stream().filter(l -> l.contains("FILE_DATA:a.bin")).count(),
+                "XMODEM-phase failure must not re-send the command");
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
+                "must send a transfer cancel: " + serial.getWrittenLines());
+        assertTrue(thrown.getMessage().contains("after 1 attempt(s)"));
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendFile_commandPhaseFailure_retriesThreeTimesWithoutCancel(@TempDir Path tempDir)
+            throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.sendFile(
+                                        tempDir.toFile(), "a.bin", new byte[] {1, 2, 3}, 1234L));
+        assertTrue(thrown.getMessage().contains("Failed to send merged file"));
+        assertEquals(
+                3,
+                serial.getWrittenLines().stream().filter(l -> l.contains("FILE_DATA:a.bin")).count(),
+                "command-phase failure must retry the command: " + serial.getWrittenLines());
+        assertTrue(
+                serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
+                "must not cancel on command-phase failure: " + serial.getWrittenLines());
+        assertTrue(thrown.getMessage().contains("after 3 attempt(s)"));
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendBatch_xmodemPhaseFailure_sendsCancelAndReturnsFalseAfterOneAttempt(@TempDir Path tempDir)
+            throws IOException {
+        File file = Files.write(tempDir.resolve("a.bin"), new byte[] {1, 2, 3}).toFile();
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(
+                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        List<Object[]> entries = List.<Object[]>of(new Object[] {file, "a.bin"});
+        boolean ok =
+                protocol.sendBatch(entries, 32 * 1024, null, tempDir.toFile());
+        assertFalse(ok, "XMODEM-phase failure must return false");
+        assertEquals(
+                1,
+                serial.getWrittenLines().stream().filter(l -> l.contains("BATCH_DATA")).count(),
+                "XMODEM-phase failure must not re-send the command");
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
+                "must send a transfer cancel: " + serial.getWrittenLines());
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendBatch_commandPhaseFailure_retriesThreeTimesWithoutCancelAndReturnsFalse(
+            @TempDir Path tempDir) throws IOException {
+        File file = Files.write(tempDir.resolve("a.bin"), new byte[] {1, 2, 3}).toFile();
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        List<Object[]> entries = List.<Object[]>of(new Object[] {file, "a.bin"});
+        boolean ok = protocol.sendBatch(entries, 32 * 1024, null, tempDir.toFile());
+        assertFalse(ok, "command-phase failure must return false after retries");
+        assertEquals(
+                3,
+                serial.getWrittenLines().stream().filter(l -> l.contains("BATCH_DATA")).count(),
+                "command-phase failure must retry the command: " + serial.getWrittenLines());
+        assertTrue(
+                serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
+                "must not cancel on command-phase failure: " + serial.getWrittenLines());
         assertFalse(protocol.isXmodemInProgress());
     }
 }
