@@ -1,13 +1,21 @@
 package com.filesync.sync;
 
+import com.filesync.delta.DeltaEncoder;
+import com.filesync.delta.FileSignatures;
+import com.filesync.delta.HashUtil;
+import com.filesync.delta.SignatureSet;
+import com.filesync.delta.SignatureUtil;
 import com.filesync.protocol.BatchTransferSession;
+import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -30,6 +38,7 @@ public class SyncCoordinator {
     private final BooleanSupplier connectionAliveSupplier;
     private final BooleanSupplier isSenderSupplier;
     private final BooleanSupplier roleNegotiatedSupplier;
+    private final PendingFileWriteService pendingFileWriteService;
     private final AtomicBoolean syncing;
     private final Runnable onSyncIdle;
     private final Runnable onSyncBoundary;
@@ -39,6 +48,12 @@ public class SyncCoordinator {
 
     // Cancellation flag for ongoing sync operations
     private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+
+    /** Minimum file size for rsync-style delta transfer; below this a full transfer is cheaper. */
+    static final long MIN_DELTA_SIZE = 8 * 1024L;
+
+    /** Sample size inspected to decide whether a candidate file is binary. */
+    private static final int BINARY_SAMPLE_SIZE = 4096;
 
     public SyncCoordinator(
             SyncProtocol protocol,
@@ -50,6 +65,7 @@ public class SyncCoordinator {
             BooleanSupplier connectionAliveSupplier,
             BooleanSupplier isSenderSupplier,
             BooleanSupplier roleNegotiatedSupplier,
+            PendingFileWriteService pendingFileWriteService,
             AtomicBoolean syncing,
             Runnable onSyncIdle,
             Runnable onSyncBoundary,
@@ -63,6 +79,7 @@ public class SyncCoordinator {
         this.connectionAliveSupplier = connectionAliveSupplier;
         this.isSenderSupplier = isSenderSupplier;
         this.roleNegotiatedSupplier = roleNegotiatedSupplier;
+        this.pendingFileWriteService = pendingFileWriteService;
         this.syncing = syncing;
         this.onSyncIdle = onSyncIdle;
         this.onSyncBoundary = onSyncBoundary;
@@ -207,6 +224,18 @@ public class SyncCoordinator {
                             "Detected " + conflicts.size() + " potential conflict(s)"));
         }
 
+        // Identify binary delta candidates: files present on both sides that differ, are large
+        // enough, are binary (so raw-byte block matching is valid), and are not in conflict.
+        // Signatures are exchanged lazily in performSync only when a sync actually runs.
+        Set<String> deltaCandidatePaths =
+                selectDeltaCandidates(filesToSync, remoteManifest, conflicts, syncFolder);
+        if (!deltaCandidatePaths.isEmpty()) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            deltaCandidatePaths.size()
+                                    + " binary file(s) eligible for delta transfer"));
+        }
+
         return new SyncPreviewPlan(
                 filesToSync,
                 emptyDirsToCreate,
@@ -214,7 +243,61 @@ public class SyncCoordinator {
                 emptyDirsToDelete,
                 totalBytesToTransfer,
                 strictMode,
-                conflicts);
+                conflicts,
+                deltaCandidatePaths);
+    }
+
+    /**
+     * Select paths eligible for rsync-style delta transfer: present on both sides (so the receiver
+     * has a base to diff against), large enough to be worth the signature round-trip, binary (raw
+     * block matching is only valid for binary content), and not subject to a conflict.
+     */
+    Set<String> selectDeltaCandidates(
+            List<FileChangeDetector.FileInfo> filesToSync,
+            FileChangeDetector.FileManifest remoteManifest,
+            List<ConflictInfo> conflicts,
+            File syncFolder) {
+        Set<String> conflictPaths = new LinkedHashSet<>();
+        for (ConflictInfo c : conflicts) {
+            conflictPaths.add(c.getPath());
+        }
+        Set<String> candidates = new LinkedHashSet<>();
+        for (FileChangeDetector.FileInfo fi : filesToSync) {
+            String path = fi.getPath();
+            if (fi.getSize() < MIN_DELTA_SIZE) {
+                continue;
+            }
+            if (!remoteManifest.getFiles().containsKey(path)) {
+                continue; // new file on sender, no receiver base to delta against
+            }
+            if (conflictPaths.contains(path)) {
+                continue; // conflicts need full-transfer / merge handling
+            }
+            File file = new File(syncFolder, path);
+            if (!file.isFile() || !isBinaryFile(file)) {
+                continue;
+            }
+            candidates.add(path);
+        }
+        return candidates;
+    }
+
+    /**
+     * Sample-based binary detection consistent with {@link FileChangeDetector#calculateMD5}: read up
+     * to {@value #BINARY_SAMPLE_SIZE} bytes and classify via {@link CompressionUtil#isLikelyBinaryContent}.
+     */
+    static boolean isBinaryFile(File file) {
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+            byte[] sample = new byte[BINARY_SAMPLE_SIZE];
+            int read = fis.read(sample);
+            if (read <= 0) {
+                return false;
+            }
+            byte[] buf = read == BINARY_SAMPLE_SIZE ? sample : java.util.Arrays.copyOf(sample, read);
+            return CompressionUtil.isLikelyBinaryContent(buf);
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -314,8 +397,10 @@ public class SyncCoordinator {
         }
         syncing.set(true);
         try {
+            int[] failedCount = new int[1];
             BatchTransferSession.BatchProgressCallback callback =
                     (idx, total, relPath) -> {
+                        pendingFileWriteService.markWritten(relPath);
                         eventBus.post(
                                 new SyncEvent.LogEvent(
                                         "Batch receiving ["
@@ -326,8 +411,26 @@ public class SyncCoordinator {
                                                 + relPath));
                         touchHeartbeat();
                     };
-            protocol.receiveBatch(expectedSize, totalOperations, callback, syncFolder);
-            eventBus.post(new SyncEvent.LogEvent("Batch received successfully"));
+            BatchTransferSession.WriteFailureHandler failureHandler =
+                    (path, data, lastModified, message) -> {
+                        failedCount[0]++;
+                        pendingFileWriteService.enqueue(
+                                syncFolder, path, data, lastModified, message);
+                    };
+            int written =
+                    protocol.receiveBatch(
+                            expectedSize, totalOperations, callback, syncFolder, failureHandler);
+            if (failedCount[0] > 0) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Batch received ("
+                                        + written
+                                        + " files, "
+                                        + failedCount[0]
+                                        + " waiting for user decision)"));
+            } else {
+                eventBus.post(new SyncEvent.LogEvent("Batch received successfully"));
+            }
         } finally {
             syncing.set(false);
             onSyncIdle.run();
@@ -347,8 +450,10 @@ public class SyncCoordinator {
         }
         syncing.set(true);
         try {
+            int[] failedCount = new int[1];
             BatchTransferSession.BatchProgressCallback callback =
                     (idx, total, relPath) -> {
+                        pendingFileWriteService.markWritten(relPath);
                         eventBus.post(
                                 new SyncEvent.LogEvent(
                                         "Batch receiving ["
@@ -359,8 +464,25 @@ public class SyncCoordinator {
                                                 + relPath));
                         touchHeartbeat();
                     };
-            protocol.receiveBatch(expectedSize, 0, callback, syncFolder);
-            eventBus.post(new SyncEvent.LogEvent("Batch received successfully"));
+            BatchTransferSession.WriteFailureHandler failureHandler =
+                    (path, data, lastModified, message) -> {
+                        failedCount[0]++;
+                        pendingFileWriteService.enqueue(
+                                syncFolder, path, data, lastModified, message);
+                    };
+            int written =
+                    protocol.receiveBatch(expectedSize, 0, callback, syncFolder, failureHandler);
+            if (failedCount[0] > 0) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Batch received ("
+                                        + written
+                                        + " files, "
+                                        + failedCount[0]
+                                        + " waiting for user decision)"));
+            } else {
+                eventBus.post(new SyncEvent.LogEvent("Batch received successfully"));
+            }
         } finally {
             syncing.set(false);
             onSyncIdle.run();
@@ -386,12 +508,112 @@ public class SyncCoordinator {
             resolveSafe(syncFolder, relativePath);
             protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
             eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
+            pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
             flushSharedTextBetweenOperations();
+        } catch (FileWriteException e) {
+            // The transfer succeeded but the target file is locked by another program: queue it
+            // for a user decision instead of dropping it or tearing down the connection.
+            syncing.set(false);
+            onSyncIdle.run();
+            // Transfer-progress events left the Sync Control button in its "Cancel" state.
+            // Now that syncing is false, refresh it so the user sees "Start Sync" while the
+            // pending-write dialog is open instead of a stale, enabled "Cancel" button.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            pendingFileWriteService.enqueue(
+                    syncFolder, e.getRelativePath(), e.getData(), e.getLastModified(), e.getMessage());
         } catch (IOException e) {
             syncing.set(false);
             onSyncIdle.run();
             // Re-throw so the listenLoop's catch(IOException) handles it (may restart)
+            throw e;
+        }
+    }
+
+    /**
+     * Receiver-side handler for {@link SyncProtocol#CMD_DELTA_SIG_REQ}: compute block signatures for
+     * the requested paths that exist locally and return them as a single {@link SignatureSet}.
+     * Missing or unreadable files are silently omitted; the sender treats an absent path as "no
+     * signatures available" and falls back to a full transfer for it.
+     */
+    public void handleDeltaSigRequest(List<String> paths) throws IOException {
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null || !syncFolder.exists()) {
+            protocol.sendError("Sync folder not configured");
+            return;
+        }
+        syncing.set(true);
+        try {
+            List<FileSignatures> entries = new ArrayList<>();
+            for (String path : paths) {
+                try {
+                    File file = resolveSafe(syncFolder, path);
+                    if (!file.exists() || !file.isFile()) {
+                        continue;
+                    }
+                    entries.add(SignatureUtil.compute(path, file));
+                } catch (IOException e) {
+                    // Skip unreadable files; sender falls back to full transfer.
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Skipping signature for " + path + ": " + e.getMessage()));
+                }
+            }
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Sending block signatures for " + entries.size() + " file(s)..."));
+            protocol.sendDeltaSignatures(new SignatureSet(entries));
+        } finally {
+            syncing.set(false);
+            onSyncIdle.run();
+        }
+    }
+
+    /**
+     * Receiver-side handler for {@link SyncProtocol#CMD_FILE_DELTA}: receive the delta, reconstruct
+     * the file from the existing local copy, verify the MD5, and write it. A locked-target write
+     * failure queues the reconstructed bytes for deferred retry; an MD5 mismatch or decode error
+     * re-throws so the listen loop can restart (the file is re-evaluated on the next sync).
+     */
+    public void handleIncomingFileDelta(SyncProtocol.Message msg) throws IOException {
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null) {
+            syncing.set(false);
+            onSyncIdle.run();
+            return;
+        }
+        syncing.set(true);
+        String relativePath = msg.getParam(0);
+        int size = msg.getParamAsInt(1);
+        boolean compressed = msg.getParamAsBoolean(2);
+        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+        long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+        String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
+
+        eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
+        protocol.sendAck();
+        try {
+            resolveSafe(syncFolder, relativePath);
+            protocol.receiveFileDelta(
+                    syncFolder, relativePath, size, compressed, lastModified, sourceSize, sourceMd5);
+            eventBus.post(new SyncEvent.LogEvent("Delta applied: " + relativePath));
+            pendingFileWriteService.markWritten(relativePath);
+            touchHeartbeat();
+            flushSharedTextBetweenOperations();
+        } catch (FileWriteException e) {
+            // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
+            syncing.set(false);
+            onSyncIdle.run();
+            // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
+            // delta transfer left it as an enabled "Cancel", but syncing is now false.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            pendingFileWriteService.enqueue(
+                    syncFolder, e.getRelativePath(), e.getData(), e.getLastModified(), e.getMessage());
+        } catch (IOException e) {
+            syncing.set(false);
+            onSyncIdle.run();
+            // Re-throw: an MD5 mismatch or decode error aborts/restarts the sync; the file is
+            // recompared against fresh manifests on the next attempt and sent fully if needed.
             throw e;
         }
     }
@@ -578,14 +800,134 @@ public class SyncCoordinator {
                 flushSharedTextBetweenOperations();
             }
 
+            // Partition regular files: binary delta candidates are sent individually via
+            // CMD_FILE_DELTA after a block-signature exchange; the rest go through the batch
+            // path. Candidates whose delta is not beneficial (or have no receiver signature)
+            // fall back to the batch path so total transferred content is unchanged.
+            Set<String> deltaCandidatePaths = syncPlan.getDeltaCandidatePaths();
+            List<FileChangeDetector.FileInfo> deltaCandidates = new ArrayList<>();
+            List<FileChangeDetector.FileInfo> batchFiles = new ArrayList<>();
+            for (FileChangeDetector.FileInfo fi : regularFiles) {
+                if (deltaCandidatePaths.contains(fi.getPath())) {
+                    deltaCandidates.add(fi);
+                } else {
+                    batchFiles.add(fi);
+                }
+            }
+
+            SignatureSet signatureSet = SignatureSet.empty();
+            if (!deltaCandidates.isEmpty()) {
+                exitSyncIfCancelled();
+                List<String> candidatePaths = new ArrayList<>();
+                for (FileChangeDetector.FileInfo fi : deltaCandidates) {
+                    candidatePaths.add(fi.getPath());
+                }
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Requesting block signatures for "
+                                        + candidatePaths.size()
+                                        + " binary file(s)..."));
+                try {
+                    signatureSet = protocol.requestDeltaSignatures(candidatePaths);
+                } catch (IOException e) {
+                    // The peer may not support delta sync (older version) or the exchange failed.
+                    // Fall back to full transfer for every candidate so the sync still completes.
+                    signatureSet = SignatureSet.empty();
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Delta sync unavailable ("
+                                            + e.getMessage()
+                                            + "); using full transfer"));
+                }
+
+                if (signatureSet.isEmpty()) {
+                    // No signatures: send all candidates through the full batch path.
+                    batchFiles.addAll(deltaCandidates);
+                } else {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Block signatures received for "
+                                            + signatureSet.size()
+                                            + " file(s)"));
+                    List<FileChangeDetector.FileInfo> deltaFallback = new ArrayList<>();
+                    for (FileChangeDetector.FileInfo fi : deltaCandidates) {
+                        exitSyncIfCancelled();
+                        String path = fi.getPath();
+                        FileSignatures sigs = signatureSet.get(path);
+                        if (sigs == null) {
+                            // Receiver lacked the file or could not sign it: full transfer.
+                            deltaFallback.add(fi);
+                            continue;
+                        }
+                        File file = new File(syncFolder, path);
+                        byte[] source;
+                        try {
+                            source = Files.readAllBytes(file.toPath());
+                        } catch (IOException e) {
+                            eventBus.post(
+                                    new SyncEvent.ErrorEvent(
+                                            "Failed to read "
+                                                    + path
+                                                    + " for delta: "
+                                                    + e.getMessage()));
+                            deltaFallback.add(fi);
+                            continue;
+                        }
+                        byte[] delta = DeltaEncoder.encode(source, sigs);
+                        CompressionUtil.CompressedData deltaCompressed =
+                                CompressionUtil.compressIfBeneficial(path, delta);
+                        CompressionUtil.CompressedData fullCompressed =
+                                CompressionUtil.compressIfBeneficial(path, source);
+                        if (!DeltaEncoder.isBeneficial(
+                                deltaCompressed.getData().length, fullCompressed.getData().length)) {
+                            deltaFallback.add(fi);
+                            eventBus.post(
+                                    new SyncEvent.LogEvent(
+                                            "Delta not beneficial for " + path + "; using full transfer"));
+                            continue;
+                        }
+                        String sourceMd5 = HashUtil.md5Hex(source);
+                        operationIndex++;
+                        long lastModified = file.lastModified();
+                        long sendStart = System.currentTimeMillis();
+                        boolean wasCompressed =
+                                protocol.sendFileDelta(
+                                        path, delta, lastModified, source.length, sourceMd5);
+                        long sendMs = System.currentTimeMillis() - sendStart;
+                        long savedBytes =
+                                (long) fullCompressed.getData().length
+                                        - deltaCompressed.getData().length;
+                        int pct = (int) (100 * savedBytes / Math.max(1, fullCompressed.getData().length));
+                        String msg =
+                                "Delta syncing binary ["
+                                        + operationIndex
+                                        + "/"
+                                        + totalOperationsRef[0]
+                                        + "]: "
+                                        + path;
+                        if (wasCompressed) msg += " (compressed)";
+                        msg += " (saved " + pct + "%)" + String.format(" [%dms]", sendMs);
+                        eventBus.post(new SyncEvent.LogEvent(msg));
+                        eventBus.post(
+                                new SyncEvent.FileProgressEvent(
+                                        operationIndex, totalOperationsRef[0], path));
+                        savedOpIndex = operationIndex;
+                        touchHeartbeat();
+                        flushSharedTextBetweenOperations();
+                    }
+                    // Fallbacks rejoin the batch path; their indices are counted by the batch loop.
+                    batchFiles.addAll(deltaFallback);
+                }
+            }
+
             // Send regular files in batches to reduce per-file XMODEM handshakes.
             // Each batch is a single XMODEM transfer; files within a batch are encoded
             // in a binary envelope and decoded atomically on the receiver side.
-            if (!regularFiles.isEmpty()) {
+            if (!batchFiles.isEmpty()) {
                 final int BATCH_BYTE_TARGET = 32 * 1024; // ~32 KB per batch; tune as needed
                 List<Object[]> batch = new ArrayList<>();
 
-                for (FileChangeDetector.FileInfo fileInfo : regularFiles) {
+                for (FileChangeDetector.FileInfo fileInfo : batchFiles) {
                     File file = new File(syncFolder, fileInfo.getPath());
                     batch.add(new Object[] {file, fileInfo.getPath()});
 

@@ -318,4 +318,105 @@ class SyncPreviewPlanTest {
                 plan.getTotalOperations(),
                 "Should sum files + dirs to create + files to delete + dirs to delete");
     }
+
+    @Test
+    void deltaCandidatePathsDefaultsToEmpty() {
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        List.of(new FileChangeDetector.FileInfo("a.bin", 10, 0, "a")),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        10L,
+                        false);
+        assertTrue(plan.getDeltaCandidatePaths().isEmpty());
+    }
+
+    @Test
+    void deltaCandidatePathsAreRetainedAndImmutable() {
+        Set<String> candidates = new LinkedHashSet<>(List.of("x.bin", "y.bin"));
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        List.of(
+                                new FileChangeDetector.FileInfo("x.bin", 10, 0, "a"),
+                                new FileChangeDetector.FileInfo("y.bin", 10, 0, "b")),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        20L,
+                        false,
+                        List.of(),
+                        candidates);
+        assertEquals(Set.of("x.bin", "y.bin"), plan.getDeltaCandidatePaths());
+    }
+
+    @Test
+    void createFilteredPlanIntersectsDeltaCandidatesWithSelection() {
+        FileChangeDetector.FileInfo keep =
+                new FileChangeDetector.FileInfo("keep.bin", 10, 0, "a");
+        FileChangeDetector.FileInfo drop =
+                new FileChangeDetector.FileInfo("drop.bin", 10, 0, "b");
+        Set<String> candidates = new LinkedHashSet<>(List.of("keep.bin", "drop.bin"));
+        SyncPreviewPlan basePlan =
+                new SyncPreviewPlan(
+                        List.of(keep, drop),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        20L,
+                        false,
+                        List.of(),
+                        candidates);
+
+        SyncPreviewPlan filtered =
+                basePlan.createFilteredPlan(
+                        new LinkedHashSet<>(List.of("keep.bin", "drop.bin")),
+                        null,
+                        null,
+                        null);
+
+        assertEquals(Set.of("keep.bin", "drop.bin"), filtered.getDeltaCandidatePaths());
+    }
+
+    @Test
+    void deltaCandidatePaths_nullDefaultsToEmpty() {
+        // deltaCandidatePaths == null exercises the null-guard fallback in the constructor.
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        List.of(new FileChangeDetector.FileInfo("a.bin", 10, 0, "a")),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        10L,
+                        false,
+                        List.of(),
+                        null);
+        assertTrue(plan.getDeltaCandidatePaths().isEmpty());
+    }
+
+    @Test
+    void filterDeltaCandidates_excludesFilesNotInCandidateSet() {
+        // A filtered file that is not a delta candidate exercises the contains()==false branch.
+        FileChangeDetector.FileInfo cand =
+                new FileChangeDetector.FileInfo("cand.bin", 10, 0, "a");
+        FileChangeDetector.FileInfo normal =
+                new FileChangeDetector.FileInfo("normal.txt", 10, 0, "b");
+        Set<String> candidates = new LinkedHashSet<>(List.of("cand.bin"));
+        SyncPreviewPlan basePlan =
+                new SyncPreviewPlan(
+                        List.of(cand, normal),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        20L,
+                        false,
+                        List.of(),
+                        candidates);
+
+        SyncPreviewPlan filtered =
+                basePlan.createFilteredPlan(
+                        new LinkedHashSet<>(List.of("cand.bin", "normal.txt")), null, null, null);
+
+        assertEquals(Set.of("cand.bin"), filtered.getDeltaCandidatePaths());
+    }
 }

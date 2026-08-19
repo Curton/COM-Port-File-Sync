@@ -17,6 +17,7 @@ public final class SyncPreviewPlan {
     private final boolean strictSyncMode;
     private final int totalOperations;
     private final List<ConflictInfo> conflicts;
+    private final Set<String> deltaCandidatePaths;
 
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,
@@ -43,6 +44,26 @@ public final class SyncPreviewPlan {
             long totalBytesToTransfer,
             boolean strictSyncMode,
             List<ConflictInfo> conflicts) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                Collections.emptySet());
+    }
+
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -55,6 +76,10 @@ public final class SyncPreviewPlan {
                         + this.filesToDelete.size()
                         + this.emptyDirectoriesToDelete.size();
         this.conflicts = conflicts != null ? List.copyOf(conflicts) : Collections.emptyList();
+        this.deltaCandidatePaths =
+                deltaCandidatePaths != null
+                        ? Collections.unmodifiableSet(new HashSet<>(deltaCandidatePaths))
+                        : Collections.emptySet();
     }
 
     public SyncPreviewPlan createFilteredPlan(
@@ -80,6 +105,8 @@ public final class SyncPreviewPlan {
                         .mapToLong(FileChangeDetector.FileInfo::getSize)
                         .sum();
 
+        Set<String> filteredDeltaCandidates = filterDeltaCandidates(filteredFilesToTransfer);
+
         return new SyncPreviewPlan(
                 filteredFilesToTransfer,
                 filteredEmptyDirectoriesToCreate,
@@ -87,7 +114,22 @@ public final class SyncPreviewPlan {
                 filteredEmptyDirectoriesToDelete,
                 filteredTotalBytesToTransfer,
                 strictSyncMode,
-                conflicts);
+                conflicts,
+                filteredDeltaCandidates);
+    }
+
+    /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
+    private Set<String> filterDeltaCandidates(List<FileChangeDetector.FileInfo> filteredFiles) {
+        if (deltaCandidatePaths.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<String> result = new HashSet<>();
+        for (FileChangeDetector.FileInfo fi : filteredFiles) {
+            if (deltaCandidatePaths.contains(fi.getPath())) {
+                result.add(fi.getPath());
+            }
+        }
+        return result;
     }
 
     private static List<FileChangeDetector.FileInfo> filterFilesBySelectionAndConflicts(
@@ -174,6 +216,11 @@ public final class SyncPreviewPlan {
 
     public List<ConflictInfo> getConflicts() {
         return conflicts;
+    }
+
+    /** Paths of binary files eligible for rsync-style delta transfer (exist on both sides, large enough). */
+    public Set<String> getDeltaCandidatePaths() {
+        return deltaCandidatePaths;
     }
 
     public boolean hasConflict(String path) {

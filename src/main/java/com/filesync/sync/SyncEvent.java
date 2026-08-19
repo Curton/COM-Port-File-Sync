@@ -1,5 +1,7 @@
 package com.filesync.sync;
 
+import java.util.List;
+
 /**
  * Marker interface for sync events. Concrete event types are provided as nested classes for
  * convenience.
@@ -229,6 +231,23 @@ public interface SyncEvent {
         @Override
         public SyncEventType getType() {
             return SyncEventType.REMOTE_FOLDER_CHANGED;
+        }
+    }
+
+    final class PendingWriteEvent implements SyncEvent {
+        private final List<String> pendingPaths;
+
+        public PendingWriteEvent(List<String> pendingPaths) {
+            this.pendingPaths = pendingPaths;
+        }
+
+        public List<String> getPendingPaths() {
+            return pendingPaths;
+        }
+
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.PENDING_FILE_WRITE;
         }
     }
 }

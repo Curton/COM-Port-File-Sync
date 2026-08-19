@@ -8,7 +8,7 @@ class SyncEventTypeTest {
 
     @Test
     void enumContainsAllExpectedValues() {
-        assertEquals(14, SyncEventType.values().length);
+        assertEquals(15, SyncEventType.values().length);
         assertEquals("CONNECTION_STATUS", SyncEventType.CONNECTION_STATUS.name());
         assertEquals("DIRECTION_CHANGED", SyncEventType.DIRECTION_CHANGED.name());
         assertEquals("SYNC_STARTED", SyncEventType.SYNC_STARTED.name());
@@ -23,5 +23,6 @@ class SyncEventTypeTest {
         assertEquals("SHARED_TEXT_RECEIVED", SyncEventType.SHARED_TEXT_RECEIVED.name());
         assertEquals("DROP_FILE_RECEIVED", SyncEventType.DROP_FILE_RECEIVED.name());
         assertEquals("REMOTE_FOLDER_CHANGED", SyncEventType.REMOTE_FOLDER_CHANGED.name());
+        assertEquals("PENDING_FILE_WRITE", SyncEventType.PENDING_FILE_WRITE.name());
     }
 }

@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -70,6 +71,7 @@ public class FileSyncManager {
     private final ConnectionService connectionService;
     private final RoleNegotiationService roleNegotiationService;
     private final SharedTextService sharedTextService;
+    private final PendingFileWriteService pendingFileWriteService;
     private final SyncCoordinator syncCoordinator;
     private final FileDropService fileDropService;
 
@@ -110,6 +112,8 @@ public class FileSyncManager {
                         protocol::isXmodemInProgress,
                         roleNegotiationService::isRoleNegotiated);
 
+        this.pendingFileWriteService = new PendingFileWriteService(eventBus);
+
         this.fileDropService =
                 new FileDropService(
                         protocol,
@@ -130,6 +134,7 @@ public class FileSyncManager {
                         connectionAlive::get,
                         roleNegotiationService::isSender,
                         roleNegotiationService::isRoleNegotiated,
+                        pendingFileWriteService,
                         syncing,
                         sharedTextService::onSyncIdle,
                         sharedTextService::onSyncBoundary,
@@ -322,6 +327,14 @@ public class FileSyncManager {
         syncing.set(false);
         connectionService.stop();
         sharedTextService.clearPendingSharedText();
+        if (pendingFileWriteService.getPendingCount() > 0) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            pendingFileWriteService.getPendingCount()
+                                    + " file(s) still locked by another program;"
+                                    + " they will be re-synced on the next sync: "
+                                    + String.join(", ", pendingFileWriteService.getPendingPaths())));
+        }
         protocol.clearStashedMessages();
         serialPort.close();
 
@@ -373,6 +386,21 @@ public class FileSyncManager {
 
     public void sendDropFile(File file) {
         fileDropService.sendDropFile(file);
+    }
+
+    /** Retry writing the given pending files (user chose "Retry" in the pending-write dialog). */
+    public void retryPendingWrites(List<String> relativePaths) {
+        pendingFileWriteService.retry(relativePaths);
+    }
+
+    /** Skip writing the given pending files (user chose "Skip"). */
+    public void skipPendingWrites(List<String> relativePaths) {
+        pendingFileWriteService.skip(relativePaths);
+    }
+
+    /** Skip all pending files (user chose "Skip All"). */
+    public void skipAllPendingWrites() {
+        pendingFileWriteService.skipAll();
     }
 
     /** Initiate synchronization as sender. */
@@ -888,6 +916,9 @@ public class FileSyncManager {
             }
             case SyncProtocol.CMD_FILE_REQ -> syncCoordinator.handleFileRequest(msg.getParam(0));
             case SyncProtocol.CMD_FILE_DATA -> syncCoordinator.handleIncomingFileData(msg);
+            case SyncProtocol.CMD_DELTA_SIG_REQ ->
+                    syncCoordinator.handleDeltaSigRequest(List.of(msg.getParams()));
+            case SyncProtocol.CMD_FILE_DELTA -> syncCoordinator.handleIncomingFileDelta(msg);
             case SyncProtocol.CMD_BATCH_DATA -> {
                 int expectedSize = msg.getParamAsInt(0);
                 protocol.sendAck();

@@ -23,6 +23,8 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private final SettingsManager settings;
     private final LogController logController;
     private SyncPreviewRenderer previewRenderer;
+    private javax.swing.JDialog pendingWriteDialog;
+    private javax.swing.JList<String> pendingWriteList;
 
     public SyncController(
             JFrame owner,
@@ -585,5 +587,83 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     components.getProgressBar().setString("Error");
                     updateSyncButtonState();
                 });
+    }
+
+    /**
+     * Called on the EDT when received file(s) could not be written because another program holds
+     * them open. Shows a reusable dialog where the user chooses to retry, skip, or skip all; the
+     * dialog stays open until every pending file is resolved and never blocks the transfer. An
+     * empty list closes the dialog.
+     */
+    public void onPendingWrites(List<String> pendingPaths) {
+        if (pendingPaths == null || pendingPaths.isEmpty()) {
+            closePendingWriteDialog();
+            return;
+        }
+        ensurePendingWriteDialog();
+        pendingWriteList.setListData(pendingPaths.toArray(new String[0]));
+        if (!pendingWriteDialog.isVisible()) {
+            pendingWriteDialog.setVisible(true);
+        }
+    }
+
+    private void ensurePendingWriteDialog() {
+        if (pendingWriteDialog != null) {
+            return;
+        }
+        pendingWriteList = new javax.swing.JList<>();
+        pendingWriteList.setSelectionMode(
+                javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        pendingWriteList.setVisibleRowCount(8);
+
+        javax.swing.JButton retryButton = new javax.swing.JButton("重试");
+        retryButton.addActionListener(
+                e -> syncManager.retryPendingWrites(getPendingWriteSelection()));
+        javax.swing.JButton skipButton = new javax.swing.JButton("跳过");
+        skipButton.addActionListener(
+                e -> syncManager.skipPendingWrites(getPendingWriteSelection()));
+        javax.swing.JButton skipAllButton = new javax.swing.JButton("跳过全部");
+        skipAllButton.addActionListener(e -> syncManager.skipAllPendingWrites());
+
+        javax.swing.JPanel buttons =
+                new javax.swing.JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT));
+        buttons.add(retryButton);
+        buttons.add(skipButton);
+        buttons.add(skipAllButton);
+
+        javax.swing.JPanel content = new javax.swing.JPanel(new java.awt.BorderLayout(8, 8));
+        content.setBorder(javax.swing.BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        content.add(
+                new javax.swing.JLabel(
+                        "<html>以下文件被其他程序占用，无法写入：<br>"
+                                + "关闭占用它们的程序后点击“重试”，或选择“跳过”"
+                                + "（被跳过的文件将在下次同步时重新获取）：</html>"),
+                java.awt.BorderLayout.NORTH);
+        content.add(new javax.swing.JScrollPane(pendingWriteList), java.awt.BorderLayout.CENTER);
+        content.add(buttons, java.awt.BorderLayout.SOUTH);
+
+        pendingWriteDialog = new javax.swing.JDialog(owner, "文件被占用", false);
+        pendingWriteDialog.setContentPane(content);
+        pendingWriteDialog.setSize(520, 320);
+        pendingWriteDialog.setLocationRelativeTo(owner);
+    }
+
+    /** Selected paths, or all listed paths when nothing is selected. */
+    private List<String> getPendingWriteSelection() {
+        List<String> selected = pendingWriteList.getSelectedValuesList();
+        if (!selected.isEmpty()) {
+            return selected;
+        }
+        List<String> all = new java.util.ArrayList<>();
+        for (int i = 0; i < pendingWriteList.getModel().getSize(); i++) {
+            all.add(pendingWriteList.getModel().getElementAt(i));
+        }
+        return all;
+    }
+
+    private void closePendingWriteDialog() {
+        if (pendingWriteDialog != null && pendingWriteDialog.isVisible()) {
+            pendingWriteDialog.setVisible(false);
+        }
     }
 }

@@ -1,18 +1,23 @@
 package com.filesync.sync;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
+import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests for the XMODEM content-transfer entry points on {@link SyncProtocol}: {@link
@@ -25,6 +30,57 @@ import org.junit.jupiter.api.Test;
  * underlying transfer throws), so the manager's listen loop is never permanently gated off.
  */
 class SyncProtocolXmodemContentTest {
+
+    @TempDir java.nio.file.Path tempDir;
+
+    // ========== receiveFile write failures (locked target) ==========
+
+    @Test
+    void receiveFile_writeFailure_throwsFileWriteExceptionWithPayload() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        File extractDir = tempDir.toFile();
+        // A directory at the target path makes FileOutputStream fail on every platform, which is
+        // how a file locked by another program surfaces on Windows.
+        new File(extractDir, "locked.txt").mkdirs();
+
+        FileWriteException thrown =
+                assertThrows(
+                        FileWriteException.class,
+                        () -> protocol.receiveFile(extractDir, "locked.txt", payload.length, false, 42L));
+
+        assertEquals("locked.txt", thrown.getRelativePath(), "Exception must carry the path");
+        assertEquals(
+                "payload",
+                new String(thrown.getData(), StandardCharsets.UTF_8),
+                "Exception must carry the received payload for a later retry");
+        assertEquals(42L, thrown.getLastModified(), "Exception must carry the sender timestamp");
+        assertFalse(
+                protocol.isXmodemInProgress(),
+                "xmodemInProgress must be reset after a write failure");
+    }
+
+    @Test
+    void receiveFile_xmodemFailure_stillThrowsPlainIOException() {
+        FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        File extractDir = tempDir.toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> protocol.receiveFile(extractDir, "a.txt", 7, false, 0L));
+
+        assertFalse(
+                thrown instanceof FileWriteException,
+                "XMODEM/communication failures must stay plain IOExceptions so the listener"
+                        + " tears down the connection as before");
+    }
 
     @Test
     void sendFileContentViaXmodem_resetsInProgressFlagWhenXmodemFails() throws IOException {

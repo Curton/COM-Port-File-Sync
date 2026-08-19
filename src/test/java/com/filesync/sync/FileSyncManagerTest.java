@@ -1,9 +1,11 @@
 package com.filesync.sync;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.config.SettingsManager;
+import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
@@ -11,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
@@ -484,6 +487,191 @@ class FileSyncManagerTest {
             Thread.currentThread().interrupt();
         }
         throw new AssertionError("Timed out waiting for condition");
+    }
+
+    // ========== Locked received files (pending writes) ==========
+
+    @Test
+    void batchWithLockedFile_isQueuedForUserDecision_transfersContinue_retryAndSkipAllWork()
+            throws Exception {
+        File syncFolder = tempDir.resolve("sync").toFile();
+        syncFolder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(syncFolder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+
+            // Batch 1: "a.txt" is locked (a directory blocks the write), "b.txt" is writable.
+            new File(syncFolder, "a.txt").mkdirs();
+            byte[] batch1 = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"A content", "B content"});
+            serial.feedLine("[[SYNC:BATCH_DATA:" + batch1.length + "]]");
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(batch1));
+
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.LogEvent le
+                                                            && le.getMessage()
+                                                                    .contains(
+                                                                            "waiting for user decision")),
+                    Duration.ofSeconds(10));
+
+            assertTrue(
+                    events.stream()
+                            .noneMatch(
+                                    e ->
+                                            e instanceof SyncEvent.ErrorEvent ee
+                                                    && ee.getMessage()
+                                                            .contains("Batch receive failed")),
+                    "A locked file must not abort the batch with 'Batch receive failed'");
+            SyncEvent.PendingWriteEvent pendingEvent =
+                    events.stream()
+                            .filter(e -> e instanceof SyncEvent.PendingWriteEvent)
+                            .map(e -> (SyncEvent.PendingWriteEvent) e)
+                            .findFirst()
+                            .orElseThrow();
+            assertTrue(
+                    pendingEvent.getPendingPaths().contains("a.txt"),
+                    "The locked file must be announced to the UI for a user decision");
+            assertTrue(
+                    new File(syncFolder, "b.txt").isFile(),
+                    "Other files in the same batch must still be written");
+            assertEquals(
+                    "B content", Files.readString(new File(syncFolder, "b.txt").toPath()));
+
+            // A subsequent batch must still be received and written normally (transfer not stalled).
+            byte[] batch2 = buildBatch(new String[] {"c.txt"}, new String[] {"C content"});
+            serial.feedLine("[[SYNC:BATCH_DATA:" + batch2.length + "]]");
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(batch2));
+            waitUntil(
+                    () -> new File(syncFolder, "c.txt").isFile(), Duration.ofSeconds(10));
+            assertEquals("C content", Files.readString(new File(syncFolder, "c.txt").toPath()));
+
+            // User releases the lock (closes the program) and clicks Retry -> the file is written.
+            new File(syncFolder, "a.txt").delete();
+            fsm.retryPendingWrites(List.of("a.txt"));
+            waitUntil(() -> new File(syncFolder, "a.txt").isFile(), Duration.ofSeconds(10));
+            assertEquals("A content", Files.readString(new File(syncFolder, "a.txt").toPath()));
+
+            // Batch 3: "d.txt" is locked again; "Skip All" clears the queue.
+            new File(syncFolder, "d.txt").mkdirs();
+            byte[] batch3 = buildBatch(new String[] {"d.txt"}, new String[] {"D content"});
+            serial.feedLine("[[SYNC:BATCH_DATA:" + batch3.length + "]]");
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(batch3));
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.PendingWriteEvent pe
+                                                            && pe.getPendingPaths()
+                                                                    .contains("d.txt")),
+                    Duration.ofSeconds(10));
+
+            fsm.skipAllPendingWrites();
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.PendingWriteEvent pe
+                                                            && pe.getPendingPaths().isEmpty()),
+                    Duration.ofSeconds(10));
+            assertFalse(
+                    new File(syncFolder, "d.txt").isFile(),
+                    "A skipped file must not be written (it will be re-synced later)");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void incomingDeltaSigRequest_respondsWithSignatureData() throws Exception {
+        File folder = tempDir.resolve("sig").toFile();
+        folder.mkdirs();
+        Files.writeString(new File(folder, "doc.txt").toPath(), "hello");
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // Manager computes signatures and announces DELTA_SIG_DATA, then waits for an ACK and
+            // the XMODEM send handshake. The ACK is fed (read by the handler), not written.
+            serial.feedLine("[[SYNC:DELTA_SIG_REQ:doc.txt]]");
+            waitUntil(
+                    () -> serial.getWrittenLines().stream().anyMatch(l -> l.contains("DELTA_SIG_DATA")),
+                    Duration.ofSeconds(5));
+            serial.feedLine("[[SYNC:ACK]]");
+            serial.feedBytes(new byte[] {XModemTransfer.C, XModemTransfer.ACK,
+                    XModemTransfer.ACK, XModemTransfer.ACK, XModemTransfer.ACK});
+            assertTrue(
+                    serial.getWrittenLines().stream().anyMatch(l -> l.contains("DELTA_SIG_DATA")),
+                    "DELTA_SIG_REQ must be routed to the signature handler");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void incomingFileDelta_reconstructsAndWritesFile() throws Exception {
+        File folder = tempDir.resolve("delta").toFile();
+        folder.mkdirs();
+        File doc = new File(folder, "doc.txt");
+        Files.write(doc.toPath(), "hello".getBytes(StandardCharsets.UTF_8));
+
+        byte[] source = "world".getBytes(StandardCharsets.UTF_8);
+        // All-literal delta (no matchable blocks): header + LITERAL("world").
+        byte[] delta =
+                com.filesync.delta.DeltaEncoder.encode(
+                        source, new com.filesync.delta.FileSignatures("doc.txt", 64, 0, source.length, List.of()));
+        String sourceMd5 = com.filesync.delta.HashUtil.md5Hex(source);
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // sendFileDelta sends the path raw (escaped, not base64), so the frame uses the raw path.
+            serial.feedLine(
+                    "[[SYNC:FILE_DELTA:doc.txt:" + delta.length + ":false:0:5:" + sourceMd5 + "]]");
+            // The receiver ACKs the announcement, then receives the delta via XMODEM.
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
+
+            waitUntil(
+                    () -> serial.getWrittenLines().stream().anyMatch(l -> l.equals("[[SYNC:ACK]]")),
+                    Duration.ofSeconds(5));
+            // base was "hello"; only a routed+reconstructed delta can turn it into "world".
+            assertEquals(
+                    "world",
+                    Files.readString(doc.toPath()),
+                    "FILE_DELTA must be routed and the file reconstructed");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    /** Build a single-frame batch from (relativePath, content) pairs, keeping the pair order. */
+    private static byte[] buildBatch(String[] paths, String[] contents) throws Exception {
+        List<Object[]> files = new ArrayList<>();
+        for (int i = 0; i < paths.length; i++) {
+            File staging = File.createTempFile("batch-src-", ".txt");
+            Files.writeString(staging.toPath(), contents[i]);
+            files.add(new Object[] {staging, paths[i]});
+        }
+        return BatchTransferSession.buildBatch(files, 65536);
     }
 
     private static void stopQuietly(FileSyncManager fsm) {

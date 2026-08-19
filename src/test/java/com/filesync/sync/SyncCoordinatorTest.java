@@ -3,21 +3,27 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.filesync.protocol.BatchTransferSession;
+import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
 import java.io.File;
 import java.io.IOException;
@@ -41,6 +47,7 @@ class SyncCoordinatorTest {
 
     private SyncProtocol mockProtocol;
     private SyncEventBus mockEventBus;
+    private PendingFileWriteService pendingWriteService;
     private AtomicBoolean syncing;
     private AtomicInteger syncBoundaryCalls;
     private AtomicInteger syncIdleCalls;
@@ -52,6 +59,7 @@ class SyncCoordinatorTest {
     void setUp() {
         mockProtocol = mock(SyncProtocol.class);
         mockEventBus = mock(SyncEventBus.class);
+        pendingWriteService = mock(PendingFileWriteService.class);
         syncing = new AtomicBoolean(false);
         syncBoundaryCalls = new AtomicInteger(0);
         syncIdleCalls = new AtomicInteger(0);
@@ -89,6 +97,7 @@ class SyncCoordinatorTest {
                 connectionAlive != null ? connectionAlive : () -> true,
                 isSender != null ? isSender : () -> true,
                 roleNegotiated != null ? roleNegotiated : () -> true,
+                pendingWriteService,
                 syncing,
                 () -> syncIdleCalls.incrementAndGet(),
                 () -> syncBoundaryCalls.incrementAndGet(),
@@ -335,6 +344,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -361,6 +371,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -421,6 +432,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -512,6 +524,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -614,6 +627,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -654,6 +668,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -706,6 +721,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -732,6 +748,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -810,7 +827,8 @@ class SyncCoordinatorTest {
                         anyInt(),
                         anyInt(),
                         isA(BatchTransferSession.BatchProgressCallback.class),
-                        isA(File.class));
+                        isA(File.class),
+                        isA(BatchTransferSession.WriteFailureHandler.class));
         // handleIncomingBatch doesn't call touchHeartbeat() in success path
         assertEquals(0, heartbeatTouches.get());
     }
@@ -841,6 +859,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -854,7 +873,8 @@ class SyncCoordinatorTest {
                         anyInt(),
                         anyInt(),
                         isA(BatchTransferSession.BatchProgressCallback.class),
-                        isA(File.class));
+                        isA(File.class),
+                        isA(BatchTransferSession.WriteFailureHandler.class));
     }
 
     @Test
@@ -881,7 +901,8 @@ class SyncCoordinatorTest {
                         anyInt(),
                         anyInt(),
                         isA(BatchTransferSession.BatchProgressCallback.class),
-                        isA(File.class));
+                        isA(File.class),
+                        isA(BatchTransferSession.WriteFailureHandler.class));
     }
 
     @Test
@@ -943,6 +964,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),
@@ -952,6 +974,123 @@ class SyncCoordinatorTest {
         coordinatorWithNullFolder.handleIncomingFileData(mockMsg);
 
         assertEquals(1, syncIdleCalls.get());
+    }
+
+    // ========== Pending write handling (locked files) ==========
+
+    @Test
+    void handleIncomingBatchUnknownTotal_enqueuesWriteFailuresAndResetsSyncState()
+            throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        byte[] payload = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        doAnswer(
+                        invocation -> {
+                            BatchTransferSession.WriteFailureHandler handler =
+                                    invocation.getArgument(4);
+                            handler.onWriteFailed("locked.txt", payload, 1234L, "being used");
+                            return 0;
+                        })
+                .when(mockProtocol)
+                .receiveBatch(anyInt(), anyInt(), any(), any(), any());
+
+        coordinator.handleIncomingBatchUnknownTotal(100);
+
+        verify(pendingWriteService)
+                .enqueue(eq(syncFolder), eq("locked.txt"), aryEq(payload), eq(1234L), eq("being used"));
+        assertFalse(syncing.get(), "Sync state must be reset after handling the batch");
+        assertTrue(
+                postedEvents.stream()
+                        .anyMatch(
+                                e ->
+                                        e instanceof SyncEvent.LogEvent le
+                                                && le.getMessage()
+                                                        .contains("waiting for user decision")),
+                "The batch summary must mention files waiting for a user decision");
+    }
+
+    @Test
+    void handleIncomingBatchUnknownTotal_marksWrittenForSuccessfulEntries() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        doAnswer(
+                        invocation -> {
+                            BatchTransferSession.BatchProgressCallback callback =
+                                    invocation.getArgument(2);
+                            callback.onEntryProcessed(0, 1, "ok.txt");
+                            return 1;
+                        })
+                .when(mockProtocol)
+                .receiveBatch(anyInt(), anyInt(), any(), any(), any());
+
+        coordinator.handleIncomingBatchUnknownTotal(100);
+
+        verify(pendingWriteService).markWritten("ok.txt");
+    }
+
+    @Test
+    void handleIncomingFileData_fileWriteException_enqueuesWithoutRethrowing()
+            throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
+        when(mockMsg.getParam(0)).thenReturn("locked.txt");
+        when(mockMsg.getParamAsInt(1)).thenReturn(100);
+        when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
+        when(mockMsg.getParams()).thenReturn(new String[] {"locked.txt", "100", "false", "0"});
+        byte[] payload = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        doThrow(new FileWriteException("locked.txt", payload, 77L, "being used", null))
+                .when(mockProtocol)
+                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+
+        // A locked target must not tear down the connection: no exception may escape.
+        coordinator.handleIncomingFileData(mockMsg);
+
+        verify(pendingWriteService)
+                .enqueue(eq(syncFolder), eq("locked.txt"), aryEq(payload), eq(77L), eq("being used"));
+        assertFalse(syncing.get(), "Sync state must be reset after a queued write failure");
+        // A locked target must refresh the Sync Control button: transfer-progress events left it
+        // as an enabled "Cancel", and without a refresh it stays stale while the pending-write
+        // dialog is open. No SYNC_COMPLETE/SYNC_CANCELLED is expected on this path.
+        verify(mockEventBus).post(isA(SyncEvent.SyncControlRefreshEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.SyncCompleteEvent.class));
+        verify(mockEventBus, never()).post(isA(SyncEvent.SyncCancelledEvent.class));
+    }
+
+    @Test
+    void handleIncomingFileData_plainIOException_stillRethrows() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
+        when(mockMsg.getParam(0)).thenReturn("test.txt");
+        when(mockMsg.getParamAsInt(1)).thenReturn(100);
+        when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
+        when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
+        doThrow(new IOException("communication failure"))
+                .when(mockProtocol)
+                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+
+        assertThrows(
+                IOException.class,
+                () -> coordinator.handleIncomingFileData(mockMsg),
+                "Real communication errors must still propagate (connection teardown)");
+        verify(pendingWriteService, never())
+                .enqueue(any(), anyString(), any(), anyLong(), anyString());
+    }
+
+    @Test
+    void handleIncomingFileData_success_marksWritten() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
+        when(mockMsg.getParam(0)).thenReturn("test.txt");
+        when(mockMsg.getParamAsInt(1)).thenReturn(100);
+        when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
+        when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
+
+        coordinator.handleIncomingFileData(mockMsg);
+
+        verify(pendingWriteService).markWritten("test.txt");
     }
 
     // ========== Complex tests: createSyncPreviewPlan ==========
@@ -1018,6 +1157,7 @@ class SyncCoordinatorTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> syncIdleCalls.incrementAndGet(),
                         () -> syncBoundaryCalls.incrementAndGet(),

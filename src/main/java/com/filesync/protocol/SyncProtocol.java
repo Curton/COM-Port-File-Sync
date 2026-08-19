@@ -1,5 +1,8 @@
 package com.filesync.protocol;
 
+import com.filesync.delta.DeltaDecoder;
+import com.filesync.delta.HashUtil;
+import com.filesync.delta.SignatureSet;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import com.filesync.sync.CompressionUtil;
@@ -9,6 +12,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
@@ -62,6 +66,9 @@ public class SyncProtocol {
     public static final String CMD_LOG_DATA = "LOG_DATA";
     public static final String CMD_LOG_XFER = "LOG_XFER";
     public static final String CMD_LOG_MARKER_REQ = "LOG_MARKER_REQ";
+    public static final String CMD_DELTA_SIG_REQ = "DELTA_SIG_REQ";
+    public static final String CMD_DELTA_SIG_DATA = "DELTA_SIG_DATA";
+    public static final String CMD_FILE_DELTA = "FILE_DELTA";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -254,6 +261,242 @@ public class SyncProtocol {
         return FileChangeDetector.manifestFromJson(json);
     }
 
+    // ---- rsync-style block-signature exchange for binary delta sync ----
+
+    /**
+     * Sender side: request block signatures from the receiver for the given candidate paths, then
+     * wait for the receiver to announce and transfer the {@link SignatureSet} payload. The receiver
+     * computes signatures only for files that exist locally; paths missing on the receiver are
+     * simply absent from the returned set, and the sender will fall back to a full transfer for
+     * them. Returns an empty set if {@code paths} is empty (no round-trip performed).
+     */
+    public SignatureSet requestDeltaSignatures(List<String> paths) throws IOException {
+        if (paths == null || paths.isEmpty()) {
+            return SignatureSet.empty();
+        }
+        sendCommand(CMD_DELTA_SIG_REQ, paths.toArray(new String[0]));
+
+        Message msg = waitForCommand(CMD_DELTA_SIG_DATA);
+        sendAck();
+        // waitForCommand never returns null (it throws on timeout), so only the empty-params
+        // case falls back to -1.
+        int expectedSize = msg.getParams().length > 0 ? msg.getParamAsInt(0) : -1;
+        return receiveDeltaSignatures(expectedSize);
+    }
+
+    /** Receive and deserialize the signature-set payload sent by the receiver. */
+    public SignatureSet receiveDeltaSignatures(int expectedCompressedLength) throws IOException {
+        xmodemInProgress.set(true);
+        byte[] compressed;
+        try {
+            compressed = xmodem.receive(expectedCompressedLength);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+        if (compressed == null) {
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException("Failed to receive delta signatures (" + detail + ")");
+        }
+        byte[] data = CompressionUtil.decompress(compressed);
+        return SignatureSet.fromBytes(data);
+    }
+
+    /**
+     * Receiver side: send the computed {@link SignatureSet} to the sender. The payload is always
+     * GZIP-compressed (like the manifest) and transferred via a single XMODEM session.
+     */
+    public void sendDeltaSignatures(SignatureSet set) throws IOException {
+        byte[] data = set.toBytes();
+        byte[] compressed = CompressionUtil.compress(data);
+
+        sendCommand(CMD_DELTA_SIG_DATA, String.valueOf(compressed.length));
+        waitForCommand(CMD_ACK);
+
+        xmodemInProgress.set(true);
+        try {
+            boolean success = xmodem.send(compressed);
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw new IOException("Failed to send delta signatures (" + detail + ")");
+            }
+        } finally {
+            xmodemInProgress.set(false);
+        }
+    }
+
+    /**
+     * Sender side: send a delta-encoded file. The {@code delta} bytes are compressed if beneficial.
+     * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
+     * sourceSize} lets the receiver pre-size the output buffer.
+     *
+     * @return true if the delta was compressed, false otherwise
+     */
+    public boolean sendFileDelta(
+            String relativePath,
+            byte[] delta,
+            long lastModified,
+            long sourceSize,
+            String sourceMd5)
+            throws IOException {
+        CompressionUtil.CompressedData compressedData =
+                CompressionUtil.compressIfBeneficial(relativePath, delta);
+        boolean wasCompressed = compressedData.isCompressed();
+        long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
+
+        final int maxAttempts = 3;
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                sendCommand(
+                        CMD_FILE_DELTA,
+                        relativePath,
+                        String.valueOf(compressedData.getData().length),
+                        String.valueOf(wasCompressed),
+                        String.valueOf(ts),
+                        String.valueOf(sourceSize),
+                        sourceMd5);
+                waitForCommand(CMD_ACK);
+
+                xmodemInProgress.set(true);
+                boolean success;
+                try {
+                    success = xmodem.send(compressedData.getData());
+                } finally {
+                    xmodemInProgress.set(false);
+                }
+                if (success) {
+                    return wasCompressed;
+                }
+            } catch (IOException e) {
+                lastFailure = e;
+            }
+
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException ignored) {
+            }
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        String detail = xmodem.getLastErrorMessage();
+        if (detail == null || detail.isEmpty()) {
+            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
+        }
+        IOException finalEx =
+                new IOException(
+                        "Failed to send file delta for "
+                                + relativePath
+                                + " after "
+                                + maxAttempts
+                                + " attempts ("
+                                + detail
+                                + ")");
+        if (lastFailure != null) {
+            finalEx.addSuppressed(lastFailure);
+        }
+        try {
+            sendError("File delta send failed: " + relativePath);
+        } catch (IOException ignored) {
+        }
+        throw finalEx;
+    }
+
+    /**
+     * Receiver side: receive a delta-encoded file, reconstruct the source bytes from the existing
+     * local file, verify the MD5 against the sender's {@code sourceMd5}, and write the result.
+     *
+     * <p>A write failure (e.g. the target is locked) throws {@link FileWriteException} carrying the
+     * reconstructed bytes so the caller can queue a deferred retry. An MD5 mismatch or decode error
+     * throws a plain {@link IOException} so the caller can request a full retransfer.
+     *
+     * @param baseDir base directory containing the existing file
+     * @param relativePath relative path of the file
+     * @param expectedSize announced compressed/raw delta length
+     * @param compressed whether the delta payload is GZIP-compressed
+     * @param lastModified sender timestamp to preserve
+     * @param sourceSize sender's total source byte length (informational)
+     * @param sourceMd5 sender's MD5 of the source, for reconstruction verification
+     */
+    public void receiveFileDelta(
+            File baseDir,
+            String relativePath,
+            int expectedSize,
+            boolean compressed,
+            long lastModified,
+            long sourceSize,
+            String sourceMd5)
+            throws IOException {
+        xmodemInProgress.set(true);
+        byte[] payload;
+        try {
+            payload = xmodem.receive(expectedSize);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+        if (payload == null) {
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException ignored) {
+            }
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException(
+                    "Failed to receive file delta for " + relativePath + " (" + detail + ")");
+        }
+        validateReceivedSize("file delta", relativePath, expectedSize, payload);
+
+        byte[] deltaBytes = compressed ? CompressionUtil.decompress(payload) : payload;
+
+        File existing = new File(baseDir, relativePath);
+        if (!existing.exists() || !existing.isFile()) {
+            throw new IOException(
+                    "Cannot apply delta: existing file missing on receiver: " + relativePath);
+        }
+        byte[] existingBytes = Files.readAllBytes(existing.toPath());
+        byte[] reconstructed = DeltaDecoder.decode(existingBytes, deltaBytes);
+
+        // Verify reconstruction against the sender's MD5 to guard against a stale signature
+        // (the receiver's file changed between signature generation and delta application).
+        String actualMd5 = HashUtil.md5Hex(reconstructed);
+        if (sourceMd5 != null && !sourceMd5.isEmpty() && !sourceMd5.equals(actualMd5)) {
+            throw new IOException(
+                    "Delta reconstruction verification failed for "
+                            + relativePath
+                            + " (expected "
+                            + sourceMd5
+                            + ", got "
+                            + actualMd5
+                            + ")");
+        }
+
+        File targetFile = new File(baseDir, relativePath);
+        // The existing-file check above guarantees the target's parent already exists
+        // (existing and target share the same path), so no mkdir is needed here.
+        try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+            fos.write(reconstructed);
+        } catch (IOException e) {
+            throw new FileWriteException(relativePath, reconstructed, lastModified, e.getMessage(), e);
+        }
+        if (lastModified > 0) {
+            targetFile.setLastModified(lastModified);
+        }
+    }
+
     /**
      * Send a batch of files as a single XMODEM transfer to amortize handshake overhead. The batch
      * is built from the given list of (File, relativePath) pairs and sent under one XMODEM session.
@@ -324,7 +567,8 @@ public class SyncProtocol {
 
     /**
      * Receive a batch transfer initiated by {@link #sendBatch(File, List, int,
-     * BatchTransferSession.BatchProgressCallback, File)}.
+     * BatchTransferSession.BatchProgressCallback, File)}. A single entry whose write fails aborts
+     * the whole batch (legacy behavior).
      *
      * @param expectedSize announced batch size in bytes
      * @param batchProgressCallback called after each file is decoded and written; may be null
@@ -336,6 +580,28 @@ public class SyncProtocol {
             int totalEntries,
             BatchTransferSession.BatchProgressCallback batchProgressCallback,
             File baseDir)
+            throws IOException {
+        return receiveBatch(expectedSize, totalEntries, batchProgressCallback, baseDir, null);
+    }
+
+    /**
+     * Receive a batch transfer initiated by {@link #sendBatch(File, List, int,
+     * BatchTransferSession.BatchProgressCallback, File)}. Entries whose write fails (e.g. the
+     * target file is locked by another program) are reported through the failure handler and the
+     * remaining entries are still written.
+     *
+     * @param expectedSize announced batch size in bytes
+     * @param batchProgressCallback called after each file is decoded and written; may be null
+     * @param baseDir base directory to extract files under
+     * @param failureHandler called when a single entry cannot be written; may be null
+     * @return number of files written
+     */
+    public int receiveBatch(
+            int expectedSize,
+            int totalEntries,
+            BatchTransferSession.BatchProgressCallback batchProgressCallback,
+            File baseDir,
+            BatchTransferSession.WriteFailureHandler failureHandler)
             throws IOException {
         xmodemInProgress.set(true);
         byte[] batch;
@@ -349,7 +615,7 @@ public class SyncProtocol {
         }
 
         return BatchTransferSession.decodeAndWriteBatch(
-                baseDir, batch, totalEntries, batchProgressCallback);
+                baseDir, batch, totalEntries, batchProgressCallback, failureHandler);
     }
 
     /** Request a specific file */
@@ -651,9 +917,13 @@ public class SyncProtocol {
             parentDir.mkdirs();
         }
 
-        // Write file
+        // Write file; a failure here (e.g. target locked by another program) is surfaced as a
+        // FileWriteException carrying the payload so the caller can queue a later retry instead of
+        // tearing down the connection.
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(data);
+        } catch (IOException e) {
+            throw new FileWriteException(relativePath, data, lastModified, e.getMessage(), e);
         }
 
         // Preserve sender timestamp so subsequent manifest comparisons match

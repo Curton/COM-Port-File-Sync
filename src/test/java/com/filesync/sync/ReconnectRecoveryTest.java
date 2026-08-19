@@ -29,6 +29,10 @@ class ReconnectRecoveryTest {
 
     @TempDir Path tempDir;
 
+    /** Shared for coordinator constructions; these tests never trigger pending writes. */
+    private final PendingFileWriteService pendingWriteService =
+            new PendingFileWriteService(new SimpleSyncEventBus());
+
     @Test
     void connectionServiceTransitionsCallbacksOnlyOncePerStateChange() {
         AtomicBoolean running = new AtomicBoolean(true);
@@ -103,6 +107,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> false,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -145,6 +150,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -211,6 +217,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -264,6 +271,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -298,6 +306,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -329,6 +338,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -501,6 +511,7 @@ class ReconnectRecoveryTest {
                         connectionAlive::get,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         sharedTextService::onSyncIdle,
                         sharedTextService::onSyncBoundary,
@@ -562,6 +573,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -957,6 +969,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -1015,6 +1028,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -1068,6 +1082,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -1127,6 +1142,7 @@ class ReconnectRecoveryTest {
                         () -> true,
                         () -> true,
                         () -> true,
+                        pendingWriteService,
                         syncing,
                         () -> {},
                         () -> {},
@@ -1259,12 +1275,14 @@ class ReconnectRecoveryTest {
                 int expectedSize,
                 int totalEntries,
                 BatchTransferSession.BatchProgressCallback callback,
-                File baseDir)
+                File baseDir,
+                BatchTransferSession.WriteFailureHandler failureHandler)
                 throws IOException {
             List<Object[]> files = new ArrayList<>();
             files.add(new Object[] {new File(inputDir, "test.txt"), "test.txt"});
             byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-            return BatchTransferSession.decodeAndWriteBatch(baseDir, batch, totalEntries, callback);
+            return BatchTransferSession.decodeAndWriteBatch(
+                    baseDir, batch, totalEntries, callback, failureHandler);
         }
 
         @Override

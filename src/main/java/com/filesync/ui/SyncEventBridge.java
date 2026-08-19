@@ -90,6 +90,14 @@ public class SyncEventBridge {
                                                 + " -> "
                                                 + dropFileEvent.getFilePath()));
             }
+            case PENDING_FILE_WRITE -> {
+                SyncEvent.PendingWriteEvent pendingWriteEvent =
+                        (SyncEvent.PendingWriteEvent) event;
+                SwingUtilities.invokeLater(
+                        () ->
+                                syncController.onPendingWrites(
+                                        pendingWriteEvent.getPendingPaths()));
+            }
             default -> {}
         }
     }

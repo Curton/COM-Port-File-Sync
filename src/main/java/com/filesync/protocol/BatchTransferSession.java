@@ -141,7 +141,7 @@ public class BatchTransferSession {
 
     /**
      * Decode a batch produced by {@link #buildBatch} and write each file into the given base
-     * directory.
+     * directory. Any entry whose write fails aborts the whole batch (legacy behavior).
      *
      * @param baseDir the directory to extract files under
      * @param batch encoded batch bytes
@@ -156,6 +156,32 @@ public class BatchTransferSession {
             byte[] batch,
             int totalEntries,
             BatchProgressCallback progressCallback)
+            throws IOException {
+        return decodeAndWriteBatch(baseDir, batch, totalEntries, progressCallback, null);
+    }
+
+    /**
+     * Decode a batch produced by {@link #buildBatch} and write each file into the given base
+     * directory. When a {@code failureHandler} is provided, an entry whose write fails (e.g. the
+     * target file is locked by another program) is reported through the handler and the remaining
+     * entries are still written instead of aborting the whole batch.
+     *
+     * @param baseDir the directory to extract files under
+     * @param batch encoded batch bytes
+     * @param totalEntries the total number of files in the full sync operation (used in the
+     *     callback to report correct overall progress)
+     * @param progressCallback called with (entryIndex, totalEntries, relativePath) after each file
+     *     is written; may be null
+     * @param failureHandler called with (relativePath, data, lastModified, errorMessage) when a
+     *     single entry cannot be written; when null the write failure is rethrown
+     * @return the number of files written
+     */
+    public static int decodeAndWriteBatch(
+            java.io.File baseDir,
+            byte[] batch,
+            int totalEntries,
+            BatchProgressCallback progressCallback,
+            WriteFailureHandler failureHandler)
             throws IOException {
         if (batch.length > MAX_BATCH_TOTAL_BYTES) {
             throw new IOException(
@@ -245,7 +271,8 @@ public class BatchTransferSession {
                 data = CompressionUtil.decompress(data);
             }
 
-            // Write file
+            // Write file; a failure (e.g. target locked by another program) is reported through
+            // the failure handler and the rest of the batch still proceeds.
             java.io.File targetFile = new java.io.File(baseDir, relativePath);
             java.io.File parentDir = targetFile.getParentFile();
             if (parentDir != null && !parentDir.exists()) {
@@ -254,18 +281,28 @@ public class BatchTransferSession {
 
             try (java.io.FileOutputStream fos = new java.io.FileOutputStream(targetFile)) {
                 fos.write(data);
-            }
-            if (lastModified > 0) {
-                targetFile.setLastModified(lastModified);
-            }
-
-            written++;
-            if (progressCallback != null) {
-                progressCallback.onEntryProcessed(i, totalEntries, relativePath);
+                if (lastModified > 0) {
+                    targetFile.setLastModified(lastModified);
+                }
+                written++;
+                if (progressCallback != null) {
+                    progressCallback.onEntryProcessed(i, totalEntries, relativePath);
+                }
+            } catch (IOException e) {
+                if (failureHandler == null) {
+                    throw e;
+                }
+                failureHandler.onWriteFailed(relativePath, data, lastModified, e.getMessage());
             }
         }
 
         return written;
+    }
+
+    /** Callback for per-entry write failures during batch decode. */
+    @FunctionalInterface
+    public interface WriteFailureHandler {
+        void onWriteFailed(String relativePath, byte[] data, long lastModified, String errorMessage);
     }
 
     private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {

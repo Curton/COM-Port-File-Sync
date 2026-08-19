@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -515,5 +516,129 @@ class BatchTransferSessionTest {
         assertTrue(
                 thrown.getMessage().contains("Invalid path length"),
                 "Should reject oversized path length, got: " + thrown.getMessage());
+    }
+
+    // ========== Per-entry write failures (locked files) ==========
+
+    /**
+     * Build a batch with the given (relativePath, content) pairs. Callers keep the pair order; no
+     * sorting is applied here.
+     */
+    private byte[] buildBatch(String[] paths, String[] contents) throws IOException {
+        File dir = tempDir.resolve("batch-input").toFile();
+        dir.mkdirs();
+        List<Object[]> files = new ArrayList<>();
+        for (int i = 0; i < paths.length; i++) {
+            File f = new File(dir, "src_" + i);
+            Files.writeString(f.toPath(), contents[i]);
+            files.add(new Object[] {f, paths[i]});
+        }
+        return BatchTransferSession.buildBatch(files, 65536);
+    }
+
+    @Test
+    void decodeBatchWithWriteFailure_continuesWithRemainingEntriesAndReportsFailure()
+            throws IOException {
+        byte[] batch = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"content A", "content B"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        // A directory at the target path makes FileOutputStream fail on every platform, which is
+        // how a file locked by another program surfaces on Windows.
+        new File(extractDir, "a.txt").mkdirs();
+
+        List<String> failedPaths = new ArrayList<>();
+        List<String> failedContents = new ArrayList<>();
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        2,
+                        null,
+                        (path, data, lastModified, message) -> {
+                            failedPaths.add(path);
+                            failedContents.add(new String(data, StandardCharsets.UTF_8));
+                        });
+
+        assertEquals(1, written, "Only the writable entry should be written");
+        assertEquals(List.of("a.txt"), failedPaths, "The locked entry must be reported");
+        assertEquals(
+                List.of("content A"),
+                failedContents,
+                "The handler must receive the decoded payload of the locked entry");
+        File extractedB = new File(extractDir, "b.txt");
+        assertTrue(extractedB.exists(), "Remaining entries must still be written");
+        assertEquals("content B", Files.readString(extractedB.toPath()));
+    }
+
+    @Test
+    void decodeBatchWithMultipleWriteFailures_reportsEachOneAndWritesTheRest()
+            throws IOException {
+        byte[] batch =
+                buildBatch(
+                        new String[] {"a.txt", "b.txt", "c.txt"},
+                        new String[] {"A", "B", "C"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        new File(extractDir, "a.txt").mkdirs();
+        new File(extractDir, "c.txt").mkdirs();
+
+        List<String> failedPaths = new ArrayList<>();
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        3,
+                        null,
+                        (path, data, lastModified, message) -> failedPaths.add(path));
+
+        assertEquals(1, written, "Only the writable entry should be written");
+        assertEquals(List.of("a.txt", "c.txt"), failedPaths, "Each locked entry must be reported");
+        assertTrue(new File(extractDir, "b.txt").exists(), "Writable entries must still be written");
+    }
+
+    @Test
+    void decodeBatchWithWriteFailure_progressCallbackOnlyFiresForSuccessfulEntries()
+            throws IOException {
+        byte[] batch = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"A", "B"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        new File(extractDir, "a.txt").mkdirs();
+
+        int[] progress = new int[1];
+        BatchTransferSession.BatchProgressCallback callback =
+                (idx, total, relPath) -> progress[0]++;
+
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        2,
+                        callback,
+                        (path, data, lastModified, message) -> {});
+
+        assertEquals(1, written, "Should have written 1 file");
+        assertEquals(1, progress[0], "Progress callback should only fire for written entries");
+    }
+
+    @Test
+    void decodeBatchWithWriteFailure_noHandlerStillThrows() throws IOException {
+        byte[] batch = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"A", "B"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        new File(extractDir, "a.txt").mkdirs();
+
+        // The 4-arg overload (no failure handler) must preserve the legacy abort-on-failure
+        // behavior.
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                BatchTransferSession.decodeAndWriteBatch(
+                                        extractDir, batch, 0, null));
+        assertTrue(thrown.getMessage() != null, "Write failure should carry the OS error message");
     }
 }

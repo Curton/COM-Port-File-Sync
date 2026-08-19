@@ -5,7 +5,7 @@
 
     <groupId>com.filesync</groupId>
     <artifactId>com-file-sync</artifactId>
-    <version>1.6.28</version>
+    <version>1.6.29</version>
     <packaging>jar</packaging>
 
     <name>COM Port File Sync</name>
@@ -102,6 +102,18 @@
                                     <includes>
                                         <include>com.filesync.sync.TimeSyncMarker</include>
                                         <include>com.filesync.ui.CombinedLogMerger</include>
+                                        <!-- Delta-sync core (com.filesync.delta). Md5 is excluded:
+                                             it isolates the only unreachable exception path
+                                             (NoSuchAlgorithmException for the JVM-guaranteed MD5). -->
+                                        <include>com.filesync.delta.RollingHash</include>
+                                        <include>com.filesync.delta.BlockSignature</include>
+                                        <include>com.filesync.delta.FileSignatures</include>
+                                        <include>com.filesync.delta.SignatureSet</include>
+                                        <include>com.filesync.delta.SignatureUtil</include>
+                                        <include>com.filesync.delta.DeltaCodec</include>
+                                        <include>com.filesync.delta.DeltaEncoder</include>
+                                        <include>com.filesync.delta.DeltaDecoder</include>
+                                        <include>com.filesync.delta.HashUtil</include>
                                     </includes>
                                     <limits>
                                         <limit>
