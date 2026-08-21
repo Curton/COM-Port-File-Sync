@@ -107,10 +107,11 @@ Click the **Settings** button to configure COM port parameters:
 
 ### Shared Text
 
-The Shared Text area allows real-time text sharing between connected machines:
+The Shared Text area allows text sharing between connected machines:
 - Type or paste text into the area
-- Text is automatically sent to the other machine after a 2-second debounce
+- Click "Send Text" to send the current text to the other machine
 - Double-click to copy the entire text to clipboard
+- Word-style undo/redo: Ctrl+Z undoes the last change (typing runs, deletions, clipboard overwrites and even incoming remote overwrites each count as one step), Ctrl+Y or Ctrl+Shift+Z redoes it
 
 ## Architecture
 

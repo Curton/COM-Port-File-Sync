@@ -176,27 +176,6 @@ class SharedTextServiceTest {
     }
 
     @Test
-    void resendUsesMostRecentIncomingText() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SharedTextService service =
-                new SharedTextService(
-                        protocol,
-                        eventBus,
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> true);
-
-        service.handleIncomingSharedText(300L, "newer");
-        service.resendLatestSharedText();
-
-        assertEquals(List.of("newer"), protocol.getSentTexts());
-    }
-
-    @Test
     void clearPendingSharedTextClearsAllPendingState() {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();

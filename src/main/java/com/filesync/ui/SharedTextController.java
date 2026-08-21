@@ -5,6 +5,12 @@ import java.awt.Toolkit;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
 import java.awt.datatransfer.UnsupportedFlavorException;
+import java.awt.event.ActionEvent;
+import javax.swing.AbstractAction;
+import javax.swing.ActionMap;
+import javax.swing.InputMap;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.event.MouseInputAdapter;
 
@@ -14,6 +20,7 @@ public class SharedTextController {
     private final MainFrameState state;
     private final FileSyncManager syncManager;
     private final LogController logController;
+    private final SharedTextUndoManager undoManager = new SharedTextUndoManager();
 
     public SharedTextController(
             MainFrameComponents components,
@@ -27,6 +34,29 @@ public class SharedTextController {
     }
 
     public void initEventHandlers() {
+        components.getSharedTextArea().getDocument().addUndoableEditListener(undoManager);
+        InputMap inputMap = components.getSharedTextArea().getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap actionMap = components.getSharedTextArea().getActionMap();
+        inputMap.put(KeyStroke.getKeyStroke("control Z"), "sharedText.undo");
+        actionMap.put(
+                "sharedText.undo",
+                new AbstractAction() {
+                    @Override
+                    public void actionPerformed(ActionEvent event) {
+                        undoManager.tryUndo();
+                    }
+                });
+        inputMap.put(KeyStroke.getKeyStroke("control Y"), "sharedText.redo");
+        inputMap.put(KeyStroke.getKeyStroke("control shift Z"), "sharedText.redo");
+        actionMap.put(
+                "sharedText.redo",
+                new AbstractAction() {
+                    @Override
+                    public void actionPerformed(ActionEvent event) {
+                        undoManager.tryRedo();
+                    }
+                });
+
         components
                 .getSharedTextArea()
                 .addMouseListener(
@@ -63,7 +93,11 @@ public class SharedTextController {
                                                 Toolkit.getDefaultToolkit()
                                                         .getSystemClipboard()
                                                         .getData(DataFlavor.stringFlavor);
-                                components.getSharedTextArea().setText(clipboardText);
+                                undoManager.runAsSingleEdit(
+                                        () ->
+                                                components
+                                                        .getSharedTextArea()
+                                                        .setText(clipboardText));
                                 logController.log("Text overwritten from clipboard");
                             } catch (UnsupportedFlavorException ex) {
                                 logController.log("Clipboard does not contain text data");
@@ -83,10 +117,16 @@ public class SharedTextController {
                                                 Toolkit.getDefaultToolkit()
                                                         .getSystemClipboard()
                                                         .getData(DataFlavor.stringFlavor);
-                                if (!components.getSharedTextArea().getText().isEmpty()) {
-                                    components.getSharedTextArea().append("\n");
-                                }
-                                components.getSharedTextArea().append(clipboardText);
+                                undoManager.runAsSingleEdit(
+                                        () -> {
+                                            if (!components
+                                                    .getSharedTextArea()
+                                                    .getText()
+                                                    .isEmpty()) {
+                                                components.getSharedTextArea().append("\n");
+                                            }
+                                            components.getSharedTextArea().append(clipboardText);
+                                        });
                                 logController.log("Text appended from clipboard");
                             } catch (UnsupportedFlavorException ex) {
                                 logController.log("Clipboard does not contain text data");
@@ -110,7 +150,10 @@ public class SharedTextController {
     }
 
     public void onSharedTextReceived(String text) {
-        SwingUtilities.invokeLater(() -> components.getSharedTextArea().setText(text));
+        SwingUtilities.invokeLater(
+                () ->
+                        undoManager.runAsSingleEdit(
+                                () -> components.getSharedTextArea().setText(text)));
     }
 
     public void pushSharedTextToRemote() {

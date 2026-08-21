@@ -333,7 +333,8 @@ public class FileSyncManager {
                             pendingFileWriteService.getPendingCount()
                                     + " file(s) still locked by another program;"
                                     + " they will be re-synced on the next sync: "
-                                    + String.join(", ", pendingFileWriteService.getPendingPaths())));
+                                    + String.join(
+                                            ", ", pendingFileWriteService.getPendingPaths())));
         }
         protocol.clearStashedMessages();
         serialPort.close();
@@ -961,7 +962,6 @@ public class FileSyncManager {
                 long remotePriority = msg.getParamAsLong(0);
                 long remoteTieBreaker = msg.getParamAsLong(1);
                 roleNegotiationService.handleRoleNegotiate(remotePriority, remoteTieBreaker);
-                sharedTextService.resendLatestSharedText();
             }
             case SyncProtocol.CMD_FILE_DELETE -> syncCoordinator.handleFileDelete(msg.getParam(0));
             case SyncProtocol.CMD_MKDIR -> syncCoordinator.handleMkdir(msg.getParam(0));
@@ -1018,7 +1018,6 @@ public class FileSyncManager {
     private void onConnectionRestored() {
         reconnectAttempted.set(false);
         roleNegotiationService.sendRoleNegotiation();
-        sharedTextService.resendLatestSharedText();
     }
 
     private void onConnectionLost() {

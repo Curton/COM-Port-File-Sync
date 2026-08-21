@@ -18,7 +18,6 @@ public class SharedTextService {
     private final BooleanSupplier transferBusySupplier;
     private final BooleanSupplier roleNegotiatedSupplier;
     private final AtomicReference<SharedTextPayload> pendingSharedText = new AtomicReference<>();
-    private final AtomicReference<SharedTextPayload> latestSharedText = new AtomicReference<>();
     private final AtomicLong latestAcceptedTimestamp = new AtomicLong(0);
 
     public SharedTextService(
@@ -42,17 +41,7 @@ public class SharedTextService {
         String normalizedText = normalizeText(text);
         SharedTextPayload payload =
                 new SharedTextPayload(System.currentTimeMillis(), normalizedText);
-        latestSharedText.set(payload);
         pendingSharedText.set(payload);
-        flushIfIdle();
-    }
-
-    public void resendLatestSharedText() {
-        SharedTextPayload latestText = latestSharedText.get();
-        if (latestText == null) {
-            return;
-        }
-        pendingSharedText.set(latestText);
         flushIfIdle();
     }
 
@@ -120,7 +109,6 @@ public class SharedTextService {
                 return;
             }
             if (markTimestampIfNewer(incoming.timestamp)) {
-                latestSharedText.set(incoming);
                 eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
@@ -140,7 +128,6 @@ public class SharedTextService {
                 return;
             }
             if (markTimestampIfNewer(incoming.timestamp)) {
-                latestSharedText.set(incoming);
                 eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
@@ -158,8 +145,7 @@ public class SharedTextService {
         pendingSharedText.set(null);
         // Reset the high-water mark so a reconnected session does not silently reject
         // fresh texts whose timestamps compare poorly against stale state (e.g. clock
-        // skew between the two machines). Resent payloads carry their original
-        // timestamps, so re-delivery of the last text after reconnect still works.
+        // skew between the two machines).
         latestAcceptedTimestamp.set(0);
     }
 
