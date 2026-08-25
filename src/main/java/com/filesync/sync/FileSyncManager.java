@@ -424,6 +424,21 @@ public class FileSyncManager {
     public void cancelSync() {
         syncCoordinator.cancelOngoingSync();
         syncCancelInProgress.set(true);
+        // Notify the remote receiver so it aborts its blocking xmodem.receive() and resets its
+        // connection via the CMD_CANCEL handler (which calls restartListening()). Without this,
+        // the receiver's connection-loss detection stays suppressed while transferBusy is true, so
+        // it can only recover via a slow XMODEM timeout and an implicit (fragile) stream resync
+        // that
+        // can leave it unable to reconnect without a program restart.
+        if (serialPort.isOpen()) {
+            try {
+                protocol.sendTransferCancel();
+            } catch (IOException e) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Failed to send cancel notification to remote: " + e.getMessage()));
+            }
+        }
         restartListening();
     }
 

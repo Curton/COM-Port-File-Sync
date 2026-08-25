@@ -64,39 +64,60 @@ public class SerialPortManager {
         return portDescs;
     }
 
-    /** Open the specified COM port */
+    /**
+     * Open the specified COM port.
+     *
+     * <p>Retries a few times: on Windows the OS may not release the COM port immediately after a
+     * {@link #close()}, so the first {@code openPort()} can fail. This is exercised by {@code
+     * restartListening()} and the reconnect path, which close and immediately reopen the same port.
+     */
     public boolean open(String portName) {
-        try {
-            serialPort = SerialPort.getCommPort(portName);
-            serialPort.setBaudRate(baudRate);
-            serialPort.setNumDataBits(dataBits);
-            serialPort.setNumStopBits(stopBits);
-            serialPort.setParity(parity);
-            serialPort.setComPortTimeouts(
-                    SerialPort.TIMEOUT_READ_SEMI_BLOCKING, DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+        final int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                serialPort = SerialPort.getCommPort(portName);
+                serialPort.setBaudRate(baudRate);
+                serialPort.setNumDataBits(dataBits);
+                serialPort.setNumStopBits(stopBits);
+                serialPort.setParity(parity);
+                serialPort.setComPortTimeouts(
+                        SerialPort.TIMEOUT_READ_SEMI_BLOCKING,
+                        DEFAULT_TIMEOUT_MS,
+                        DEFAULT_TIMEOUT_MS);
 
-            if (serialPort.openPort()) {
-                inputStream = serialPort.getInputStream();
-                outputStream = serialPort.getOutputStream();
-                // Drain any stale data that may be lingering in hardware/driver
-                // buffers from a previous session. On reconnect, the UART FIFO
-                // can hold residual bytes that clearInputBuffer alone won't
-                // catch because they haven't yet been delivered to the stream.
-                // A short settling delay lets all in-flight bytes arrive so
-                // they can be purged before any protocol communication begins.
+                if (serialPort.openPort()) {
+                    inputStream = serialPort.getInputStream();
+                    outputStream = serialPort.getOutputStream();
+                    // Drain any stale data that may be lingering in hardware/driver
+                    // buffers from a previous session. On reconnect, the UART FIFO
+                    // can hold residual bytes that clearInputBuffer alone won't
+                    // catch because they haven't yet been delivered to the stream.
+                    // A short settling delay lets all in-flight bytes arrive so
+                    // they can be purged before any protocol communication begins.
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    clearInputBuffer();
+                    return true;
+                }
+                // Not opened: release this instance before retrying with a fresh one.
+                serialPort.closePort();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            serialPort = null;
+            if (attempt < maxAttempts) {
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(200);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    return false;
                 }
-                clearInputBuffer();
-                return true;
             }
-            return false;
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
         }
+        return false;
     }
 
     /** Close the serial port */
