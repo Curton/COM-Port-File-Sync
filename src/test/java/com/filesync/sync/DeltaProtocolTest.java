@@ -20,8 +20,8 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Integration tests for {@link SyncProtocol#receiveFileDelta}: a scripted single-block XMODEM
  * payload delivers a delta, which the protocol reconstructs against the existing local file, MD5
- * verifies, and writes. Covers the happy path, GZIP-compressed delta, MD5-mismatch rollback, and the
- * missing-base-file guard.
+ * verifies, and writes. Covers the happy path, GZIP-compressed delta, MD5-mismatch rollback, and
+ * the missing-base-file guard.
  */
 class DeltaProtocolTest {
 
@@ -36,7 +36,9 @@ class DeltaProtocolTest {
         return b;
     }
 
-    /** Build a base (receiver's existing file) and a slightly-modified source, then delta-encode. */
+    /**
+     * Build a base (receiver's existing file) and a slightly-modified source, then delta-encode.
+     */
     private byte[] buildDelta(byte[] base, byte[] source) throws IOException {
         return DeltaEncoder.encode(source, SignatureUtil.compute("big.bin", base, BLOCK));
     }
@@ -67,7 +69,8 @@ class DeltaProtocolTest {
                 source.length,
                 HashUtil.md5Hex(source));
 
-        assertArrayEquals(source, Files.readAllBytes(existing), "file must match the sender's source");
+        assertArrayEquals(
+                source, Files.readAllBytes(existing), "file must match the sender's source");
     }
 
     @Test
@@ -249,13 +252,7 @@ class DeltaProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.receiveFileDelta(
-                                        tempDir.toFile(),
-                                        "big.bin",
-                                        50,
-                                        false,
-                                        0L,
-                                        100,
-                                        "abc"));
+                                        tempDir.toFile(), "big.bin", 50, false, 0L, 100, "abc"));
         assertTrue(
                 thrown.getMessage().contains("Failed to receive file delta"),
                 "error must mention receive failure: " + thrown.getMessage());

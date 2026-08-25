@@ -10,10 +10,10 @@ import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end delta round-trip tests: build a base (receiver's file), derive signatures, mutate into a
- * source (sender's file), encode a delta, decode it against the base, and assert the reconstruction
- * equals the source. Covers identical, append, prepend-insert, mid-block modify, totally different,
- * and shorter-than-base scenarios.
+ * End-to-end delta round-trip tests: build a base (receiver's file), derive signatures, mutate into
+ * a source (sender's file), encode a delta, decode it against the base, and assert the
+ * reconstruction equals the source. Covers identical, append, prepend-insert, mid-block modify,
+ * totally different, and shorter-than-base scenarios.
  */
 class DeltaEncoderDecoderTest {
 
@@ -44,7 +44,8 @@ class DeltaEncoderDecoderTest {
         byte[] rebuilt = DeltaDecoder.decode(base, delta);
         assertArrayEquals(base, rebuilt);
         // Delta should be much smaller than the source: header + 4 COPY tokens.
-        assertTrue(delta.length < base.length / 2, "delta=" + delta.length + " base=" + base.length);
+        assertTrue(
+                delta.length < base.length / 2, "delta=" + delta.length + " base=" + base.length);
     }
 
     @Test

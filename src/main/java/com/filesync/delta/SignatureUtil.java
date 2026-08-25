@@ -8,9 +8,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Computes {@link FileSignatures} for a file by splitting it into fixed-size blocks and hashing each
- * with the rolling weak checksum plus an MD5 strong hash. The block size is chosen adaptively from
- * the file size (clamped to {@code [512, 8192]}) so signature overhead stays roughly proportional.
+ * Computes {@link FileSignatures} for a file by splitting it into fixed-size blocks and hashing
+ * each with the rolling weak checksum plus an MD5 strong hash. The block size is chosen adaptively
+ * from the file size (clamped to {@code [512, 8192]}) so signature overhead stays roughly
+ * proportional.
  */
 public final class SignatureUtil {
 
@@ -18,6 +19,7 @@ public final class SignatureUtil {
 
     /** Minimum adaptive block size. */
     public static final int MIN_BLOCK_SIZE = 512;
+
     /** Maximum adaptive block size. */
     public static final int MAX_BLOCK_SIZE = 8192;
 
@@ -48,7 +50,8 @@ public final class SignatureUtil {
     }
 
     /** Compute signatures for in-memory bytes with an explicit block size. */
-    public static FileSignatures compute(String path, byte[] data, int blockSize) throws IOException {
+    public static FileSignatures compute(String path, byte[] data, int blockSize)
+            throws IOException {
         if (blockSize <= 0) {
             throw new IllegalArgumentException("blockSize must be positive: " + blockSize);
         }

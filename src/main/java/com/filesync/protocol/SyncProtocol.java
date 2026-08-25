@@ -347,11 +347,7 @@ public class SyncProtocol {
      * @return true if the delta was compressed, false otherwise
      */
     public boolean sendFileDelta(
-            String relativePath,
-            byte[] delta,
-            long lastModified,
-            long sourceSize,
-            String sourceMd5)
+            String relativePath, byte[] delta, long lastModified, long sourceSize, String sourceMd5)
             throws IOException {
         CompressionUtil.CompressedData compressedData =
                 CompressionUtil.compressIfBeneficial(relativePath, delta);
@@ -520,7 +516,8 @@ public class SyncProtocol {
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(reconstructed);
         } catch (IOException e) {
-            throw new FileWriteException(relativePath, reconstructed, lastModified, e.getMessage(), e);
+            throw new FileWriteException(
+                    relativePath, reconstructed, lastModified, e.getMessage(), e);
         }
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);

@@ -218,7 +218,10 @@ public final class SyncPreviewPlan {
         return conflicts;
     }
 
-    /** Paths of binary files eligible for rsync-style delta transfer (exist on both sides, large enough). */
+    /**
+     * Paths of binary files eligible for rsync-style delta transfer (exist on both sides, large
+     * enough).
+     */
     public Set<String> getDeltaCandidatePaths() {
         return deltaCandidatePaths;
     }

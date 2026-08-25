@@ -23,7 +23,9 @@ public final class DeltaEncoder {
 
     private DeltaEncoder() {}
 
-    /** A delta must save at least this fraction of the full compressed transfer to be worth sending. */
+    /**
+     * A delta must save at least this fraction of the full compressed transfer to be worth sending.
+     */
     public static final double BENEFICIAL_RATIO = 0.8;
 
     /**
@@ -38,8 +40,8 @@ public final class DeltaEncoder {
     }
 
     /**
-     * Encode the delta from the receiver's existing file (described by {@code sigs}) to the sender's
-     * {@code source} bytes.
+     * Encode the delta from the receiver's existing file (described by {@code sigs}) to the
+     * sender's {@code source} bytes.
      */
     public static byte[] encode(byte[] source, FileSignatures sigs) {
         int blockSize = sigs.getBlockSize();
@@ -88,7 +90,8 @@ public final class DeltaEncoder {
                         if (Arrays.equals(bs.strongHashInternal(), digest)) {
                             // Flush buffered literals first.
                             if (hasLiteral) {
-                                DeltaCodec.writeLiteral(delta, source, literalStart, i - literalStart);
+                                DeltaCodec.writeLiteral(
+                                        delta, source, literalStart, i - literalStart);
                                 hasLiteral = false;
                             }
                             DeltaCodec.writeCopy(delta, bs.getBlockIndex(), blockSize);

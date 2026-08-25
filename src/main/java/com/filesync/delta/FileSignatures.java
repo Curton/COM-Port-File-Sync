@@ -14,8 +14,8 @@ import java.util.List;
  * Block signatures for a single file: the relative path, the fixed block size, the number of full
  * blocks, the total source byte length, and one {@link BlockSignature} per full block (index 0..
  * blockCount-1). The trailing partial block (shorter than {@code blockSize}) is intentionally
- * excluded from the matchable set; the encoder will simply send those bytes as literals, which keeps
- * the rolling-hash logic single-window-length.
+ * excluded from the matchable set; the encoder will simply send those bytes as literals, which
+ * keeps the rolling-hash logic single-window-length.
  *
  * <p>Serialized form (big-endian):
  *
@@ -30,13 +30,18 @@ public final class FileSignatures {
 
     /** Magic header for the multi-file container, not used here but kept for symmetry. */
     private final String path;
+
     private final int blockSize;
     private final int blockCount;
     private final long sourceSize;
     private final List<BlockSignature> signatures;
 
     public FileSignatures(
-            String path, int blockSize, int blockCount, long sourceSize, List<BlockSignature> signatures) {
+            String path,
+            int blockSize,
+            int blockCount,
+            long sourceSize,
+            List<BlockSignature> signatures) {
         this.path = path;
         this.blockSize = blockSize;
         this.blockCount = blockCount;

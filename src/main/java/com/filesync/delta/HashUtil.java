@@ -1,6 +1,8 @@
 package com.filesync.delta;
 
-/** MD5 helper for delta-sync verification (raw bytes to lowercase hex). Delegates to {@link Md5}. */
+/**
+ * MD5 helper for delta-sync verification (raw bytes to lowercase hex). Delegates to {@link Md5}.
+ */
 public final class HashUtil {
 
     private HashUtil() {}

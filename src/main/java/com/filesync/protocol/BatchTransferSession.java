@@ -302,7 +302,8 @@ public class BatchTransferSession {
     /** Callback for per-entry write failures during batch decode. */
     @FunctionalInterface
     public interface WriteFailureHandler {
-        void onWriteFailed(String relativePath, byte[] data, long lastModified, String errorMessage);
+        void onWriteFailed(
+                String relativePath, byte[] data, long lastModified, String errorMessage);
     }
 
     private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {

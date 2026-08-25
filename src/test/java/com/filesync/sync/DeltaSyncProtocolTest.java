@@ -8,7 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.filesync.delta.BlockSignature;
 import com.filesync.delta.FileSignatures;
 import com.filesync.delta.SignatureSet;
-import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
@@ -28,12 +27,23 @@ import org.junit.jupiter.api.io.TempDir;
 class DeltaSyncProtocolTest {
 
     private static final byte[] XMODEM_SEND_HANDSHAKE =
-            new byte[] {XModemTransfer.C, XModemTransfer.ACK, XModemTransfer.ACK, XModemTransfer.ACK,
-                    XModemTransfer.ACK};
+            new byte[] {
+                XModemTransfer.C,
+                XModemTransfer.ACK,
+                XModemTransfer.ACK,
+                XModemTransfer.ACK,
+                XModemTransfer.ACK
+            };
 
     private SignatureSet sampleSet() {
-        return new SignatureSet(List.of(
-                new FileSignatures("a.bin", 64, 1, 64, List.of(new BlockSignature(0, 123, new byte[16])))));
+        return new SignatureSet(
+                List.of(
+                        new FileSignatures(
+                                "a.bin",
+                                64,
+                                1,
+                                64,
+                                List.of(new BlockSignature(0, 123, new byte[16])))));
     }
 
     @Test
@@ -68,7 +78,8 @@ class DeltaSyncProtocolTest {
         protocol.sendDeltaSignatures(SignatureSet.empty());
 
         assertTrue(
-                serial.getWrittenLines().stream().anyMatch(l -> l.startsWith("[[SYNC:DELTA_SIG_DATA:")),
+                serial.getWrittenLines().stream()
+                        .anyMatch(l -> l.startsWith("[[SYNC:DELTA_SIG_DATA:")),
                 "must announce DELTA_SIG_DATA with the payload length");
         assertFalse(protocol.isXmodemInProgress());
     }
@@ -116,7 +127,9 @@ class DeltaSyncProtocolTest {
         serial.feedLine("[[SYNC:ACK]]"); // ACK for the first attempt's waitForCommand
         // Peer rejects the block with CAN -> xmodem.send returns false (XMODEM-phase failure).
         serial.feedBytes(
-                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
         SyncProtocol protocol = new SyncProtocol(serial);
         protocol.setTimeout(150);
 
@@ -124,7 +137,9 @@ class DeltaSyncProtocolTest {
         IOException thrown =
                 assertThrows(
                         IOException.class,
-                        () -> protocol.sendFileDelta("a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
+                        () ->
+                                protocol.sendFileDelta(
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
         assertTrue(thrown.getMessage().contains("Failed to send file delta"));
         // XMODEM-phase failure must not retry: exactly one FILE_DELTA frame was written.
         assertEquals(
@@ -148,7 +163,9 @@ class DeltaSyncProtocolTest {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         serial.feedLine("[[SYNC:ACK]]");
         serial.feedBytes(
-                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
         SyncProtocol protocol = new SyncProtocol(serial);
 
         IOException thrown =
@@ -165,13 +182,14 @@ class DeltaSyncProtocolTest {
         // Announce the data, then feed CAN so xmodem.receive aborts and returns null immediately.
         serial.feedLine("[[SYNC:DELTA_SIG_DATA:10]]");
         serial.feedBytes(
-                new byte[] {XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+                new byte[] {
+                    XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
         SyncProtocol protocol = new SyncProtocol(serial);
 
         IOException thrown =
                 assertThrows(
-                        IOException.class,
-                        () -> protocol.requestDeltaSignatures(List.of("a.bin")));
+                        IOException.class, () -> protocol.requestDeltaSignatures(List.of("a.bin")));
         assertTrue(
                 thrown.getMessage().contains("Failed to receive delta signatures"),
                 "msg: " + thrown.getMessage());
@@ -203,7 +221,9 @@ class DeltaSyncProtocolTest {
         IOException thrown =
                 assertThrows(
                         IOException.class,
-                        () -> protocol.sendFileDelta("a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
+                        () ->
+                                protocol.sendFileDelta(
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
         assertTrue(thrown.getMessage().contains("Failed to send file delta"));
         // Command/ACK-phase failure must retry up to maxAttempts = 3.
         assertEquals(
@@ -226,7 +246,9 @@ class DeltaSyncProtocolTest {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         serial.feedLine("[[SYNC:ACK]]");
         serial.feedBytes(
-                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
         SyncProtocol protocol = new SyncProtocol(serial);
         protocol.setTimeout(150);
 
@@ -239,7 +261,9 @@ class DeltaSyncProtocolTest {
         assertTrue(thrown.getMessage().contains("Failed to send merged file"));
         assertEquals(
                 1,
-                serial.getWrittenLines().stream().filter(l -> l.contains("FILE_DATA:a.bin")).count(),
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_DATA:a.bin"))
+                        .count(),
                 "XMODEM-phase failure must not re-send the command");
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
@@ -264,7 +288,9 @@ class DeltaSyncProtocolTest {
         assertTrue(thrown.getMessage().contains("Failed to send merged file"));
         assertEquals(
                 3,
-                serial.getWrittenLines().stream().filter(l -> l.contains("FILE_DATA:a.bin")).count(),
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_DATA:a.bin"))
+                        .count(),
                 "command-phase failure must retry the command: " + serial.getWrittenLines());
         assertTrue(
                 serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
@@ -274,19 +300,20 @@ class DeltaSyncProtocolTest {
     }
 
     @Test
-    void sendBatch_xmodemPhaseFailure_sendsCancelAndReturnsFalseAfterOneAttempt(@TempDir Path tempDir)
-            throws IOException {
+    void sendBatch_xmodemPhaseFailure_sendsCancelAndReturnsFalseAfterOneAttempt(
+            @TempDir Path tempDir) throws IOException {
         File file = Files.write(tempDir.resolve("a.bin"), new byte[] {1, 2, 3}).toFile();
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         serial.feedLine("[[SYNC:ACK]]");
         serial.feedBytes(
-                new byte[] {XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN});
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
         SyncProtocol protocol = new SyncProtocol(serial);
         protocol.setTimeout(150);
 
         List<Object[]> entries = List.<Object[]>of(new Object[] {file, "a.bin"});
-        boolean ok =
-                protocol.sendBatch(entries, 32 * 1024, null, tempDir.toFile());
+        boolean ok = protocol.sendBatch(entries, 32 * 1024, null, tempDir.toFile());
         assertFalse(ok, "XMODEM-phase failure must return false");
         assertEquals(
                 1,

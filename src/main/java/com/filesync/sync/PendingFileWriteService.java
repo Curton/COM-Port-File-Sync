@@ -13,10 +13,10 @@ import java.util.concurrent.Executors;
 
 /**
  * Holds received files that could not be written to disk because the target file is locked by
- * another program (e.g. an open Word document). The UI is notified through a
- * {@link SyncEvent.PendingWriteEvent} so the user can decide between retry and skip; entries are
- * held in memory indefinitely until the user retries successfully or skips them. Nothing is
- * silently dropped.
+ * another program (e.g. an open Word document). The UI is notified through a {@link
+ * SyncEvent.PendingWriteEvent} so the user can decide between retry and skip; entries are held in
+ * memory indefinitely until the user retries successfully or skips them. Nothing is silently
+ * dropped.
  */
 public class PendingFileWriteService {
 
@@ -50,7 +50,11 @@ public class PendingFileWriteService {
      * replaced with the newer version so a stale payload is never written over newer data.
      */
     public void enqueue(
-            File baseDir, String relativePath, byte[] data, long lastModified, String errorMessage) {
+            File baseDir,
+            String relativePath,
+            byte[] data,
+            long lastModified,
+            String errorMessage) {
         PendingEntry entry =
                 new PendingEntry(baseDir, relativePath, data, lastModified, errorMessage);
         boolean replaced = pending.put(relativePath, entry) != null;
@@ -151,9 +155,7 @@ public class PendingFileWriteService {
         pending.clear();
         eventBus.post(
                 new SyncEvent.LogEvent(
-                        "Skipped "
-                                + count
-                                + " file(s) (will be re-synced on next sync)"));
+                        "Skipped " + count + " file(s) (will be re-synced on next sync)"));
         postPendingEvent();
     }
 

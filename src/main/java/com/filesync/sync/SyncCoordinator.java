@@ -283,8 +283,9 @@ public class SyncCoordinator {
     }
 
     /**
-     * Sample-based binary detection consistent with {@link FileChangeDetector#calculateMD5}: read up
-     * to {@value #BINARY_SAMPLE_SIZE} bytes and classify via {@link CompressionUtil#isLikelyBinaryContent}.
+     * Sample-based binary detection consistent with {@link FileChangeDetector#calculateMD5}: read
+     * up to {@value #BINARY_SAMPLE_SIZE} bytes and classify via {@link
+     * CompressionUtil#isLikelyBinaryContent}.
      */
     static boolean isBinaryFile(File file) {
         try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
@@ -293,7 +294,8 @@ public class SyncCoordinator {
             if (read <= 0) {
                 return false;
             }
-            byte[] buf = read == BINARY_SAMPLE_SIZE ? sample : java.util.Arrays.copyOf(sample, read);
+            byte[] buf =
+                    read == BINARY_SAMPLE_SIZE ? sample : java.util.Arrays.copyOf(sample, read);
             return CompressionUtil.isLikelyBinaryContent(buf);
         } catch (IOException e) {
             return false;
@@ -521,7 +523,11 @@ public class SyncCoordinator {
             // pending-write dialog is open instead of a stale, enabled "Cancel" button.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             pendingFileWriteService.enqueue(
-                    syncFolder, e.getRelativePath(), e.getData(), e.getLastModified(), e.getMessage());
+                    syncFolder,
+                    e.getRelativePath(),
+                    e.getData(),
+                    e.getLastModified(),
+                    e.getMessage());
         } catch (IOException e) {
             syncing.set(false);
             onSyncIdle.run();
@@ -531,8 +537,8 @@ public class SyncCoordinator {
     }
 
     /**
-     * Receiver-side handler for {@link SyncProtocol#CMD_DELTA_SIG_REQ}: compute block signatures for
-     * the requested paths that exist locally and return them as a single {@link SignatureSet}.
+     * Receiver-side handler for {@link SyncProtocol#CMD_DELTA_SIG_REQ}: compute block signatures
+     * for the requested paths that exist locally and return them as a single {@link SignatureSet}.
      * Missing or unreadable files are silently omitted; the sender treats an absent path as "no
      * signatures available" and falls back to a full transfer for it.
      */
@@ -595,7 +601,13 @@ public class SyncCoordinator {
         try {
             resolveSafe(syncFolder, relativePath);
             protocol.receiveFileDelta(
-                    syncFolder, relativePath, size, compressed, lastModified, sourceSize, sourceMd5);
+                    syncFolder,
+                    relativePath,
+                    size,
+                    compressed,
+                    lastModified,
+                    sourceSize,
+                    sourceMd5);
             eventBus.post(new SyncEvent.LogEvent("Delta applied: " + relativePath));
             pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
@@ -608,7 +620,11 @@ public class SyncCoordinator {
             // delta transfer left it as an enabled "Cancel", but syncing is now false.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             pendingFileWriteService.enqueue(
-                    syncFolder, e.getRelativePath(), e.getData(), e.getLastModified(), e.getMessage());
+                    syncFolder,
+                    e.getRelativePath(),
+                    e.getData(),
+                    e.getLastModified(),
+                    e.getMessage());
         } catch (IOException e) {
             syncing.set(false);
             onSyncIdle.run();
@@ -879,11 +895,14 @@ public class SyncCoordinator {
                         CompressionUtil.CompressedData fullCompressed =
                                 CompressionUtil.compressIfBeneficial(path, source);
                         if (!DeltaEncoder.isBeneficial(
-                                deltaCompressed.getData().length, fullCompressed.getData().length)) {
+                                deltaCompressed.getData().length,
+                                fullCompressed.getData().length)) {
                             deltaFallback.add(fi);
                             eventBus.post(
                                     new SyncEvent.LogEvent(
-                                            "Delta not beneficial for " + path + "; using full transfer"));
+                                            "Delta not beneficial for "
+                                                    + path
+                                                    + "; using full transfer"));
                             continue;
                         }
                         String sourceMd5 = HashUtil.md5Hex(source);
@@ -897,7 +916,11 @@ public class SyncCoordinator {
                         long savedBytes =
                                 (long) fullCompressed.getData().length
                                         - deltaCompressed.getData().length;
-                        int pct = (int) (100 * savedBytes / Math.max(1, fullCompressed.getData().length));
+                        int pct =
+                                (int)
+                                        (100
+                                                * savedBytes
+                                                / Math.max(1, fullCompressed.getData().length));
                         String msg =
                                 "Delta syncing binary ["
                                         + operationIndex

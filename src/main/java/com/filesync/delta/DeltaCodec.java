@@ -12,9 +12,9 @@ import java.io.ByteArrayOutputStream;
  *     LITERAL: TAG(1)=0x02 | LENGTH(4)      | BYTES(length)
  * </pre>
  *
- * All integers are big-endian. The decoder reconstructs the source by replaying COPY tokens (reading
- * {@code LENGTH} bytes from the receiver's existing file at {@code BLOCK_INDEX * BLOCK_SIZE}) and
- * LITERAL tokens (verbatim bytes) in order.
+ * All integers are big-endian. The decoder reconstructs the source by replaying COPY tokens
+ * (reading {@code LENGTH} bytes from the receiver's existing file at {@code BLOCK_INDEX *
+ * BLOCK_SIZE}) and LITERAL tokens (verbatim bytes) in order.
  */
 public final class DeltaCodec {
 

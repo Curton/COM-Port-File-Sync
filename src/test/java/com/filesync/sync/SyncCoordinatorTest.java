@@ -5,15 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.isA;
-import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -997,7 +997,12 @@ class SyncCoordinatorTest {
         coordinator.handleIncomingBatchUnknownTotal(100);
 
         verify(pendingWriteService)
-                .enqueue(eq(syncFolder), eq("locked.txt"), aryEq(payload), eq(1234L), eq("being used"));
+                .enqueue(
+                        eq(syncFolder),
+                        eq("locked.txt"),
+                        aryEq(payload),
+                        eq(1234L),
+                        eq("being used"));
         assertFalse(syncing.get(), "Sync state must be reset after handling the batch");
         assertTrue(
                 postedEvents.stream()
@@ -1029,8 +1034,7 @@ class SyncCoordinatorTest {
     }
 
     @Test
-    void handleIncomingFileData_fileWriteException_enqueuesWithoutRethrowing()
-            throws IOException {
+    void handleIncomingFileData_fileWriteException_enqueuesWithoutRethrowing() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
@@ -1047,7 +1051,12 @@ class SyncCoordinatorTest {
         coordinator.handleIncomingFileData(mockMsg);
 
         verify(pendingWriteService)
-                .enqueue(eq(syncFolder), eq("locked.txt"), aryEq(payload), eq(77L), eq("being used"));
+                .enqueue(
+                        eq(syncFolder),
+                        eq("locked.txt"),
+                        aryEq(payload),
+                        eq(77L),
+                        eq("being used"));
         assertFalse(syncing.get(), "Sync state must be reset after a queued write failure");
         // A locked target must refresh the Sync Control button: transfer-progress events left it
         // as an enabled "Cancel", and without a refresh it stays stale while the pending-write

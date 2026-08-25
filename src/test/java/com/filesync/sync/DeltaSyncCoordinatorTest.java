@@ -19,7 +19,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.filesync.delta.FileSignatures;
 import com.filesync.delta.SignatureSet;
 import com.filesync.delta.SignatureUtil;
 import com.filesync.protocol.BatchTransferSession;
@@ -36,8 +35,6 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -108,7 +105,10 @@ class DeltaSyncCoordinatorTest {
         Map<String, FileChangeDetector.FileInfo> files = new HashMap<>();
         for (String p : paths) {
             // md5 differs from local and mtime=0 (older) -> changed but not a conflict.
-            files.put(p, new FileChangeDetector.FileInfo(p, 9999L, 0L, "deadbeefdeadbeefdeadbeefdeadbeef"));
+            files.put(
+                    p,
+                    new FileChangeDetector.FileInfo(
+                            p, 9999L, 0L, "deadbeefdeadbeefdeadbeefdeadbeef"));
         }
         return new FileChangeDetector.FileManifest(files, new java.util.HashSet<>());
     }
@@ -149,7 +149,9 @@ class DeltaSyncCoordinatorTest {
         when(mockProtocol.waitForCommand(anyString())).thenReturn(manifestMsg);
         // Remote has nothing -> big.bin is new -> no delta candidate.
         when(mockProtocol.receiveManifest(anyInt()))
-                .thenReturn(new FileChangeDetector.FileManifest(new HashMap<>(), new java.util.HashSet<>()));
+                .thenReturn(
+                        new FileChangeDetector.FileManifest(
+                                new HashMap<>(), new java.util.HashSet<>()));
 
         SyncPreviewPlan plan = createCoordinator().createSyncPreviewPlan();
         assertTrue(plan.getDeltaCandidatePaths().isEmpty());
@@ -184,7 +186,8 @@ class DeltaSyncCoordinatorTest {
         when(msg.getParam(0)).thenReturn("big.bin");
         when(msg.getParamAsInt(1)).thenReturn(50);
         when(msg.getParamAsBoolean(2)).thenReturn(false);
-        when(msg.getParams()).thenReturn(new String[] {"big.bin", "50", "false", "100", "10240", "abc"});
+        when(msg.getParams())
+                .thenReturn(new String[] {"big.bin", "50", "false", "100", "10240", "abc"});
         // receiveFileDelta is void; default mock does nothing (success path).
         createCoordinator().handleIncomingFileDelta(msg);
 
@@ -200,11 +203,20 @@ class DeltaSyncCoordinatorTest {
         when(msg.getParam(0)).thenReturn("big.bin");
         when(msg.getParamAsInt(1)).thenReturn(50);
         when(msg.getParamAsBoolean(2)).thenReturn(false);
-        when(msg.getParams()).thenReturn(new String[] {"big.bin", "50", "false", "100", "1024", "abc"});
-        doThrow(new FileWriteException("big.bin", reconstructed, 100L, "locked", new IOException("lock")))
+        when(msg.getParams())
+                .thenReturn(new String[] {"big.bin", "50", "false", "100", "1024", "abc"});
+        doThrow(
+                        new FileWriteException(
+                                "big.bin", reconstructed, 100L, "locked", new IOException("lock")))
                 .when(mockProtocol)
                 .receiveFileDelta(
-                        any(File.class), anyString(), anyInt(), anyBoolean(), anyLong(), anyLong(), nullable(String.class));
+                        any(File.class),
+                        anyString(),
+                        anyInt(),
+                        anyBoolean(),
+                        anyLong(),
+                        anyLong(),
+                        nullable(String.class));
 
         createCoordinator().handleIncomingFileDelta(msg);
 
@@ -222,11 +234,18 @@ class DeltaSyncCoordinatorTest {
         when(msg.getParam(0)).thenReturn("big.bin");
         when(msg.getParamAsInt(1)).thenReturn(50);
         when(msg.getParamAsBoolean(2)).thenReturn(false);
-        when(msg.getParams()).thenReturn(new String[] {"big.bin", "50", "false", "100", "1024", "abc"});
+        when(msg.getParams())
+                .thenReturn(new String[] {"big.bin", "50", "false", "100", "1024", "abc"});
         doThrow(new IOException("Delta reconstruction verification failed for big.bin"))
                 .when(mockProtocol)
                 .receiveFileDelta(
-                        any(File.class), anyString(), anyInt(), anyBoolean(), anyLong(), anyLong(), nullable(String.class));
+                        any(File.class),
+                        anyString(),
+                        anyInt(),
+                        anyBoolean(),
+                        anyLong(),
+                        anyLong(),
+                        nullable(String.class));
 
         org.junit.jupiter.api.Assertions.assertThrows(
                 IOException.class, () -> createCoordinator().handleIncomingFileDelta(msg));
@@ -237,14 +256,7 @@ class DeltaSyncCoordinatorTest {
     private SyncPreviewPlan planFor(String path, long size) {
         FileChangeDetector.FileInfo fi = new FileChangeDetector.FileInfo(path, size, 1L, "h");
         return new SyncPreviewPlan(
-                List.of(fi),
-                List.of(),
-                List.of(),
-                List.of(),
-                size,
-                false,
-                List.of(),
-                Set.of(path));
+                List.of(fi), List.of(), List.of(), List.of(), size, false, List.of(), Set.of(path));
     }
 
     @Test
@@ -252,9 +264,15 @@ class DeltaSyncCoordinatorTest {
         byte[] data = randomBytes(10 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
-        // Signatures computed from the same bytes -> every block matches -> delta is tiny -> beneficial.
+        // Signatures computed from the same bytes -> every block matches -> delta is tiny ->
+        // beneficial.
         SignatureSet sigs =
-                new SignatureSet(List.of(SignatureUtil.compute("big.bin", data, SignatureUtil.chooseBlockSize(data.length))));
+                new SignatureSet(
+                        List.of(
+                                SignatureUtil.compute(
+                                        "big.bin",
+                                        data,
+                                        SignatureUtil.chooseBlockSize(data.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
         when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
@@ -267,7 +285,11 @@ class DeltaSyncCoordinatorTest {
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
         verify(mockProtocol, never())
-                .sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
     }
 
     @Test
@@ -275,13 +297,23 @@ class DeltaSyncCoordinatorTest {
         byte[] data = randomBytes(10 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
-        // Signatures from completely unrelated bytes -> no block matches -> delta ~= full -> not beneficial.
+        // Signatures from completely unrelated bytes -> no block matches -> delta ~= full -> not
+        // beneficial.
         byte[] unrelated = randomBytes(10 * 1024, 99);
         SignatureSet sigs =
-                new SignatureSet(List.of(SignatureUtil.compute("big.bin", unrelated, SignatureUtil.chooseBlockSize(data.length))));
+                new SignatureSet(
+                        List.of(
+                                SignatureUtil.compute(
+                                        "big.bin",
+                                        unrelated,
+                                        SignatureUtil.chooseBlockSize(data.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class)))
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
                 .thenAnswer(
                         inv -> {
                             BatchTransferSession.BatchProgressCallback cb = inv.getArgument(2);
@@ -300,7 +332,12 @@ class DeltaSyncCoordinatorTest {
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol, never())
                 .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
-        verify(mockProtocol).sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
     }
 
     @Test
@@ -311,7 +348,11 @@ class DeltaSyncCoordinatorTest {
         // Receiver returned no signature for the path -> candidate must fall back to full transfer.
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(SignatureSet.empty());
-        when(mockProtocol.sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class)))
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
                 .thenReturn(true);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -320,7 +361,12 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol, never())
                 .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
-        verify(mockProtocol).sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
     }
 
     @Test
@@ -332,7 +378,11 @@ class DeltaSyncCoordinatorTest {
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList()))
                 .thenThrow(new IOException("timed out waiting for DELTA_SIG_DATA"));
-        when(mockProtocol.sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class)))
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
                 .thenReturn(true);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -341,7 +391,12 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol, never())
                 .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
-        verify(mockProtocol).sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
         // A sync-complete marker must still be emitted so the run finishes normally.
         verify(mockProtocol).sendSyncComplete();
     }
@@ -368,15 +423,22 @@ class DeltaSyncCoordinatorTest {
         Files.write(tempDir.resolve("ok.bin"), randomBytes(10 * 1024, 1));
         Files.write(tempDir.resolve("conflict.bin"), randomBytes(10 * 1024, 2));
 
-        List<FileChangeDetector.FileInfo> filesToSync = List.of(
-                fi("ok.bin", 10 * 1024), fi("conflict.bin", 10 * 1024), fi("ghost.bin", 10 * 1024));
+        List<FileChangeDetector.FileInfo> filesToSync =
+                List.of(
+                        fi("ok.bin", 10 * 1024),
+                        fi("conflict.bin", 10 * 1024),
+                        fi("ghost.bin", 10 * 1024));
         ConflictInfo conflict =
-                new ConflictInfo("conflict.bin", fi("conflict.bin", 1), fi("conflict.bin", 1), true, null);
+                new ConflictInfo(
+                        "conflict.bin", fi("conflict.bin", 1), fi("conflict.bin", 1), true, null);
 
         Set<String> candidates =
                 createCoordinator()
-                        .selectDeltaCandidates(filesToSync, manifestWith("ok.bin", "conflict.bin", "ghost.bin"),
-                                List.of(conflict), syncFolder);
+                        .selectDeltaCandidates(
+                                filesToSync,
+                                manifestWith("ok.bin", "conflict.bin", "ghost.bin"),
+                                List.of(conflict),
+                                syncFolder);
 
         assertEquals(Set.of("ok.bin"), candidates);
     }
@@ -435,8 +497,7 @@ class DeltaSyncCoordinatorTest {
         // A directory at "realdir" and a traversal path "../evil" both fail to produce signatures
         // but must not abort the request; big.bin still yields a signature.
         tempDir.resolve("realdir").toFile().mkdirs();
-        createCoordinator()
-                .handleDeltaSigRequest(List.of("../evil", "realdir", "big.bin"));
+        createCoordinator().handleDeltaSigRequest(List.of("../evil", "realdir", "big.bin"));
 
         ArgumentCaptor<SignatureSet> captor = ArgumentCaptor.forClass(SignatureSet.class);
         verify(mockProtocol).sendDeltaSignatures(captor.capture());
@@ -485,7 +546,11 @@ class DeltaSyncCoordinatorTest {
                 new SignatureSet(List.of(SignatureUtil.compute("other.bin", data, 64)));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(others);
-        when(mockProtocol.sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class)))
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
                 .thenReturn(true);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -494,18 +559,26 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol, never())
                 .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
-        verify(mockProtocol).sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
     }
 
     @Test
     void performSync_readFailureOnCandidate_fallsBackToBatch() throws IOException {
         // Candidate is in the plan but the file is absent on disk -> Files.readAllBytes throws.
         byte[] data = randomBytes(10 * 1024, 1);
-        SignatureSet sigs =
-                new SignatureSet(List.of(SignatureUtil.compute("ghost.bin", data, 64)));
+        SignatureSet sigs = new SignatureSet(List.of(SignatureUtil.compute("ghost.bin", data, 64)));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class)))
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
                 .thenReturn(true);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -514,7 +587,12 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol, never())
                 .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
-        verify(mockProtocol).sendBatch(anyList(), anyInt(), isA(BatchTransferSession.BatchProgressCallback.class), any(File.class));
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
     }
 
     @Test
@@ -523,7 +601,12 @@ class DeltaSyncCoordinatorTest {
         Files.write(tempDir.resolve("big.bin"), data);
 
         SignatureSet sigs =
-                new SignatureSet(List.of(SignatureUtil.compute("big.bin", data, SignatureUtil.chooseBlockSize(data.length))));
+                new SignatureSet(
+                        List.of(
+                                SignatureUtil.compute(
+                                        "big.bin",
+                                        data,
+                                        SignatureUtil.chooseBlockSize(data.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
         // sendFileDelta reports the delta was compressed -> covers the "(compressed)" log branch.

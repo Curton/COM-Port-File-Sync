@@ -50,7 +50,9 @@ class SyncProtocolXmodemContentTest {
         FileWriteException thrown =
                 assertThrows(
                         FileWriteException.class,
-                        () -> protocol.receiveFile(extractDir, "locked.txt", payload.length, false, 42L));
+                        () ->
+                                protocol.receiveFile(
+                                        extractDir, "locked.txt", payload.length, false, 42L));
 
         assertEquals("locked.txt", thrown.getRelativePath(), "Exception must carry the path");
         assertEquals(

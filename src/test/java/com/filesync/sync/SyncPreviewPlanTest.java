@@ -352,10 +352,8 @@ class SyncPreviewPlanTest {
 
     @Test
     void createFilteredPlanIntersectsDeltaCandidatesWithSelection() {
-        FileChangeDetector.FileInfo keep =
-                new FileChangeDetector.FileInfo("keep.bin", 10, 0, "a");
-        FileChangeDetector.FileInfo drop =
-                new FileChangeDetector.FileInfo("drop.bin", 10, 0, "b");
+        FileChangeDetector.FileInfo keep = new FileChangeDetector.FileInfo("keep.bin", 10, 0, "a");
+        FileChangeDetector.FileInfo drop = new FileChangeDetector.FileInfo("drop.bin", 10, 0, "b");
         Set<String> candidates = new LinkedHashSet<>(List.of("keep.bin", "drop.bin"));
         SyncPreviewPlan basePlan =
                 new SyncPreviewPlan(
@@ -370,10 +368,7 @@ class SyncPreviewPlanTest {
 
         SyncPreviewPlan filtered =
                 basePlan.createFilteredPlan(
-                        new LinkedHashSet<>(List.of("keep.bin", "drop.bin")),
-                        null,
-                        null,
-                        null);
+                        new LinkedHashSet<>(List.of("keep.bin", "drop.bin")), null, null, null);
 
         assertEquals(Set.of("keep.bin", "drop.bin"), filtered.getDeltaCandidatePaths());
     }
@@ -397,8 +392,7 @@ class SyncPreviewPlanTest {
     @Test
     void filterDeltaCandidates_excludesFilesNotInCandidateSet() {
         // A filtered file that is not a delta candidate exercises the contains()==false branch.
-        FileChangeDetector.FileInfo cand =
-                new FileChangeDetector.FileInfo("cand.bin", 10, 0, "a");
+        FileChangeDetector.FileInfo cand = new FileChangeDetector.FileInfo("cand.bin", 10, 0, "a");
         FileChangeDetector.FileInfo normal =
                 new FileChangeDetector.FileInfo("normal.txt", 10, 0, "b");
         Set<String> candidates = new LinkedHashSet<>(List.of("cand.bin"));

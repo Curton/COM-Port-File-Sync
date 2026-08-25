@@ -65,7 +65,8 @@ class DeltaCoverageTest {
 
     @Test
     void rollingHash_weakChecksumRejectsNegativeLength() {
-        assertThrows(IllegalArgumentException.class, () -> RollingHash.weakChecksum(new byte[8], 0, -1));
+        assertThrows(
+                IllegalArgumentException.class, () -> RollingHash.weakChecksum(new byte[8], 0, -1));
     }
 
     @Test
@@ -96,7 +97,12 @@ class DeltaCoverageTest {
         int actualWeak = RollingHash.weakChecksum(base, 0, BLOCK);
         // A signature whose weak hash matches the source block but whose strong hash does not.
         FileSignatures sigs =
-                new FileSignatures("x", BLOCK, 1, BLOCK, List.of(new BlockSignature(0, actualWeak, new byte[16])));
+                new FileSignatures(
+                        "x",
+                        BLOCK,
+                        1,
+                        BLOCK,
+                        List.of(new BlockSignature(0, actualWeak, new byte[16])));
         byte[] delta = DeltaEncoder.encode(base, sigs);
         assertTrue(noCopyToken(delta), "no strong match -> delta should be all-literal");
         assertArrayEquals(base, DeltaDecoder.decode(base, delta));
@@ -107,8 +113,11 @@ class DeltaCoverageTest {
             int tag = delta[i] & 0xFF;
             if (tag == DeltaCodec.TAG_COPY) return false;
             else if (tag == DeltaCodec.TAG_LITERAL) {
-                int len = ((delta[i + 1] & 0xFF) << 24) | ((delta[i + 2] & 0xFF) << 16)
-                        | ((delta[i + 3] & 0xFF) << 8) | (delta[i + 4] & 0xFF);
+                int len =
+                        ((delta[i + 1] & 0xFF) << 24)
+                                | ((delta[i + 2] & 0xFF) << 16)
+                                | ((delta[i + 3] & 0xFF) << 8)
+                                | (delta[i + 4] & 0xFF);
                 i += 5 + len;
             } else {
                 throw new AssertionError("unexpected tag " + tag);
@@ -170,8 +179,27 @@ class DeltaCoverageTest {
 
     @Test
     void decode_badVersionThrows() {
-        byte[] d = concat(new byte[] {DeltaCodec.MAGIC[0], DeltaCodec.MAGIC[1], DeltaCodec.MAGIC[2],
-                        DeltaCodec.MAGIC[3], 9, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0});
+        byte[] d =
+                concat(
+                        new byte[] {
+                            DeltaCodec.MAGIC[0],
+                            DeltaCodec.MAGIC[1],
+                            DeltaCodec.MAGIC[2],
+                            DeltaCodec.MAGIC[3],
+                            9,
+                            0,
+                            0,
+                            0,
+                            64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                        });
         assertThrows(IOException.class, () -> DeltaDecoder.decode(new byte[8], d));
     }
 
@@ -285,9 +313,14 @@ class DeltaCoverageTest {
     @Test
     void fileSignatures_encodedLengthAccessor() throws IOException {
         FileSignatures fs =
-                new FileSignatures("a.bin", 64, 2, 128, List.of(
-                        new BlockSignature(0, 1, new byte[16]),
-                        new BlockSignature(1, 2, new byte[16])));
+                new FileSignatures(
+                        "a.bin",
+                        64,
+                        2,
+                        128,
+                        List.of(
+                                new BlockSignature(0, 1, new byte[16]),
+                                new BlockSignature(1, 2, new byte[16])));
         // 2 (pathLen) + 5 (path "a.bin") + 4 (blockSize) + 4 (blockCount) + 8 (sourceSize)
         // + 2 blocks * 20 bytes
         assertEquals(2 + 5 + 4 + 4 + 8 + 40, fs.encodedLength());
@@ -297,8 +330,11 @@ class DeltaCoverageTest {
 
     @Test
     void signatureUtil_nonPositiveBlockSizeThrows() {
-        assertThrows(IllegalArgumentException.class, () -> SignatureUtil.compute("x", new byte[200], 0));
-        assertThrows(IllegalArgumentException.class, () -> SignatureUtil.compute("x", new byte[200], -1));
+        assertThrows(
+                IllegalArgumentException.class, () -> SignatureUtil.compute("x", new byte[200], 0));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> SignatureUtil.compute("x", new byte[200], -1));
     }
 
     @Test

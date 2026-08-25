@@ -12,8 +12,8 @@ package com.filesync.delta;
  * </pre>
  *
  * <p>The hash rolls one byte at a time: removing the oldest byte {@code out} and adding a new byte
- * {@code in} updates {@code s1} and {@code s2} in O(1). The 16-bit halves are masked with
- * {@code 0xFFFF}; the {@code (s2 - n*out + s1)} term is masked after the subtraction so negative
+ * {@code in} updates {@code s1} and {@code s2} in O(1). The 16-bit halves are masked with {@code
+ * 0xFFFF}; the {@code (s2 - n*out + s1)} term is masked after the subtraction so negative
  * intermediates wrap correctly.
  */
 public final class RollingHash {
@@ -46,8 +46,8 @@ public final class RollingHash {
     }
 
     /**
-     * Slide the window by one byte: remove {@code outByte} (oldest) and add {@code inByte} (newest).
-     * The window length stays constant at {@code blockLength}.
+     * Slide the window by one byte: remove {@code outByte} (oldest) and add {@code inByte}
+     * (newest). The window length stays constant at {@code blockLength}.
      */
     public void roll(byte outByte, byte inByte) {
         int out = outByte & 0xFF;
@@ -66,9 +66,7 @@ public final class RollingHash {
         return blockLength;
     }
 
-    /**
-     * Compute the weak checksum of a fixed block in one pass (used when generating signatures).
-     */
+    /** Compute the weak checksum of a fixed block in one pass (used when generating signatures). */
     public static int weakChecksum(byte[] data, int off, int len) {
         if (len < 0) {
             throw new IllegalArgumentException("len must be non-negative: " + len);

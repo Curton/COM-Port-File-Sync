@@ -17,6 +17,8 @@ public enum SyncEventType {
     SHARED_TEXT_RECEIVED,
     DROP_FILE_RECEIVED,
     REMOTE_FOLDER_CHANGED,
-    /** Received file(s) could not be written (locked by another program), awaiting user decision. */
+    /**
+     * Received file(s) could not be written (locked by another program), awaiting user decision.
+     */
     PENDING_FILE_WRITE
 }

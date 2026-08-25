@@ -46,7 +46,12 @@ class PendingFileWriteServiceTest {
 
     @Test
     void enqueue_postsPendingWriteEventAndLog() {
-        service.enqueue(tempDir.toFile(), "locked.txt", "data".getBytes(StandardCharsets.UTF_8), 0L, "being used");
+        service.enqueue(
+                tempDir.toFile(),
+                "locked.txt",
+                "data".getBytes(StandardCharsets.UTF_8),
+                0L,
+                "being used");
 
         assertEquals(List.of("locked.txt"), service.getPendingPaths());
         assertEquals(List.of("locked.txt"), lastPendingPaths(), "enqueue must notify the UI");
@@ -76,14 +81,20 @@ class PendingFileWriteServiceTest {
 
         waitUntil(() -> logContains("File written after retry"), Duration.ofSeconds(5));
         assertTrue(service.getPendingPaths().isEmpty(), "Entry must be removed after success");
-        assertEquals("hello", Files.readString(target.toPath()), "Content must be written on retry");
+        assertEquals(
+                "hello", Files.readString(target.toPath()), "Content must be written on retry");
         assertTrue(logContains("File written after retry: a.txt"));
     }
 
     @Test
     void retry_writesFileAndRestoresSenderLastModified() throws Exception {
         long senderModified = 1_600_000_000_000L;
-        service.enqueue(tempDir.toFile(), "a.txt", "data".getBytes(StandardCharsets.UTF_8), senderModified, "locked");
+        service.enqueue(
+                tempDir.toFile(),
+                "a.txt",
+                "data".getBytes(StandardCharsets.UTF_8),
+                senderModified,
+                "locked");
 
         service.retry(List.of("a.txt"));
 
@@ -104,8 +115,10 @@ class PendingFileWriteServiceTest {
 
     @Test
     void samePathEnqueue_replacesData_newerVersionIsWritten() throws Exception {
-        service.enqueue(tempDir.toFile(), "a.txt", "v1".getBytes(StandardCharsets.UTF_8), 0L, "locked");
-        service.enqueue(tempDir.toFile(), "a.txt", "v2".getBytes(StandardCharsets.UTF_8), 0L, "locked");
+        service.enqueue(
+                tempDir.toFile(), "a.txt", "v1".getBytes(StandardCharsets.UTF_8), 0L, "locked");
+        service.enqueue(
+                tempDir.toFile(), "a.txt", "v2".getBytes(StandardCharsets.UTF_8), 0L, "locked");
 
         assertEquals(1, service.getPendingPaths().size(), "Same path must hold a single entry");
         service.retry(List.of("a.txt"));
@@ -119,7 +132,12 @@ class PendingFileWriteServiceTest {
         File target = new File(tempDir.toFile(), "a.txt");
         Files.writeString(target.toPath(), "newer version");
         // v1 was queued while locked; then a newer version arrived and was written by a batch.
-        service.enqueue(tempDir.toFile(), "a.txt", "stale v1".getBytes(StandardCharsets.UTF_8), 0L, "locked");
+        service.enqueue(
+                tempDir.toFile(),
+                "a.txt",
+                "stale v1".getBytes(StandardCharsets.UTF_8),
+                0L,
+                "locked");
 
         service.markWritten("a.txt");
         assertTrue(service.getPendingPaths().isEmpty(), "markWritten must clear the stale entry");

@@ -56,7 +56,8 @@ public final class DeltaDecoder {
                     int blockIndex = in.readInt();
                     int length = in.readInt();
                     if (blockIndex < 0 || length < 0) {
-                        throw new IOException("Negative COPY fields: block=" + blockIndex + " len=" + length);
+                        throw new IOException(
+                                "Negative COPY fields: block=" + blockIndex + " len=" + length);
                     }
                     long offset = (long) blockIndex * blockSize;
                     long end = offset + length;

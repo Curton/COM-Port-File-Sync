@@ -539,7 +539,9 @@ class BatchTransferSessionTest {
     @Test
     void decodeBatchWithWriteFailure_continuesWithRemainingEntriesAndReportsFailure()
             throws IOException {
-        byte[] batch = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"content A", "content B"});
+        byte[] batch =
+                buildBatch(
+                        new String[] {"a.txt", "b.txt"}, new String[] {"content A", "content B"});
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -572,12 +574,9 @@ class BatchTransferSessionTest {
     }
 
     @Test
-    void decodeBatchWithMultipleWriteFailures_reportsEachOneAndWritesTheRest()
-            throws IOException {
+    void decodeBatchWithMultipleWriteFailures_reportsEachOneAndWritesTheRest() throws IOException {
         byte[] batch =
-                buildBatch(
-                        new String[] {"a.txt", "b.txt", "c.txt"},
-                        new String[] {"A", "B", "C"});
+                buildBatch(new String[] {"a.txt", "b.txt", "c.txt"}, new String[] {"A", "B", "C"});
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -595,7 +594,8 @@ class BatchTransferSessionTest {
 
         assertEquals(1, written, "Only the writable entry should be written");
         assertEquals(List.of("a.txt", "c.txt"), failedPaths, "Each locked entry must be reported");
-        assertTrue(new File(extractDir, "b.txt").exists(), "Writable entries must still be written");
+        assertTrue(
+                new File(extractDir, "b.txt").exists(), "Writable entries must still be written");
     }
 
     @Test
@@ -613,11 +613,7 @@ class BatchTransferSessionTest {
 
         int written =
                 BatchTransferSession.decodeAndWriteBatch(
-                        extractDir,
-                        batch,
-                        2,
-                        callback,
-                        (path, data, lastModified, message) -> {});
+                        extractDir, batch, 2, callback, (path, data, lastModified, message) -> {});
 
         assertEquals(1, written, "Should have written 1 file");
         assertEquals(1, progress[0], "Progress callback should only fire for written entries");
@@ -636,9 +632,7 @@ class BatchTransferSessionTest {
         IOException thrown =
                 assertThrows(
                         IOException.class,
-                        () ->
-                                BatchTransferSession.decodeAndWriteBatch(
-                                        extractDir, batch, 0, null));
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
         assertTrue(thrown.getMessage() != null, "Write failure should carry the OS error message");
     }
 }

@@ -363,7 +363,8 @@ class FileSyncManagerTest {
     }
 
     @Test
-    void incomingFileContentRequest_largeFile_xmodemSend_postsSyncControlRefresh() throws Exception {
+    void incomingFileContentRequest_largeFile_xmodemSend_postsSyncControlRefresh()
+            throws Exception {
         File folder = tempDir.resolve("large-content-refresh").toFile();
         folder.mkdirs();
         // Just above XMODEM_CONTENT_THRESHOLD (64 KB) so the responder picks the XMODEM path.
@@ -396,9 +397,7 @@ class FileSyncManagerTest {
             waitUntil(
                     () ->
                             events.stream()
-                                    .anyMatch(
-                                            e ->
-                                                    e instanceof SyncEvent.SyncControlRefreshEvent),
+                                    .anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                     Duration.ofSeconds(10));
 
             assertTrue(
@@ -464,9 +463,7 @@ class FileSyncManagerTest {
                     Arrays.equals(result, expected),
                     "Bytes received via XMODEM should match the scripted payload");
             assertTrue(
-                    events.stream()
-                            .anyMatch(
-                                    e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                     "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
                             + " completes");
         } finally {
@@ -507,7 +504,10 @@ class FileSyncManagerTest {
 
             // Batch 1: "a.txt" is locked (a directory blocks the write), "b.txt" is writable.
             new File(syncFolder, "a.txt").mkdirs();
-            byte[] batch1 = buildBatch(new String[] {"a.txt", "b.txt"}, new String[] {"A content", "B content"});
+            byte[] batch1 =
+                    buildBatch(
+                            new String[] {"a.txt", "b.txt"},
+                            new String[] {"A content", "B content"});
             serial.feedLine("[[SYNC:BATCH_DATA:" + batch1.length + "]]");
             serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(batch1));
 
@@ -542,15 +542,14 @@ class FileSyncManagerTest {
             assertTrue(
                     new File(syncFolder, "b.txt").isFile(),
                     "Other files in the same batch must still be written");
-            assertEquals(
-                    "B content", Files.readString(new File(syncFolder, "b.txt").toPath()));
+            assertEquals("B content", Files.readString(new File(syncFolder, "b.txt").toPath()));
 
-            // A subsequent batch must still be received and written normally (transfer not stalled).
+            // A subsequent batch must still be received and written normally (transfer not
+            // stalled).
             byte[] batch2 = buildBatch(new String[] {"c.txt"}, new String[] {"C content"});
             serial.feedLine("[[SYNC:BATCH_DATA:" + batch2.length + "]]");
             serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(batch2));
-            waitUntil(
-                    () -> new File(syncFolder, "c.txt").isFile(), Duration.ofSeconds(10));
+            waitUntil(() -> new File(syncFolder, "c.txt").isFile(), Duration.ofSeconds(10));
             assertEquals("C content", Files.readString(new File(syncFolder, "c.txt").toPath()));
 
             // User releases the lock (closes the program) and clicks Retry -> the file is written.
@@ -609,11 +608,19 @@ class FileSyncManagerTest {
             // the XMODEM send handshake. The ACK is fed (read by the handler), not written.
             serial.feedLine("[[SYNC:DELTA_SIG_REQ:doc.txt]]");
             waitUntil(
-                    () -> serial.getWrittenLines().stream().anyMatch(l -> l.contains("DELTA_SIG_DATA")),
+                    () ->
+                            serial.getWrittenLines().stream()
+                                    .anyMatch(l -> l.contains("DELTA_SIG_DATA")),
                     Duration.ofSeconds(5));
             serial.feedLine("[[SYNC:ACK]]");
-            serial.feedBytes(new byte[] {XModemTransfer.C, XModemTransfer.ACK,
-                    XModemTransfer.ACK, XModemTransfer.ACK, XModemTransfer.ACK});
+            serial.feedBytes(
+                    new byte[] {
+                        XModemTransfer.C,
+                        XModemTransfer.ACK,
+                        XModemTransfer.ACK,
+                        XModemTransfer.ACK,
+                        XModemTransfer.ACK
+                    });
             assertTrue(
                     serial.getWrittenLines().stream().anyMatch(l -> l.contains("DELTA_SIG_DATA")),
                     "DELTA_SIG_REQ must be routed to the signature handler");
@@ -633,7 +640,9 @@ class FileSyncManagerTest {
         // All-literal delta (no matchable blocks): header + LITERAL("world").
         byte[] delta =
                 com.filesync.delta.DeltaEncoder.encode(
-                        source, new com.filesync.delta.FileSignatures("doc.txt", 64, 0, source.length, List.of()));
+                        source,
+                        new com.filesync.delta.FileSignatures(
+                                "doc.txt", 64, 0, source.length, List.of()));
         String sourceMd5 = com.filesync.delta.HashUtil.md5Hex(source);
 
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
@@ -644,7 +653,8 @@ class FileSyncManagerTest {
             serial.feedLine("[[SYNC:HEARTBEAT]]");
             waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
 
-            // sendFileDelta sends the path raw (escaped, not base64), so the frame uses the raw path.
+            // sendFileDelta sends the path raw (escaped, not base64), so the frame uses the raw
+            // path.
             serial.feedLine(
                     "[[SYNC:FILE_DELTA:doc.txt:" + delta.length + ":false:0:5:" + sourceMd5 + "]]");
             // The receiver ACKs the announcement, then receives the delta via XMODEM.

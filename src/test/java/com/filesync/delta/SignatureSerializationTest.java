@@ -16,8 +16,7 @@ class SignatureSerializationTest {
     void fileSignaturesRoundTrip() throws IOException {
         BlockSignature a = new BlockSignature(0, 0x1234, md5(1));
         BlockSignature b = new BlockSignature(1, 0x5678, md5(2));
-        FileSignatures fs =
-                new FileSignatures("dir/file.bin", 1024, 2, 2048L, List.of(a, b));
+        FileSignatures fs = new FileSignatures("dir/file.bin", 1024, 2, 2048L, List.of(a, b));
 
         byte[] bytes = fs.toBytes();
         FileSignatures back = FileSignatures.fromBytes(bytes);
@@ -33,11 +32,19 @@ class SignatureSerializationTest {
 
     @Test
     void signatureSetRoundTrip() throws IOException {
-        FileSignatures fs1 = new FileSignatures("a.bin", 2048, 1, 2048L, List.of(new BlockSignature(0, 11, md5(7))));
-        FileSignatures fs2 = new FileSignatures("b.bin", 2048, 3, 6144L, List.of(
-                new BlockSignature(0, 21, md5(8)),
-                new BlockSignature(1, 22, md5(9)),
-                new BlockSignature(2, 23, md5(10))));
+        FileSignatures fs1 =
+                new FileSignatures(
+                        "a.bin", 2048, 1, 2048L, List.of(new BlockSignature(0, 11, md5(7))));
+        FileSignatures fs2 =
+                new FileSignatures(
+                        "b.bin",
+                        2048,
+                        3,
+                        6144L,
+                        List.of(
+                                new BlockSignature(0, 21, md5(8)),
+                                new BlockSignature(1, 22, md5(9)),
+                                new BlockSignature(2, 23, md5(10))));
         SignatureSet set = new SignatureSet(List.of(fs1, fs2));
 
         byte[] bytes = set.toBytes();
