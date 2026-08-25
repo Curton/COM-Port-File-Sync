@@ -29,6 +29,15 @@ public class SyncProtocol {
     // When true, the listener thread should not read from serial port
     private final AtomicBoolean xmodemInProgress = new AtomicBoolean(false);
 
+    // Flag to indicate a synchronous command wait (waitForCommand /
+    // waitForFileContentResponse) is actively reading from the serial stream.
+    // When true, the listener loop must pause to avoid stealing the response
+    // that the synchronous caller is waiting for. Unlike syncing /
+    // senderBlockingProtocolExchange, this is only set during the actual
+    // serial read — not during local CPU/disk work such as manifest generation
+    // — so the listener loop can keep ACKing the peer's heartbeats.
+    private final AtomicBoolean awaitingCommand = new AtomicBoolean(false);
+
     // Async messages (e.g. SHARED_TEXT, DIRECTION_CHANGE) that arrived while a synchronous
     // exchange (waitForCommand / waitForFileContentResponse) was reading the stream. They are
     // stashed here instead of being silently dropped, and drained by the listener loop.
@@ -1167,37 +1176,42 @@ public class SyncProtocol {
      * @return Base64-encoded file content, or null if timeout/error
      */
     public String waitForFileContentResponse(long timeoutMs) throws IOException {
-        long startTime = System.currentTimeMillis();
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
-            Message msg = receiveCommand();
-            if (msg == null) {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
+        awaitingCommand.set(true);
+        try {
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                Message msg = receiveCommand();
+                if (msg == null) {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                    }
+                    continue;
                 }
-                continue;
+                String cmd = msg.getCommand();
+                if (CMD_FILE_CONTENT_DATA.equals(cmd)) {
+                    return msg.getParam(1);
+                }
+                if (CMD_CANCEL.equals(cmd)) {
+                    return null; // User cancelled, return null gracefully
+                }
+                if (CMD_ERROR.equals(cmd)) {
+                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException("Remote error during file content request: " + errMsg);
+                }
+                if (CMD_HEARTBEAT.equals(cmd)) {
+                    sendHeartbeatAck();
+                    runMessageActivityCallback();
+                } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
+                    runMessageActivityCallback();
+                } else {
+                    stashAsyncMessage(msg);
+                }
             }
-            String cmd = msg.getCommand();
-            if (CMD_FILE_CONTENT_DATA.equals(cmd)) {
-                return msg.getParam(1);
-            }
-            if (CMD_CANCEL.equals(cmd)) {
-                return null; // User cancelled, return null gracefully
-            }
-            if (CMD_ERROR.equals(cmd)) {
-                String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                throw new IOException("Remote error during file content request: " + errMsg);
-            }
-            if (CMD_HEARTBEAT.equals(cmd)) {
-                sendHeartbeatAck();
-                runMessageActivityCallback();
-            } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
-                runMessageActivityCallback();
-            } else {
-                stashAsyncMessage(msg);
-            }
+            return null;
+        } finally {
+            awaitingCommand.set(false);
         }
-        return null;
     }
 
     /**
@@ -1504,30 +1518,35 @@ public class SyncProtocol {
      * long waits. Throws IOException when CMD_ERROR is received.
      */
     public Message waitForCommand(String expectedCommand) throws IOException {
-        long startTime = System.currentTimeMillis();
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
-            Message msg = receiveCommand();
-            if (msg == null) {
-                continue;
+        awaitingCommand.set(true);
+        try {
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                Message msg = receiveCommand();
+                if (msg == null) {
+                    continue;
+                }
+                String cmd = msg.getCommand();
+                if (cmd.equals(expectedCommand)) {
+                    return msg;
+                }
+                if (CMD_ERROR.equals(cmd)) {
+                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException("Remote error: " + errMsg);
+                }
+                if (CMD_HEARTBEAT.equals(cmd)) {
+                    sendHeartbeatAck();
+                    runMessageActivityCallback();
+                } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
+                    runMessageActivityCallback();
+                } else {
+                    stashAsyncMessage(msg);
+                }
             }
-            String cmd = msg.getCommand();
-            if (cmd.equals(expectedCommand)) {
-                return msg;
-            }
-            if (CMD_ERROR.equals(cmd)) {
-                String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                throw new IOException("Remote error: " + errMsg);
-            }
-            if (CMD_HEARTBEAT.equals(cmd)) {
-                sendHeartbeatAck();
-                runMessageActivityCallback();
-            } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
-                runMessageActivityCallback();
-            } else {
-                stashAsyncMessage(msg);
-            }
+            throw new IOException("Timeout waiting for command: " + expectedCommand);
+        } finally {
+            awaitingCommand.set(false);
         }
-        throw new IOException("Timeout waiting for command: " + expectedCommand);
     }
 
     /**
@@ -1581,6 +1600,15 @@ public class SyncProtocol {
      */
     public boolean isXmodemInProgress() {
         return xmodemInProgress.get();
+    }
+
+    /**
+     * Check if a synchronous command wait (waitForCommand / waitForFileContentResponse) is actively
+     * reading from the serial stream. When true, the listener loop should pause to avoid stealing
+     * the response.
+     */
+    public boolean isAwaitingCommand() {
+        return awaitingCommand.get();
     }
 
     /**

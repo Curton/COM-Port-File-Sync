@@ -44,3 +44,6 @@ Thumbs.db
 *.ear
 *.log
 
+# Generated logs
+combined_log_*.txt
+

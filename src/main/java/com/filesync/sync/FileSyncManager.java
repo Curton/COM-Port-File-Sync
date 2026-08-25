@@ -813,9 +813,13 @@ public class FileSyncManager {
                 // "no response from sender after 10 handshake attempts".
                 //
                 // To avoid concurrent consumption of the command stream, pause this listener
-                // while we are actively sending a sync or doing a blocking protocol exchange (e.g.
-                // folder context).
-                if ((syncCoordinator.isSyncing() || senderBlockingProtocolExchange.get())
+                // only while a synchronous serial read is actually in progress — i.e.
+                // waitForCommand or an XMODEM transfer. This deliberately does NOT include
+                // syncing or senderBlockingProtocolExchange, which cover local CPU/disk work
+                // (e.g. manifest generation) that does not read the serial port. Keeping the
+                // listener loop running during that phase lets it ACK the peer's heartbeats so
+                // the idle receiver does not falsely declare "Connection lost".
+                if ((protocol.isAwaitingCommand() || protocol.isXmodemInProgress())
                         && roleNegotiationService.isSender()) {
                     Thread.sleep(50);
                     continue;

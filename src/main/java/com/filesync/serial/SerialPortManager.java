@@ -176,10 +176,12 @@ public class SerialPortManager {
         InputStream in = requireInputStream();
         byte[] buffer = new byte[length];
         int bytesRead = 0;
-        long startTime = System.currentTimeMillis();
+        // Sliding/inactivity deadline: reset each time data arrives so a slow-but-progressing
+        // transfer does not fail. Only a complete silence exceeding timeoutMs aborts the read.
+        long deadline = System.currentTimeMillis() + timeoutMs;
 
         while (bytesRead < length) {
-            if (System.currentTimeMillis() - startTime > timeoutMs) {
+            if (System.currentTimeMillis() > deadline) {
                 throw new IOException(
                         "Read timeout: expected " + length + " bytes, got " + bytesRead);
             }
@@ -191,6 +193,9 @@ public class SerialPortManager {
                     int read = in.read(buffer, bytesRead, toRead);
                     if (read > 0) {
                         bytesRead += read;
+                        // Data is flowing — extend the deadline. This prevents a false timeout
+                        // when bytes trickle in slowly (USB/UART flow control, sender stalls).
+                        deadline = System.currentTimeMillis() + timeoutMs;
                     }
                 } catch (IOException e) {
                     // The underlying serial port read may throw IOException on native timeout.
@@ -198,7 +203,7 @@ public class SerialPortManager {
                     if (!isOpen()) {
                         throw new IOException("Serial port closed during read", e);
                     }
-                    if (System.currentTimeMillis() - startTime > timeoutMs) {
+                    if (System.currentTimeMillis() > deadline) {
                         throw new IOException(
                                 "Read timeout: expected " + length + " bytes, got " + bytesRead);
                     }
