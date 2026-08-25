@@ -29,9 +29,9 @@ public class SyncProtocol {
     // When true, the listener thread should not read from serial port
     private final AtomicBoolean xmodemInProgress = new AtomicBoolean(false);
 
-    // Flag to indicate a synchronous command wait (waitForCommand /
-    // waitForFileContentResponse) is actively reading from the serial stream.
-    // When true, the listener loop must pause to avoid stealing the response
+    // Flag to indicate a synchronous command wait (waitForCommand, or a caller using
+    // setAwaitingCommand around its own receiveCommand loop) is actively reading from the
+    // serial stream. When true, the listener loop must pause to avoid stealing the response
     // that the synchronous caller is waiting for. Unlike syncing /
     // senderBlockingProtocolExchange, this is only set during the actual
     // serial read — not during local CPU/disk work such as manifest generation
@@ -39,7 +39,7 @@ public class SyncProtocol {
     private final AtomicBoolean awaitingCommand = new AtomicBoolean(false);
 
     // Async messages (e.g. SHARED_TEXT, DIRECTION_CHANGE) that arrived while a synchronous
-    // exchange (waitForCommand / waitForFileContentResponse) was reading the stream. They are
+    // command wait was reading the stream. They are
     // stashed here instead of being silently dropped, and drained by the listener loop.
     private final Queue<Message> stashedMessages = new ConcurrentLinkedQueue<>();
 
@@ -1169,52 +1169,6 @@ public class SyncProtocol {
     }
 
     /**
-     * Wait for file content response and return Base64-encoded content. Call after sending
-     * CMD_FILE_CONTENT_REQ.
-     *
-     * @param timeoutMs maximum time to wait in milliseconds
-     * @return Base64-encoded file content, or null if timeout/error
-     */
-    public String waitForFileContentResponse(long timeoutMs) throws IOException {
-        awaitingCommand.set(true);
-        try {
-            long startTime = System.currentTimeMillis();
-            while (System.currentTimeMillis() - startTime < timeoutMs) {
-                Message msg = receiveCommand();
-                if (msg == null) {
-                    try {
-                        Thread.sleep(10);
-                    } catch (InterruptedException e) {
-                    }
-                    continue;
-                }
-                String cmd = msg.getCommand();
-                if (CMD_FILE_CONTENT_DATA.equals(cmd)) {
-                    return msg.getParam(1);
-                }
-                if (CMD_CANCEL.equals(cmd)) {
-                    return null; // User cancelled, return null gracefully
-                }
-                if (CMD_ERROR.equals(cmd)) {
-                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                    throw new IOException("Remote error during file content request: " + errMsg);
-                }
-                if (CMD_HEARTBEAT.equals(cmd)) {
-                    sendHeartbeatAck();
-                    runMessageActivityCallback();
-                } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
-                    runMessageActivityCallback();
-                } else {
-                    stashAsyncMessage(msg);
-                }
-            }
-            return null;
-        } finally {
-            awaitingCommand.set(false);
-        }
-    }
-
-    /**
      * Send file content via XMODEM for conflict resolution (large files). Sends a
      * CMD_FILE_CONTENT_XFER with the file size, waits for ACK, then transfers via XMODEM.
      *
@@ -1603,12 +1557,21 @@ public class SyncProtocol {
     }
 
     /**
-     * Check if a synchronous command wait (waitForCommand / waitForFileContentResponse) is actively
-     * reading from the serial stream. When true, the listener loop should pause to avoid stealing
-     * the response.
+     * Check if a synchronous command wait (waitForCommand, or a caller using setAwaitingCommand) is
+     * actively reading from the serial stream. When true, the listener loop should pause to avoid
+     * stealing the response.
      */
     public boolean isAwaitingCommand() {
         return awaitingCommand.get();
+    }
+
+    /**
+     * Set the awaiting-command flag. Used by callers that perform synchronous serial reads via bare
+     * {@link #receiveCommand()} loops (rather than {@link #waitForCommand}) so the listener loop
+     * pauses for the duration of their exchange.
+     */
+    public void setAwaitingCommand(boolean value) {
+        awaitingCommand.set(value);
     }
 
     /**

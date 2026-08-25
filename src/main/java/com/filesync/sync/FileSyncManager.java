@@ -588,6 +588,7 @@ public class FileSyncManager {
         final long TIMEOUT_MS =
                 10000; // 10 seconds - may need adjustment for slow serial connections
         senderBlockingProtocolExchange.set(true);
+        protocol.setAwaitingCommand(true);
 
         try {
             protocol.sendCommand(
@@ -644,6 +645,7 @@ public class FileSyncManager {
                             "Failed to fetch remote file content: " + e.getMessage()));
         } finally {
             senderBlockingProtocolExchange.set(false);
+            protocol.setAwaitingCommand(false);
         }
         return null;
     }
@@ -668,6 +670,7 @@ public class FileSyncManager {
         }
 
         senderBlockingProtocolExchange.set(true);
+        protocol.setAwaitingCommand(true);
         try {
             // Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the
             // combined-log save can align the two machines' clocks. Best-effort: a peer that does
@@ -752,6 +755,7 @@ public class FileSyncManager {
                     new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
         } finally {
             senderBlockingProtocolExchange.set(false);
+            protocol.setAwaitingCommand(false);
         }
         return null;
     }
@@ -813,12 +817,16 @@ public class FileSyncManager {
                 // "no response from sender after 10 handshake attempts".
                 //
                 // To avoid concurrent consumption of the command stream, pause this listener
-                // only while a synchronous serial read is actually in progress — i.e.
-                // waitForCommand or an XMODEM transfer. This deliberately does NOT include
-                // syncing or senderBlockingProtocolExchange, which cover local CPU/disk work
-                // (e.g. manifest generation) that does not read the serial port. Keeping the
-                // listener loop running during that phase lets it ACK the peer's heartbeats so
-                // the idle receiver does not falsely declare "Connection lost".
+                // only while a synchronous serial read is actually in progress. The
+                // awaitingCommand flag is set by waitForCommand and by the bare-receiveCommand
+                // fetch methods (fetchRemoteFileContent / fetchRemoteLogText);
+                // isXmodemInProgress covers XMODEM transfers.
+                //
+                // This deliberately does NOT pause on syncing or senderBlockingProtocolExchange
+                // alone. Those flags span phases that include local CPU/disk work (e.g. manifest
+                // generation) with no serial reads. Keeping the listener loop running during that
+                // work lets it ACK the peer's heartbeats so the idle receiver does not falsely
+                // declare "Connection lost".
                 if ((protocol.isAwaitingCommand() || protocol.isXmodemInProgress())
                         && roleNegotiationService.isSender()) {
                     Thread.sleep(50);
