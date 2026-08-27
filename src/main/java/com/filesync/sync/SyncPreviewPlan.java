@@ -18,6 +18,7 @@ public final class SyncPreviewPlan {
     private final int totalOperations;
     private final List<ConflictInfo> conflicts;
     private final Set<String> deltaCandidatePaths;
+    private final Set<String> existingRemotePaths;
 
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,
@@ -64,6 +65,28 @@ public final class SyncPreviewPlan {
             boolean strictSyncMode,
             List<ConflictInfo> conflicts,
             Set<String> deltaCandidatePaths) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                deltaCandidatePaths,
+                Collections.emptySet());
+    }
+
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths,
+            Set<String> existingRemotePaths) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -79,6 +102,10 @@ public final class SyncPreviewPlan {
         this.deltaCandidatePaths =
                 deltaCandidatePaths != null
                         ? Collections.unmodifiableSet(new HashSet<>(deltaCandidatePaths))
+                        : Collections.emptySet();
+        this.existingRemotePaths =
+                existingRemotePaths != null
+                        ? Collections.unmodifiableSet(new HashSet<>(existingRemotePaths))
                         : Collections.emptySet();
     }
 
@@ -115,7 +142,8 @@ public final class SyncPreviewPlan {
                 filteredTotalBytesToTransfer,
                 strictSyncMode,
                 conflicts,
-                filteredDeltaCandidates);
+                filteredDeltaCandidates,
+                existingRemotePaths);
     }
 
     /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
@@ -224,6 +252,11 @@ public final class SyncPreviewPlan {
      */
     public Set<String> getDeltaCandidatePaths() {
         return deltaCandidatePaths;
+    }
+
+    /** Paths that already exist on the remote side; used to tell NEW files from MODIFIED files. */
+    public Set<String> getExistingRemotePaths() {
+        return existingRemotePaths;
     }
 
     public boolean hasConflict(String path) {

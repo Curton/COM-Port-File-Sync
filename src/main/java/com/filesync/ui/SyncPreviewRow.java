@@ -56,6 +56,8 @@ final class SyncPreviewRow {
                 yield "CONFLICT";
             }
             case TRANSFER_FILE -> "Transfer File";
+            case NEW -> "New";
+            case MODIFIED -> "Modified";
             case CREATE_DIR -> "Create Dir";
             case DELETE_FILE -> "Delete File";
             case DELETE_DIR -> "Delete Dir";

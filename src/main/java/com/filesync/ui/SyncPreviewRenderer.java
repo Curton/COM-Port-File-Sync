@@ -5,6 +5,7 @@ import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.GitStatusUtil;
 import com.filesync.sync.SyncPreviewPlan;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -97,7 +98,7 @@ public class SyncPreviewRenderer {
             List<SyncPreviewRow> rows,
             File syncFolder,
             JLabel selectionSummary) {
-        JTable previewTable = createPreviewTable(previewModel);
+        JTable previewTable = createPreviewTable(previewModel, rows);
         updateSyncPreviewSummary(selectionSummary, previewModel, rows);
         previewModel.addTableModelListener(
                 event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
@@ -112,7 +113,7 @@ public class SyncPreviewRenderer {
         return previewPanel;
     }
 
-    private JTable createPreviewTable(DefaultTableModel previewModel) {
+    private JTable createPreviewTable(DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
         JTable previewTable = new JTable(previewModel);
         previewTable.setFillsViewportHeight(true);
         previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
@@ -120,6 +121,7 @@ public class SyncPreviewRenderer {
         previewTable.getColumnModel().getColumn(1).setPreferredWidth(80);
         previewTable.getColumnModel().getColumn(2).setPreferredWidth(50);
         previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
+        previewTable.getColumnModel().getColumn(1).setCellRenderer(createTypeCellRenderer(rows));
         previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         previewTable.addMouseListener(
@@ -289,6 +291,41 @@ public class SyncPreviewRenderer {
         }
     }
 
+    private TableCellRenderer createTypeCellRenderer(List<SyncPreviewRow> rows) {
+        return new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(
+                    JTable table,
+                    Object value,
+                    boolean isSelected,
+                    boolean hasFocus,
+                    int row,
+                    int column) {
+                super.getTableCellRendererComponent(
+                        table, value, isSelected, hasFocus, row, column);
+                int modelRow = table.convertRowIndexToModel(row);
+                SyncPreviewRow previewRow =
+                        modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+                if (previewRow != null && !isSelected) {
+                    Color color = typeColor(previewRow.getOperationType());
+                    if (color != null) {
+                        setForeground(color);
+                    }
+                }
+                return this;
+            }
+
+            private Color typeColor(SyncPreviewOperationType type) {
+                return switch (type) {
+                    case CONFLICT -> new Color(200, 0, 0);
+                    case NEW -> new Color(0, 128, 0);
+                    case MODIFIED -> new Color(0, 0, 180);
+                    default -> null;
+                };
+            }
+        };
+    }
+
     private TableCellRenderer createPathTailRenderer() {
         return new DefaultTableCellRenderer() {
             @Override
@@ -332,7 +369,9 @@ public class SyncPreviewRenderer {
             SyncPreviewOperationType type =
                     conflict != null
                             ? SyncPreviewOperationType.CONFLICT
-                            : SyncPreviewOperationType.TRANSFER_FILE;
+                            : (syncPreview.getExistingRemotePaths().contains(fileInfo.getPath())
+                                    ? SyncPreviewOperationType.MODIFIED
+                                    : SyncPreviewOperationType.NEW);
             rows.add(
                     new SyncPreviewRow(
                             type,
@@ -402,7 +441,8 @@ public class SyncPreviewRenderer {
                 continue;
             }
             switch (row.getOperationType()) {
-                case CONFLICT, TRANSFER_FILE -> selectedTransferFiles.add(row.getPath());
+                case CONFLICT, TRANSFER_FILE, NEW, MODIFIED ->
+                        selectedTransferFiles.add(row.getPath());
                 case CREATE_DIR -> selectedCreateDirs.add(row.getPath());
                 case DELETE_FILE -> selectedDeleteFiles.add(row.getPath());
                 case DELETE_DIR -> selectedDeleteDirs.add(row.getPath());

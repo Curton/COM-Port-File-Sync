@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -244,7 +245,8 @@ public class SyncCoordinator {
                 totalBytesToTransfer,
                 strictMode,
                 conflicts,
-                deltaCandidatePaths);
+                deltaCandidatePaths,
+                new HashSet<>(remoteManifest.getFiles().keySet()));
     }
 
     /**
