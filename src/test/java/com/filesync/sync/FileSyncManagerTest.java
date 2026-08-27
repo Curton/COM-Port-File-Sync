@@ -31,10 +31,9 @@ import org.junit.jupiter.api.io.TempDir;
  * protocol frames into the listen loop and captures outbound writes. They cover:
  *
  * <ul>
- *   <li>The remote-initiated disconnect policy (a DISCONNECT message must tear down without
- *       scheduling an automatic reconnect) — regression guard for the remote-disconnect fix.
- *   <li>The contrasting behavior that an ordinary communication loss (read failure) DOES schedule a
- *       reconnect.
+ *   <li>The disconnect-on-loss policy: any unexpected link loss (remote DISCONNECT message,
+ *       unplugged COM adapter, read failure) must tear down immediately without scheduling an
+ *       automatic reconnect, so the UI returns straight to the initial disconnected state.
  *   <li>Manual disconnect sends a notification and tears down without reconnecting.
  *   <li>Incoming {@code CMD_FILE_CONTENT_REQ} for a small file is answered with base64 content.
  *   <li>Incoming {@code CMD_FILE_CONTENT_REQ} for a large file (&gt; 64 KB) is answered with a
@@ -87,9 +86,6 @@ class FileSyncManagerTest {
                     "A disconnected ConnectionEvent should be posted");
             assertFalse(fsm.isRunning(), "Listen loop should be stopped after remote disconnect");
             assertFalse(
-                    fsm.isReconnectInProgress(),
-                    "Remote-initiated disconnect must NOT schedule an auto-reconnect");
-            assertFalse(
                     events.stream()
                             .anyMatch(
                                     e ->
@@ -104,7 +100,7 @@ class FileSyncManagerTest {
     }
 
     @Test
-    void communicationLoss_schedulesAutoReconnect() throws Exception {
+    void communicationLoss_tearsDownImmediatelyWithoutReconnect() throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         List<SyncEvent> events = new CopyOnWriteArrayList<>();
@@ -115,26 +111,30 @@ class FileSyncManagerTest {
             serial.feedLine("[[SYNC:HEARTBEAT]]");
             waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
 
-            // Simulate a read failure (not a graceful disconnect): the listen loop catches the
-            // IOException and reports a communication failure, which must schedule a reconnect.
+            // Simulate an unplugged COM adapter: the listen loop catches the IOException and
+            // reports a communication failure, which must tear down immediately with no
+            // reconnect attempt so the UI can return to the initial disconnected state.
             serial.causeReadLineFailure();
 
-            waitUntil(
-                    () ->
-                            events.stream()
-                                    .anyMatch(
-                                            e ->
-                                                    e instanceof SyncEvent.LogEvent le
-                                                            && le.getMessage()
-                                                                    .contains(
-                                                                            "Will try to reconnect")),
-                    Duration.ofSeconds(10));
+            waitUntil(() -> !fsm.isRunning(), Duration.ofSeconds(10));
 
             assertTrue(
-                    fsm.isReconnectInProgress(),
-                    "An ordinary communication loss should schedule an auto-reconnect");
+                    events.stream()
+                            .anyMatch(
+                                    e ->
+                                            e instanceof SyncEvent.ConnectionEvent ce
+                                                    && !ce.isConnected()),
+                    "A disconnected ConnectionEvent should be posted");
+            assertFalse(
+                    events.stream()
+                            .anyMatch(
+                                    e ->
+                                            e instanceof SyncEvent.LogEvent le
+                                                    && le.getMessage()
+                                                            .toLowerCase()
+                                                            .contains("reconnect")),
+                    "No reconnect log should be emitted when the link is lost");
         } finally {
-            // Cancel the pending reconnect task so it cannot fire after the test.
             stopQuietly(fsm);
         }
     }
@@ -152,8 +152,6 @@ class FileSyncManagerTest {
             fsm.disconnect(true); // notifyRemote = true
 
             assertFalse(fsm.isRunning(), "Listen loop should be stopped after manual disconnect");
-            assertFalse(
-                    fsm.isReconnectInProgress(), "Manual disconnect must not schedule a reconnect");
             assertTrue(
                     serial.getWrittenLines().stream()
                             .anyMatch(line -> line.equals("[[SYNC:DISCONNECT]]")),

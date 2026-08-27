@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Base64;
 import java.util.List;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -28,8 +27,6 @@ public class FileSyncManager {
 
     private static final long INITIAL_CONNECT_TIMEOUT_MS =
             60000; // 60 seconds timeout for initial connection
-    private static final long RECONNECT_DELAY_MS = 5000L;
-    private static final long RECONNECT_TIMEOUT_MS = 60000L;
 
     /** Files above this size use XMODEM instead of inline Base64 for content requests. */
     private static final long XMODEM_CONTENT_THRESHOLD = 64 * 1024;
@@ -50,9 +47,7 @@ public class FileSyncManager {
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
     private final AtomicBoolean wasManuallyDisconnected = new AtomicBoolean(false);
-    private final AtomicBoolean remoteInitiatedDisconnect = new AtomicBoolean(false);
     private final AtomicBoolean syncCancelInProgress = new AtomicBoolean(false);
-    private final AtomicBoolean reconnectAttempted = new AtomicBoolean(false);
 
     private final AtomicLong threadIdGenerator =
             new AtomicLong(0); // names FileSync-N threads in executor
@@ -78,7 +73,6 @@ public class FileSyncManager {
     private ScheduledExecutorService executor;
     private Future<?> listenerFuture;
     private volatile String lastPortName;
-    private volatile ScheduledExecutorService reconnectExecutor;
 
     public FileSyncManager(SerialPortManager serialPort, SettingsManager settings) {
         this.serialPort = serialPort;
@@ -266,11 +260,6 @@ public class FileSyncManager {
         return wasManuallyDisconnected.get();
     }
 
-    public boolean isReconnectInProgress() {
-        ScheduledExecutorService recExec = reconnectExecutor;
-        return recExec != null && !recExec.isShutdown();
-    }
-
     public boolean confirmCurrentRoleIfNeeded(boolean isSender) {
         return roleNegotiationService.confirmCurrentRoleIfNeeded(isSender);
     }
@@ -291,8 +280,6 @@ public class FileSyncManager {
 
         if (isFreshConnect) {
             wasManuallyDisconnected.set(false);
-            remoteInitiatedDisconnect.set(false);
-            reconnectAttempted.set(false);
         }
         this.lastPortName = portName;
         running.set(true);
@@ -367,7 +354,6 @@ public class FileSyncManager {
      */
     public void disconnect(boolean notifyRemote) {
         wasManuallyDisconnected.set(true);
-        cancelPendingReconnect();
         if (notifyRemote && running.get() && serialPort.isOpen()) {
             try {
                 protocol.sendDisconnect();
@@ -979,12 +965,10 @@ public class FileSyncManager {
             }
             case SyncProtocol.CMD_HEARTBEAT -> connectionService.handleHeartbeat();
             case SyncProtocol.CMD_HEARTBEAT_ACK -> connectionService.handleHeartbeatAck();
-            case SyncProtocol.CMD_DISCONNECT -> {
-                // The remote side intentionally closed the connection. Mark it so that
-                // onConnectionLost tears down without attempting an automatic reconnect.
-                remoteInitiatedDisconnect.set(true);
-                connectionService.reportCommunicationFailure("Connection closed by remote");
-            }
+            case SyncProtocol.CMD_DISCONNECT ->
+                    // The remote side intentionally closed the connection; report the failure so
+                    // markLost fires and onConnectionLost tears the link down.
+                    connectionService.reportCommunicationFailure("Connection closed by remote");
             case SyncProtocol.CMD_ROLE_NEGOTIATE -> {
                 long remotePriority = msg.getParamAsLong(0);
                 long remoteTieBreaker = msg.getParamAsLong(1);
@@ -1043,7 +1027,6 @@ public class FileSyncManager {
     }
 
     private void onConnectionRestored() {
-        reconnectAttempted.set(false);
         roleNegotiationService.sendRoleNegotiation();
     }
 
@@ -1051,81 +1034,12 @@ public class FileSyncManager {
         if (syncCancelInProgress.get()) {
             return;
         }
-        if (wasManuallyDisconnected.get() || remoteInitiatedDisconnect.get()) {
-            // Either the local user disconnected, or the remote side actively closed the
-            // connection. In both cases we tear down cleanly without auto-reconnecting.
-            resetSyncStateForLinkTransition(false);
-            stopListening();
-            return;
-        }
-        if (reconnectAttempted.getAndSet(true)) {
-            resetSyncStateForLinkTransition(false);
-            stopListening();
-            return;
-        }
-
+        // Whether the link was lost to an unplugged COM adapter, a cable fault, or a remote
+        // failure, we tear down immediately: no auto-reconnect is attempted, and the UI returns
+        // to the initial disconnected state (the ConnectionEvent(false) posted by markLost
+        // drives that transition).
         resetSyncStateForLinkTransition(false);
         stopListening();
-
-        String portName = this.lastPortName;
-        if (portName == null) {
-            return;
-        }
-
-        eventBus.post(new SyncEvent.LogEvent("Connection lost. Will try to reconnect in 5s..."));
-
-        ScheduledExecutorService recExec =
-                Executors.newSingleThreadScheduledExecutor(
-                        r -> {
-                            Thread t = new Thread(r);
-                            t.setName("FileSync-Reconnect");
-                            t.setDaemon(true);
-                            return t;
-                        });
-        this.reconnectExecutor = recExec;
-
-        recExec.schedule(
-                () -> {
-                    try {
-                        if (wasManuallyDisconnected.get()) {
-                            return;
-                        }
-
-                        eventBus.post(
-                                new SyncEvent.LogEvent(
-                                        "Attempting to reconnect on " + portName + "..."));
-
-                        serialPort.close();
-                        if (!serialPort.open(portName)) {
-                            eventBus.post(
-                                    new SyncEvent.LogEvent(
-                                            "Reconnect failed: could not open " + portName));
-                            eventBus.post(new SyncEvent.ConnectionEvent(false));
-                            return;
-                        }
-
-                        if (wasManuallyDisconnected.get()) {
-                            serialPort.close();
-                            return;
-                        }
-
-                        startListeningInternal(portName, false);
-
-                        boolean connected =
-                                connectionService.waitForConnection(RECONNECT_TIMEOUT_MS);
-                        if (!connected) {
-                            eventBus.post(
-                                    new SyncEvent.LogEvent(
-                                            "Reconnect failed: no response from remote"));
-                            stopListening();
-                            eventBus.post(new SyncEvent.ConnectionEvent(false));
-                        }
-                    } finally {
-                        recExec.shutdownNow();
-                    }
-                },
-                RECONNECT_DELAY_MS,
-                TimeUnit.MILLISECONDS);
     }
 
     private void resetSyncStateForLinkTransition(boolean clearBufferedText) {
@@ -1135,13 +1049,6 @@ public class FileSyncManager {
         roleNegotiationService.resetForReconnect();
         if (clearBufferedText) {
             sharedTextService.clearPendingSharedText();
-        }
-    }
-
-    private void cancelPendingReconnect() {
-        if (reconnectExecutor != null) {
-            reconnectExecutor.shutdownNow();
-            reconnectExecutor = null;
         }
     }
 

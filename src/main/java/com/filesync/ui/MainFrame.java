@@ -108,6 +108,9 @@ public class MainFrame extends JFrame {
 
         syncController.initActionHandlers();
         connectionController.initEventHandlers(this::updateSettingsLabel);
+        // Returning to the initial disconnected state rescans ports so a just-unplugged
+        // adapter disappears from the combo box.
+        syncController.setOnDisconnectedCallback(connectionController::refreshPorts);
         folderController.initEventHandlers();
         sharedTextController.initEventHandlers();
         combinedLogController.initEventHandlers();

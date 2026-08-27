@@ -25,6 +25,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private SyncPreviewRenderer previewRenderer;
     private javax.swing.JDialog pendingWriteDialog;
     private javax.swing.JList<String> pendingWriteList;
+    private Runnable onDisconnectedCallback;
 
     public SyncController(
             JFrame owner,
@@ -43,6 +44,11 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     public void setPreviewRenderer(SyncPreviewRenderer previewRenderer) {
         this.previewRenderer = previewRenderer;
+    }
+
+    /** Injected by MainFrame so a disconnect can refresh the (possibly changed) port list. */
+    public void setOnDisconnectedCallback(Runnable callback) {
+        this.onDisconnectedCallback = callback;
     }
 
     @Override
@@ -555,13 +561,6 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                         components.getRefreshPortsButton().setEnabled(false);
                         components.getSettingsButton().setEnabled(false);
                         components.getDirectionButton().setEnabled(true);
-                    } else if (syncManager.isReconnectInProgress()) {
-                        components.getStatusLabel().setText("Reconnecting...");
-                        components.getStatusLabel().setForeground(java.awt.Color.ORANGE);
-                        components.getConnectButton().setText("Connect");
-                        components.getPortComboBox().setEnabled(false);
-                        components.getRefreshPortsButton().setEnabled(false);
-                        components.getSettingsButton().setEnabled(false);
                     } else {
                         components.getStatusLabel().setText("Disconnected");
                         components
@@ -571,6 +570,11 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                         components.getPortComboBox().setEnabled(true);
                         components.getRefreshPortsButton().setEnabled(true);
                         components.getSettingsButton().setEnabled(true);
+                        // The port that just vanished (e.g. an unplugged COM adapter) may no
+                        // longer exist; rescan so the combo box reflects the available ports.
+                        if (onDisconnectedCallback != null) {
+                            onDisconnectedCallback.run();
+                        }
                     }
                     updateSyncButtonState();
                 });
