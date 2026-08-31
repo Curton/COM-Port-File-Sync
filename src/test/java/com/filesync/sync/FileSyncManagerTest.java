@@ -9,6 +9,7 @@ import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -660,6 +661,18 @@ class FileSyncManagerTest {
 
             waitUntil(
                     () -> serial.getWrittenLines().stream().anyMatch(l -> l.equals("[[SYNC:ACK]]")),
+                    Duration.ofSeconds(5));
+            // The ACK only proves the announcement was routed: it is written before the XMODEM
+            // transfer starts. Wait for the reconstruction itself, or a slow transfer lets the
+            // assertion race ahead of the write and read the unmodified base file.
+            waitUntil(
+                    () -> {
+                        try {
+                            return "world".contentEquals(Files.readString(doc.toPath()));
+                        } catch (IOException e) {
+                            return false;
+                        }
+                    },
                     Duration.ofSeconds(5));
             // base was "hello"; only a routed+reconstructed delta can turn it into "world".
             assertEquals(
