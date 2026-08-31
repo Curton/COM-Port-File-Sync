@@ -80,6 +80,10 @@ public class FileSyncManager {
         this.settings = settings;
         this.eventBus = new SimpleSyncEventBus();
 
+        this.roleNegotiationService =
+                new RoleNegotiationService(
+                        protocol, eventBus, isSender, roleNegotiated, connectionAlive::get);
+
         this.connectionService =
                 new ConnectionService(
                         serialPort,
@@ -90,11 +94,8 @@ public class FileSyncManager {
                         syncing::get,
                         this::isProtocolExchangeBusy,
                         this::onConnectionLost,
-                        this::onConnectionRestored);
-
-        this.roleNegotiationService =
-                new RoleNegotiationService(
-                        protocol, eventBus, isSender, roleNegotiated, connectionAlive::get);
+                        this::onConnectionRestored,
+                        roleNegotiationService::retryNegotiationIfNeeded);
 
         this.sharedTextService =
                 new SharedTextService(
@@ -105,6 +106,10 @@ public class FileSyncManager {
                         syncing::get,
                         protocol::isXmodemInProgress,
                         roleNegotiationService::isRoleNegotiated);
+        // Queued shared text can only be sent once negotiation completes; flush it at that point
+        // (negotiation completion runs on the listener thread, which already sends on the serial
+        // line for ACKs and the CMD_DIRECTION_CHANGE path, so this is safe here).
+        roleNegotiationService.setOnNegotiated(sharedTextService::flushIfIdle);
 
         this.pendingFileWriteService = new PendingFileWriteService(eventBus);
 
@@ -949,8 +954,9 @@ public class FileSyncManager {
                             new SyncEvent.LogEvent(
                                     "Ignoring direction change during data transfer"));
                 } else {
+                    // handleDirectionChange fires the negotiated callback, which flushes any
+                    // shared text queued while the session was un-negotiated.
                     roleNegotiationService.handleDirectionChange(msg.getParamAsBoolean(0));
-                    sharedTextService.flushIfIdle();
                 }
             }
             case SyncProtocol.CMD_SYNC_COMPLETE -> syncCoordinator.handleSyncComplete();

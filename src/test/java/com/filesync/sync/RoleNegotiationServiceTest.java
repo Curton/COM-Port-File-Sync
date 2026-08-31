@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -135,6 +136,95 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
+    void retryNegotiationSendsWhenConnectedAndUnnegotiated() throws IOException {
+        service.retryNegotiationIfNeeded();
+
+        assertTrue(protocol.roleNegotiateSent);
+    }
+
+    @Test
+    void retryNegotiationRespectsRateLimit() throws IOException {
+        service.retryNegotiationIfNeeded();
+        protocol.roleNegotiateSent = false;
+
+        service.retryNegotiationIfNeeded();
+
+        assertFalse(protocol.roleNegotiateSent, "Immediate second retry must be rate-limited away");
+    }
+
+    @Test
+    void retryNegotiationSendsAgainAfterIntervalElapsed() throws IOException {
+        service.retryNegotiationIfNeeded();
+        // Force the last-sent stamp into the past to simulate the interval elapsing.
+        service.forceLastNegotiationSentForTest(System.currentTimeMillis() - 10_000);
+        protocol.roleNegotiateSent = false;
+
+        service.retryNegotiationIfNeeded();
+
+        assertTrue(protocol.roleNegotiateSent, "Retry should fire once the interval has elapsed");
+    }
+
+    @Test
+    void retryNegotiationDoesNothingWhenAlreadyNegotiated() throws IOException {
+        roleNegotiated.set(true);
+
+        service.retryNegotiationIfNeeded();
+
+        assertFalse(protocol.roleNegotiateSent);
+    }
+
+    @Test
+    void retryNegotiationDoesNothingWhenDisconnected() throws IOException {
+        connectionAlive.set(false);
+
+        service.retryNegotiationIfNeeded();
+
+        assertFalse(protocol.roleNegotiateSent);
+    }
+
+    @Test
+    void onNegotiatedCallbackRunsWhenNegotiationCompletes() throws IOException {
+        AtomicInteger callbackCount = new AtomicInteger();
+        service.setOnNegotiated(callbackCount::incrementAndGet);
+
+        service.handleRoleNegotiate(1000L);
+
+        assertEquals(1, callbackCount.get(), "Callback should fire once negotiation completes");
+    }
+
+    @Test
+    void onNegotiatedCallbackRunsOnDirectionChange() {
+        AtomicInteger callbackCount = new AtomicInteger();
+        service.setOnNegotiated(callbackCount::incrementAndGet);
+
+        service.handleDirectionChange(true);
+
+        assertEquals(1, callbackCount.get(), "Direction change finalizes the role");
+    }
+
+    @Test
+    void onNegotiatedCallbackRunsOnSetSender() {
+        AtomicInteger callbackCount = new AtomicInteger();
+        service.setOnNegotiated(callbackCount::incrementAndGet);
+
+        service.setSender(false);
+
+        assertEquals(1, callbackCount.get(), "Manual direction set finalizes the role");
+    }
+
+    @Test
+    void onNegotiatedCallbackExceptionDoesNotBreakNegotiation() throws IOException {
+        service.setOnNegotiated(
+                () -> {
+                    throw new RuntimeException("callback failure");
+                });
+
+        service.handleRoleNegotiate(1000L);
+
+        assertTrue(service.isRoleNegotiated(), "Negotiation must survive a failing callback");
+    }
+
+    @Test
     void handleRoleNegotiateWithSingleArgUsesZeroTieBreaker() throws IOException {
         roleNegotiated.set(false);
         protocol.roleNegotiateSent = false;
@@ -146,13 +236,48 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
-    void handleRoleNegotiateIgnoresWhenAlreadyNegotiated() throws IOException {
+    void handleRoleNegotiateRepliesWithCurrentRoleWhenAlreadyNegotiated() throws IOException {
         roleNegotiated.set(true);
         protocol.roleNegotiateSent = false;
+        eventBus.clearEvents();
 
         service.handleRoleNegotiate(1000L);
 
-        assertFalse(protocol.roleNegotiateSent);
+        // The peer's request means it never completed negotiation; ignore-silently would strand
+        // it. Answer with the settled role via DIRECTION_CHANGE instead of re-negotiating.
+        assertTrue(protocol.directionChangeSent);
+        assertTrue(protocol.lastDirectionChangeValue, "Settled sender role should be propagated");
+        assertFalse(protocol.roleNegotiateSent, "No new negotiation frame should be sent");
+        assertTrue(service.isRoleNegotiated());
+        assertFalse(
+                eventBus.hasDirectionEvent(true),
+                "Unchanged role should not be re-announced locally");
+    }
+
+    @Test
+    void handleDirectionChangeDeduplicatesUnchangedRoleWhenNegotiated() {
+        roleNegotiated.set(true);
+        eventBus.clearEvents();
+
+        service.handleDirectionChange(false);
+
+        assertTrue(service.isSender(), "Complementary role of a receiver announcement is sender");
+        assertTrue(service.isRoleNegotiated());
+        assertFalse(
+                eventBus.hasDirectionEvent(true),
+                "Redundant direction change should not re-post the local role");
+    }
+
+    @Test
+    void handleDirectionChangePostsEventWhenRoleActuallyChanges() {
+        isSender.set(false);
+        roleNegotiated.set(true);
+        eventBus.clearEvents();
+
+        service.handleDirectionChange(false);
+
+        assertTrue(service.isSender(), "Receiver becoming sender is a real role change");
+        assertTrue(eventBus.hasDirectionEvent(true));
     }
 
     @Test

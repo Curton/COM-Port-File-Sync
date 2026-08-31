@@ -30,6 +30,9 @@ public class ConnectionService {
     private final Runnable onConnectionLost;
     private final Runnable onReconnect;
 
+    /** Optional periodic hook (e.g. role-negotiation retry); invoked once per heartbeat tick. */
+    private final Runnable periodicTickHook;
+
     private ScheduledExecutorService executor;
     private ScheduledFuture<?> heartbeatFuture;
 
@@ -43,6 +46,30 @@ public class ConnectionService {
             BooleanSupplier transferBusySupplier,
             Runnable onConnectionLost,
             Runnable onReconnect) {
+        this(
+                serialPort,
+                protocol,
+                eventBus,
+                running,
+                connectionAlive,
+                syncingSupplier,
+                transferBusySupplier,
+                onConnectionLost,
+                onReconnect,
+                null);
+    }
+
+    public ConnectionService(
+            SerialPortManager serialPort,
+            SyncProtocol protocol,
+            SyncEventBus eventBus,
+            AtomicBoolean running,
+            AtomicBoolean connectionAlive,
+            BooleanSupplier syncingSupplier,
+            BooleanSupplier transferBusySupplier,
+            Runnable onConnectionLost,
+            Runnable onReconnect,
+            Runnable periodicTickHook) {
         this.serialPort = serialPort;
         this.protocol = protocol;
         this.eventBus = eventBus;
@@ -54,6 +81,7 @@ public class ConnectionService {
         this.transferBusySupplier = transferBusySupplier;
         this.onConnectionLost = onConnectionLost;
         this.onReconnect = onReconnect;
+        this.periodicTickHook = periodicTickHook;
     }
 
     public void setExecutor(ScheduledExecutorService executor) {
@@ -151,6 +179,10 @@ public class ConnectionService {
             } catch (IOException e) {
                 markLost("Connection lost - heartbeat send failed: " + e.getMessage());
             }
+        }
+
+        if (!syncingSupplier.getAsBoolean() && periodicTickHook != null) {
+            runCallback(periodicTickHook);
         }
     }
 
