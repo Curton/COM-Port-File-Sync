@@ -28,6 +28,7 @@ class ScriptedSerialPortManager extends SerialPortManager {
     private final ConcurrentLinkedQueue<Byte> byteInbox = new ConcurrentLinkedQueue<>();
     private final List<String> written = new CopyOnWriteArrayList<>();
     private volatile boolean readLineThrows;
+    private volatile boolean readLineTimesOut;
     private volatile boolean byteReadThrows;
 
     void feedLine(String frame) {
@@ -42,6 +43,14 @@ class ScriptedSerialPortManager extends SerialPortManager {
 
     void causeReadLineFailure() {
         readLineThrows = true;
+    }
+
+    /**
+     * Makes {@link #readLine(int)} throw the same "Read timeout" IOException the real serial port
+     * throws when a peer stops responding, so read-timeout recovery paths can be exercised.
+     */
+    void causeReadTimeout() {
+        readLineTimesOut = true;
     }
 
     void failByteReads() {
@@ -76,7 +85,7 @@ class ScriptedSerialPortManager extends SerialPortManager {
 
     @Override
     public int available() {
-        if (readLineThrows || byteReadThrows) {
+        if (readLineThrows || readLineTimesOut || byteReadThrows) {
             return 1;
         }
         return (inbox.isEmpty() && byteInbox.isEmpty()) ? 0 : 1;
@@ -86,6 +95,9 @@ class ScriptedSerialPortManager extends SerialPortManager {
     public String readLine(int timeoutMs) throws IOException {
         if (readLineThrows) {
             throw new IOException("simulated communication loss");
+        }
+        if (readLineTimesOut) {
+            throw new IOException("Read timeout");
         }
         return inbox.poll();
     }

@@ -138,6 +138,12 @@ public class FileSyncManager {
                         sharedTextService::onSyncIdle,
                         sharedTextService::onSyncBoundary,
                         connectionService::recordMessageActivity);
+        // The coordinator opens/closes the exchange gate around the actual manifest round-trip so
+        // heartbeats keep flowing during the local-only manifest scan; read timeouts it reports
+        // tear the link down immediately instead of idling until the next heartbeat check.
+        syncCoordinator.setProtocolExchangeGate(senderBlockingProtocolExchange::set);
+        syncCoordinator.setCommunicationFailureReporter(
+                connectionService::reportCommunicationFailure);
 
         protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
         protocol.setBaseStaleHandler(syncCoordinator::handleIncomingBaseStale);
@@ -548,13 +554,18 @@ public class FileSyncManager {
         if (getSyncFolder() == null || !getSyncFolder().exists()) {
             throw new IllegalStateException("Please select a sync folder first");
         }
-        senderBlockingProtocolExchange.set(true);
         try {
             return syncCoordinator.createSyncPreviewPlan();
         } catch (IOException e) {
+            // A read timeout means the peer never answered the manifest round-trip — most likely
+            // it already tore the link down. Fail the connection immediately so reconnect starts
+            // right away instead of idling until the next heartbeat check notices.
+            if (SyncCoordinator.isReadTimeout(e)) {
+                connectionService.reportCommunicationFailure(
+                        "Connection lost - read timeout during sync preview");
+            }
             throw new RuntimeException("Failed to build sync preview: " + e.getMessage(), e);
         } finally {
-            senderBlockingProtocolExchange.set(false);
             connectionService.recordMessageActivity();
         }
     }

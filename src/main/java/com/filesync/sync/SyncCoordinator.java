@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Coordinates sync operations, manifest exchange, and file transfers. */
@@ -49,6 +50,20 @@ public class SyncCoordinator {
     private final Runnable onSyncIdle;
     private final Runnable onSyncBoundary;
     private final Runnable heartbeatTouch;
+
+    /**
+     * Opens/closes the sender-side protocol-exchange gate while a synchronous serial exchange is in
+     * flight, so the heartbeat scheduler pauses outbound heartbeats (concurrent writes to the
+     * serial stream would interleave frames). No-op unless wired via {@link
+     * #setProtocolExchangeGate(Consumer)}.
+     */
+    private Consumer<Boolean> protocolExchangeGate = value -> {};
+
+    /**
+     * Reports unrecoverable link failures (e.g. read timeouts) so the connection layer tears the
+     * link down and starts recovery immediately instead of waiting for the next heartbeat check.
+     */
+    private Consumer<String> communicationFailureReporter = reason -> {};
 
     private ScheduledExecutorService executor;
 
@@ -99,6 +114,26 @@ public class SyncCoordinator {
 
     public void setExecutor(ScheduledExecutorService executor) {
         this.executor = executor;
+    }
+
+    public void setProtocolExchangeGate(Consumer<Boolean> gate) {
+        this.protocolExchangeGate = gate != null ? gate : value -> {};
+    }
+
+    public void setCommunicationFailureReporter(Consumer<String> reporter) {
+        this.communicationFailureReporter = reporter != null ? reporter : reason -> {};
+    }
+
+    /**
+     * Whether the IOException signals a read timeout — the peer stopped responding on the serial
+     * line (SerialPortManager's "Read timeout..." or waitForCommand's "Timeout waiting for
+     * command..."), as opposed to a protocol-level error from a healthy link.
+     */
+    static boolean isReadTimeout(IOException e) {
+        String message = e.getMessage();
+        return message != null
+                && (message.contains("Read timeout")
+                        || message.contains("Timeout waiting for command"));
     }
 
     public boolean isSyncing() {
@@ -179,6 +214,11 @@ public class SyncCoordinator {
         FileChangeDetector.FileManifest remoteManifest;
         int savedTimeout = protocol.getTimeout();
         protocol.setTimeout(120_000); // 120 seconds for large manifests
+        // The protocol-exchange gate opens only now, after local manifest generation: hashing the
+        // local tree touches no serial I/O, and holding the gate open during it silences outbound
+        // heartbeats long enough (folder walks can take a minute) for the idle peer to declare
+        // "Connection lost - no heartbeat response" and tear the link down mid-preview.
+        protocolExchangeGate.accept(true);
         try {
             protocol.requestManifest(respectGitignore, fastMode);
 
@@ -191,6 +231,7 @@ public class SyncCoordinator {
                             : -1;
             remoteManifest = protocol.receiveManifest(expectedManifestSize);
         } finally {
+            protocolExchangeGate.accept(false);
             protocol.setTimeout(savedTimeout);
         }
 
@@ -1518,6 +1559,13 @@ public class SyncCoordinator {
         } catch (SyncCancelledException e) {
             // Cancellation was already posted by exitSyncIfCancelled(); only cleanup needed here.
         } catch (IOException e) {
+            // A read timeout means the peer stopped responding mid-exchange (link torn down on its
+            // side, cable pulled, ...). Fail the connection immediately so recovery starts instead
+            // of idling until the next heartbeat check declares the loss.
+            if (isReadTimeout(e)) {
+                communicationFailureReporter.accept(
+                        "Connection lost - read timeout during sync: " + e.getMessage());
+            }
             eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
         } finally {
             activeSignatureCache = null;

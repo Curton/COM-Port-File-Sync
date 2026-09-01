@@ -30,11 +30,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1150,6 +1152,135 @@ class SyncCoordinatorTest {
         verify(mockProtocol).setTimeout(120_000);
         // Must have restored the original timeout
         verify(mockProtocol).setTimeout(30000);
+    }
+
+    @Test
+    void createSyncPreviewPlan_keepsGateClosedDuringLocalManifestGeneration() throws IOException {
+        // Regression test for the preview timeout bug: the protocol-exchange gate used to be held
+        // open for the entire preview — starting before local manifest generation — which silenced
+        // outbound heartbeats for as long as the folder walk took. A walk longer than the peer's
+        // heartbeat timeout made the idle peer declare "Connection lost - no heartbeat response"
+        // and tear the link down mid-preview. The gate must span only the manifest round-trip.
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncCoordinator coordinator =
+                createCoordinator(
+                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
+        Files.writeString(tempDir.resolve("gateSequence.txt"), "content");
+
+        AtomicBoolean gate = new AtomicBoolean(false);
+        List<String> gateTrace = new ArrayList<>();
+        coordinator.setProtocolExchangeGate(gate::set);
+        doAnswer(
+                        invocation -> {
+                            Object event = invocation.getArgument(0);
+                            if (event instanceof SyncEvent.LogEvent logEvent) {
+                                gateTrace.add(logEvent.getMessage() + " gate=" + gate.get());
+                            }
+                            return null;
+                        })
+                .when(mockEventBus)
+                .post(isA(SyncEvent.class));
+
+        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
+        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
+        doAnswer(
+                        invocation -> {
+                            assertTrue(gate.get(), "gate must be open for the manifest request");
+                            return null;
+                        })
+                .when(mockProtocol)
+                .requestManifest(anyBoolean(), anyBoolean());
+        when(mockProtocol.waitForCommand(anyString()))
+                .thenAnswer(
+                        invocation -> {
+                            assertTrue(gate.get(), "gate must be open while awaiting the manifest");
+                            return mockManifestMsg;
+                        });
+        when(mockProtocol.receiveManifest(anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            assertTrue(
+                                    gate.get(), "gate must be open while receiving the manifest");
+                            return FileChangeDetector.generateManifest(syncFolder, false, true);
+                        });
+
+        coordinator.createSyncPreviewPlan();
+
+        assertFalse(gate.get(), "gate must be closed after the preview plan is built");
+        assertTrue(
+                gateTrace.contains("Generating local manifest... gate=false"),
+                "Local manifest generation must run with the gate closed: " + gateTrace);
+        assertTrue(
+                gateTrace.contains("Requesting remote manifest... gate=false"),
+                "The gate must still be closed when the request is logged: " + gateTrace);
+    }
+
+    @Test
+    void createSyncPreviewPlan_readTimeout_closesGateAndRestoresTimeout() throws IOException {
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncCoordinator coordinator =
+                createCoordinator(
+                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
+        Files.writeString(tempDir.resolve("gateTimeout.txt"), "content");
+
+        AtomicBoolean gate = new AtomicBoolean(false);
+        List<Boolean> gateOperations = new ArrayList<>();
+        coordinator.setProtocolExchangeGate(
+                value -> {
+                    gate.set(value);
+                    gateOperations.add(value);
+                });
+
+        doThrow(new IOException("Read timeout"))
+                .when(mockProtocol)
+                .requestManifest(anyBoolean(), anyBoolean());
+
+        IOException thrown =
+                assertThrows(IOException.class, () -> coordinator.createSyncPreviewPlan());
+        assertTrue(SyncCoordinator.isReadTimeout(thrown), "the read timeout must surface as-is");
+
+        assertFalse(gate.get(), "gate must be closed after the exchange fails");
+        assertEquals(Arrays.asList(true, false), gateOperations, "gate must open then close, once");
+        verify(mockProtocol).setTimeout(120_000);
+        verify(mockProtocol).setTimeout(30000);
+    }
+
+    @Test
+    void performSync_readTimeout_reportsCommunicationFailureImmediately() throws IOException {
+        // A read timeout mid-transfer means the peer stopped responding (link already torn down
+        // on its side). The coordinator must report it as a link failure right away so recovery
+        // starts, instead of idling until the next heartbeat check notices the silence.
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        AtomicReference<String> reportedReason = new AtomicReference<>(null);
+        coordinator.setCommunicationFailureReporter(reportedReason::set);
+
+        List<FileChangeDetector.FileInfo> files = new ArrayList<>();
+        files.add(new FileChangeDetector.FileInfo("timeout.txt", 10L, 1L, "h1"));
+        Files.writeString(new File(syncFolder, "timeout.txt").toPath(), "x");
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        files,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        10L,
+                        false,
+                        Collections.emptyList());
+
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class)))
+                .thenThrow(new IOException("Read timeout"));
+
+        coordinator.startSync(plan);
+
+        assertNotNull(reportedReason.get(), "read timeout must be reported as a link failure");
+        assertTrue(
+                reportedReason.get().contains("read timeout"),
+                "the report should name the read timeout: " + reportedReason.get());
     }
 
     @Test
