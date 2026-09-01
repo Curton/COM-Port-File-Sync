@@ -972,7 +972,12 @@ public class FileSyncManager {
                         new SyncEvent.LogEvent("Remote cancelled sync, resetting connection"));
                 restartListening();
             }
-            case SyncProtocol.CMD_HEARTBEAT -> connectionService.handleHeartbeat();
+            case SyncProtocol.CMD_HEARTBEAT -> {
+                // Echo an ACK so the peer's liveness flips on this frame instead of waiting up
+                // to HEARTBEAT_INTERVAL_MS for our next periodic heartbeat.
+                protocol.sendHeartbeatAck();
+                connectionService.handleHeartbeat();
+            }
             case SyncProtocol.CMD_HEARTBEAT_ACK -> connectionService.handleHeartbeatAck();
             case SyncProtocol.CMD_DISCONNECT ->
                     // The remote side intentionally closed the connection; report the failure so
