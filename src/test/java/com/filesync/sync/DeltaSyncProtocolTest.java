@@ -43,7 +43,11 @@ class DeltaSyncProtocolTest {
                                 64,
                                 1,
                                 64,
-                                List.of(new BlockSignature(0, 123, new byte[16])))));
+                                List.of(
+                                        new BlockSignature(
+                                                0,
+                                                123,
+                                                new byte[BlockSignature.STRONG_HASH_LENGTH])))));
     }
 
     @Test

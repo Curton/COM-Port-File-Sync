@@ -39,10 +39,12 @@ class SignatureUtilTest {
         assertEquals(3, sigs.getBlockCount());
         assertEquals(data.length, sigs.getSourceSize());
         assertEquals(3, sigs.getSignatures().size());
-        // Block indices are 0..2.
+        // Block indices are 0..2, each with a truncated strong hash.
         for (int i = 0; i < sigs.getSignatures().size(); i++) {
             assertEquals(i, sigs.getSignatures().get(i).getBlockIndex());
-            assertEquals(16, sigs.getSignatures().get(i).getStrongHash().length);
+            assertEquals(
+                    BlockSignature.STRONG_HASH_LENGTH,
+                    sigs.getSignatures().get(i).getStrongHash().length);
         }
     }
 

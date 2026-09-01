@@ -71,9 +71,25 @@ class SignatureSerializationTest {
         assertThrows(IOException.class, () -> SignatureSet.fromBytes(bad));
     }
 
+    @Test
+    void rejectsWrongContainerVersion() throws IOException {
+        SignatureSet set =
+                new SignatureSet(
+                        List.of(
+                                new FileSignatures(
+                                        "a.bin",
+                                        2048,
+                                        1,
+                                        2048L,
+                                        List.of(new BlockSignature(0, 11, md5(7))))));
+        byte[] bytes = set.toBytes();
+        bytes[4] = 0x01; // overwrite the version byte with an older version
+        assertThrows(IOException.class, () -> SignatureSet.fromBytes(bytes));
+    }
+
     private static byte[] md5(int seed) {
-        byte[] b = new byte[16];
-        for (int i = 0; i < 16; i++) {
+        byte[] b = new byte[BlockSignature.STRONG_HASH_LENGTH];
+        for (int i = 0; i < b.length; i++) {
             b[i] = (byte) (seed + i);
         }
         return b;

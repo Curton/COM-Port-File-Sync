@@ -602,12 +602,14 @@ public class FileChangeDetector {
                     byte[] outBuffer = new byte[HASH_BUFFER_SIZE];
                     boolean pendingCR = false;
                     if (sampleRead > 0) {
-                        pendingCR = updateNormalized(md, sample, sampleRead, outBuffer, pendingCR);
+                        pendingCR =
+                                updateNormalized(md, sample, 0, sampleRead, outBuffer, pendingCR);
                     }
                     byte[] buffer = new byte[HASH_BUFFER_SIZE];
                     int bytesRead;
                     while ((bytesRead = fis.read(buffer)) != -1) {
-                        pendingCR = updateNormalized(md, buffer, bytesRead, outBuffer, pendingCR);
+                        pendingCR =
+                                updateNormalized(md, buffer, 0, bytesRead, outBuffer, pendingCR);
                     }
                     // Flush a trailing lone CR as LF.
                     if (pendingCR) {
@@ -618,6 +620,170 @@ public class FileChangeDetector {
             return toHex(md.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("MD5 algorithm not available", e);
+        }
+    }
+
+    /**
+     * Calculate the manifest-equivalent MD5 of the first {@code length} bytes of {@code data}.
+     *
+     * <p>Applies the same classification and line-ending normalization as {@link
+     * #calculateMD5(File)}: text content is hashed with CRLF/CR/LF collapsed to LF, binary content
+     * is hashed raw. This lets a sender verify that a prefix of its file matches the receiver's
+     * file as described by the receiver's manifest, without a round trip.
+     *
+     * @param data the full content bytes
+     * @param length the prefix length to hash; clamped to {@code data.length}
+     */
+    public static String calculateMD5OfPrefix(byte[] data, int length) throws IOException {
+        int len = Math.min(length, data.length);
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            if (len <= 0) {
+                return toHex(md.digest());
+            }
+            int sampleLen = Math.min(len, BINARY_SAMPLE_SIZE);
+            byte[] sample = Arrays.copyOf(data, sampleLen);
+            boolean binary = CompressionUtil.isLikelyBinaryContent(sample);
+            if (binary) {
+                md.update(data, 0, len);
+            } else {
+                byte[] outBuffer = new byte[HASH_BUFFER_SIZE];
+                boolean pendingCR = false;
+                // Feed in HASH_BUFFER_SIZE chunks so the normalized output always fits outBuffer.
+                for (int off = 0; off < len; off += HASH_BUFFER_SIZE) {
+                    int chunkLen = Math.min(HASH_BUFFER_SIZE, len - off);
+                    pendingCR = updateNormalized(md, data, off, chunkLen, outBuffer, pendingCR);
+                }
+                // Flush a trailing lone CR as LF, mirroring calculateMD5.
+                if (pendingCR) {
+                    md.update((byte) '\n');
+                }
+            }
+            return toHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("MD5 algorithm not available", e);
+        }
+    }
+
+    /**
+     * Hash the first {@code prefixLength} bytes of {@code file} straight off disk, without holding
+     * the file in memory. Text prefixes are hashed with CRLF/CR/LF collapsed to LF, binary prefixes
+     * raw — classified from the first {@value #BINARY_SAMPLE_SIZE} bytes exactly like {@link
+     * #calculateMD5(File)} — so the returned manifest digest equals {@link
+     * #calculateMD5OfPrefix(byte[], int)} over the same bytes.
+     *
+     * <p>The companion raw digest has consumed exactly the prefix bytes and can be continued over
+     * the rest of the file (see {@link PrefixHash#rawMd5With(byte[])}), letting a caller compute
+     * both the manifest gate hash and the raw full-file hash in a single streaming pass.
+     *
+     * @param file the file to hash
+     * @param prefixLength number of bytes to hash; must not be negative
+     * @throws java.io.EOFException if the file holds fewer than {@code prefixLength} bytes
+     */
+    public static PrefixHash hashFilePrefix(File file, long prefixLength) throws IOException {
+        if (prefixLength < 0) {
+            throw new IllegalArgumentException(
+                    "prefixLength must not be negative: " + prefixLength);
+        }
+        try {
+            MessageDigest manifestMd = MessageDigest.getInstance("MD5");
+            MessageDigest rawMd = MessageDigest.getInstance("MD5");
+            long remaining = prefixLength;
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] sample = new byte[BINARY_SAMPLE_SIZE];
+                int sampleRead =
+                        readFully(fis, sample, 0, (int) Math.min(BINARY_SAMPLE_SIZE, remaining));
+                remaining -= sampleRead;
+
+                boolean binary = false;
+                if (sampleRead > 0) {
+                    // isLikelyBinaryContent inspects up to its own sample length, so pass an
+                    // array sized exactly to the bytes read (trailing zeros would skew the ratio).
+                    byte[] sampleForDetection =
+                            sampleRead == BINARY_SAMPLE_SIZE
+                                    ? sample
+                                    : Arrays.copyOf(sample, sampleRead);
+                    binary = CompressionUtil.isLikelyBinaryContent(sampleForDetection);
+                }
+
+                if (binary) {
+                    if (sampleRead > 0) {
+                        manifestMd.update(sample, 0, sampleRead);
+                        rawMd.update(sample, 0, sampleRead);
+                    }
+                    byte[] buffer = new byte[HASH_BUFFER_SIZE];
+                    while (remaining > 0) {
+                        int read = readBounded(fis, buffer, remaining);
+                        manifestMd.update(buffer, 0, read);
+                        rawMd.update(buffer, 0, read);
+                        remaining -= read;
+                    }
+                } else {
+                    byte[] outBuffer = new byte[HASH_BUFFER_SIZE];
+                    boolean pendingCR = false;
+                    if (sampleRead > 0) {
+                        pendingCR =
+                                updateNormalized(
+                                        manifestMd, sample, 0, sampleRead, outBuffer, pendingCR);
+                        rawMd.update(sample, 0, sampleRead);
+                    }
+                    byte[] buffer = new byte[HASH_BUFFER_SIZE];
+                    while (remaining > 0) {
+                        int read = readBounded(fis, buffer, remaining);
+                        pendingCR =
+                                updateNormalized(manifestMd, buffer, 0, read, outBuffer, pendingCR);
+                        rawMd.update(buffer, 0, read);
+                        remaining -= read;
+                    }
+                    // Flush a trailing lone CR as LF, mirroring calculateMD5.
+                    if (pendingCR) {
+                        manifestMd.update((byte) '\n');
+                    }
+                }
+            }
+            return new PrefixHash(toHex(manifestMd.digest()), rawMd);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("MD5 algorithm not available", e);
+        }
+    }
+
+    /**
+     * Read up to {@code Math.min(HASH_BUFFER_SIZE, remaining)} bytes fully, throwing {@link
+     * java.io.EOFException} when the stream ends early.
+     */
+    private static int readBounded(InputStream in, byte[] buffer, long remaining)
+            throws IOException {
+        int want = (int) Math.min(HASH_BUFFER_SIZE, remaining);
+        int total = readFully(in, buffer, 0, want);
+        if (total != want) {
+            throw new java.io.EOFException("file ended inside the expected prefix");
+        }
+        return total;
+    }
+
+    /** Hashes of a file prefix produced by {@link #hashFilePrefix}. */
+    public static final class PrefixHash {
+
+        private final String manifestMd5;
+        private final MessageDigest rawDigest;
+
+        private PrefixHash(String manifestMd5, MessageDigest rawDigest) {
+            this.manifestMd5 = manifestMd5;
+            this.rawDigest = rawDigest;
+        }
+
+        /** The manifest-equivalent md5 of the prefix (line endings normalized for text). */
+        public String manifestMd5() {
+            return manifestMd5;
+        }
+
+        /**
+         * Feed additional bytes (e.g. the appended tail) to the raw digest and return the raw MD5
+         * hex of prefix + extra — the full-file hash a receiver verifies before writing.
+         */
+        public String rawMd5With(byte[] extra) {
+            rawDigest.update(extra);
+            return toHex(rawDigest.digest());
         }
     }
 
@@ -639,15 +805,15 @@ public class FileChangeDetector {
     }
 
     /**
-     * Feed {@code chunk[0..len)} into {@code md} with line-ending normalization: CRLF, a lone CR,
-     * and a standalone LF all map to a single LF. Reuses {@code outBuffer} for normalized output
-     * (never larger than the input). Returns the updated pending-CR state so callers can carry it
-     * across chunk boundaries.
+     * Feed {@code chunk[off..off+len)} into {@code md} with line-ending normalization: CRLF, a lone
+     * CR, and a standalone LF all map to a single LF. Reuses {@code outBuffer} for normalized
+     * output (never larger than {@code len}). Returns the updated pending-CR state so callers can
+     * carry it across chunk boundaries.
      */
     private static boolean updateNormalized(
-            MessageDigest md, byte[] chunk, int len, byte[] outBuffer, boolean pendingCR) {
+            MessageDigest md, byte[] chunk, int off, int len, byte[] outBuffer, boolean pendingCR) {
         int outLen = 0;
-        for (int i = 0; i < len; i++) {
+        for (int i = off; i < off + len; i++) {
             int b = chunk[i] & 0xFF;
             if (b == '\r') {
                 // A previous pending CR (lone CR not followed by LF) flushes as LF first.

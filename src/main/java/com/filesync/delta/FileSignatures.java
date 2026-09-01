@@ -21,7 +21,7 @@ import java.util.List;
  *
  * <pre>
  *   PATH_LEN(2) | PATH(utf8) | BLOCK_SIZE(4) | BLOCK_COUNT(4) | SOURCE_SIZE(8)
- *   | BLOCK_COUNT * ( WEAK_HASH(4) | STRONG_HASH(16) )
+ *   | BLOCK_COUNT * ( WEAK_HASH(4) | STRONG_HASH(8) )
  * </pre>
  *
  * The block index is implicit (positional) and reconstructed on load.
@@ -103,7 +103,7 @@ public final class FileSignatures {
             List<BlockSignature> sigs = new ArrayList<>(blockCount);
             for (int i = 0; i < blockCount; i++) {
                 int weak = in.readInt();
-                byte[] strong = new byte[16];
+                byte[] strong = new byte[BlockSignature.STRONG_HASH_LENGTH];
                 in.readFully(strong);
                 sigs.add(new BlockSignature(i, weak, strong));
             }
@@ -114,6 +114,11 @@ public final class FileSignatures {
     /** Length in bytes of this file's serialized form (for the container's length prefix). */
     public int encodedLength() throws IOException {
         byte[] pathBytes = path.getBytes(StandardCharsets.UTF_8);
-        return 2 + pathBytes.length + 4 + 4 + 8 + (blockCount * 20);
+        return 2
+                + pathBytes.length
+                + 4
+                + 4
+                + 8
+                + (blockCount * (4 + BlockSignature.STRONG_HASH_LENGTH));
     }
 }

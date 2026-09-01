@@ -10,7 +10,9 @@ import com.filesync.protocol.SyncProtocol.Message;
 import com.filesync.serial.SerialPortManager;
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Queue;
 import org.junit.jupiter.api.Test;
 
@@ -67,6 +69,45 @@ class SyncProtocolWaitForCommandTest {
         assertTrue(ex.getMessage().contains("boom"));
         assertSame(sharedText, protocol.pollStashedMessage());
         assertNull(protocol.pollStashedMessage());
+    }
+
+    @Test
+    void waitForCommandFiresBaseStaleHandlerAndThrows() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        Message sharedText =
+                new Message(SyncProtocol.CMD_SHARED_TEXT, new String[] {"1", "aGVsbG8="});
+        Message stale =
+                new Message(
+                        SyncProtocol.CMD_BASE_STALE,
+                        new String[] {"app.log", "100", "42", "md5-value"});
+        List<Message> handled = new ArrayList<>();
+        protocol.setBaseStaleHandler(handled::add);
+        protocol.feed(sharedText, stale);
+
+        IOException ex =
+                assertThrows(
+                        IOException.class, () -> protocol.waitForCommand(SyncProtocol.CMD_ACK));
+
+        // The notification aborts the in-flight operation after the handler has recorded it.
+        assertTrue(ex.getMessage().contains("rejected the transfer base"));
+        assertTrue(ex.getMessage().contains("app.log"));
+        assertEquals(List.of(stale), handled, "handler must receive the notification");
+        // Earlier async messages stay stashed; BASE_STALE itself is delivered, not stashed.
+        assertSame(sharedText, protocol.pollStashedMessage());
+        assertNull(protocol.pollStashedMessage());
+    }
+
+    @Test
+    void waitForCommandBaseStaleWithoutHandlerOrPathStillThrows() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        protocol.feed(new Message(SyncProtocol.CMD_BASE_STALE, new String[0]));
+
+        IOException ex =
+                assertThrows(
+                        IOException.class, () -> protocol.waitForCommand(SyncProtocol.CMD_ACK));
+
+        assertTrue(
+                ex.getMessage().contains("unknown"), "missing path falls back: " + ex.getMessage());
     }
 
     @Test

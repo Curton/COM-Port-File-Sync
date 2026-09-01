@@ -18,6 +18,11 @@ import java.util.Map;
  * COPY token and the window jumps forward by a full block; otherwise the current byte is emitted as
  * a LITERAL and the window slides one byte. Only full {@code blockSize}-length windows are matched;
  * trailing bytes shorter than a block are always sent as literals.
+ *
+ * <p>Consecutive matched blocks are coalesced into a single COPY token spanning the whole run (the
+ * decoder accepts any COPY length that stays within the existing file), so a file whose prefix is
+ * unchanged — e.g. an append-only log — costs one 9-byte token for the entire prefix instead of one
+ * per block.
  */
 public final class DeltaEncoder {
 
@@ -72,6 +77,11 @@ public final class DeltaEncoder {
         int literalStart = 0;
         boolean hasLiteral = false;
 
+        // Deferred COPY run: consecutive block matches extend one token instead of emitting one
+        // token per block. pendingCopyBlockIndex == -1 means no run is open.
+        int pendingCopyBlockIndex = -1;
+        int pendingCopyLength = 0;
+
         // Initialise the rolling window over [0, blockSize).
         rh.reset();
         for (int k = 0; k < blockSize; k++) {
@@ -85,7 +95,10 @@ public final class DeltaEncoder {
                 List<BlockSignature> cands = table.get(weak);
                 if (cands != null) {
                     md5.reset();
-                    byte[] digest = md5.digest(Arrays.copyOfRange(source, i, i + blockSize));
+                    byte[] digest =
+                            Arrays.copyOf(
+                                    md5.digest(Arrays.copyOfRange(source, i, i + blockSize)),
+                                    BlockSignature.STRONG_HASH_LENGTH);
                     for (BlockSignature bs : cands) {
                         if (Arrays.equals(bs.strongHashInternal(), digest)) {
                             // Flush buffered literals first.
@@ -94,7 +107,14 @@ public final class DeltaEncoder {
                                         delta, source, literalStart, i - literalStart);
                                 hasLiteral = false;
                             }
-                            DeltaCodec.writeCopy(delta, bs.getBlockIndex(), blockSize);
+                            if (bs.getBlockIndex()
+                                    == pendingCopyBlockIndex + pendingCopyLength / blockSize) {
+                                pendingCopyLength += blockSize;
+                            } else {
+                                writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
+                                pendingCopyBlockIndex = bs.getBlockIndex();
+                                pendingCopyLength = blockSize;
+                            }
                             i += blockSize;
                             matched = true;
                             break;
@@ -105,6 +125,10 @@ public final class DeltaEncoder {
 
             if (!matched) {
                 if (!hasLiteral) {
+                    // A literal cannot join a pending COPY run: flush it so stream order is kept.
+                    writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
+                    pendingCopyBlockIndex = -1;
+                    pendingCopyLength = 0;
                     literalStart = i;
                     hasLiteral = true;
                 }
@@ -127,6 +151,14 @@ public final class DeltaEncoder {
         if (hasLiteral) {
             DeltaCodec.writeLiteral(delta, source, literalStart, n - literalStart);
         }
+        writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
         return delta.toByteArray();
+    }
+
+    /** Write the deferred COPY run, if one is open. */
+    private static void writeCopyRun(ByteArrayOutputStream delta, int blockIndex, int length) {
+        if (blockIndex >= 0) {
+            DeltaCodec.writeCopy(delta, blockIndex, length);
+        }
     }
 }

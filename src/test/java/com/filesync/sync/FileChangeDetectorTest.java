@@ -2,12 +2,17 @@ package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.filesync.delta.HashUtil;
+import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -336,5 +341,54 @@ class FileChangeDetectorTest {
         String str = info.toString();
         assertTrue(str.contains("test.txt"));
         assertTrue(str.contains("42"));
+    }
+
+    @Test
+    void hashFilePrefix_matchesArrayImplementationForTextPrefixes() throws IOException {
+        // "\r\na" triples put a lone CR exactly at the streaming sample boundary (4095) and at
+        // the array implementation's chunk boundary (16383), and several prefix lengths below
+        // cut right after a CR, exercising the pending-CR carry and the trailing-CR flush.
+        byte[] data = "\r\na".repeat(6000).getBytes(StandardCharsets.UTF_8);
+        File file = tempDir.resolve("crlf.log").toFile();
+        Files.write(file.toPath(), data);
+
+        long[] prefixLengths = {0, 1, 4096, 8191, 8192, 16384, 17999, 18000};
+        for (long prefixLength : prefixLengths) {
+            FileChangeDetector.PrefixHash hash =
+                    FileChangeDetector.hashFilePrefix(file, prefixLength);
+            assertEquals(
+                    FileChangeDetector.calculateMD5OfPrefix(data, (int) prefixLength),
+                    hash.manifestMd5(),
+                    "manifest hash must match at prefix length " + prefixLength);
+            assertEquals(
+                    HashUtil.md5Hex(Arrays.copyOf(data, (int) prefixLength)),
+                    hash.rawMd5With(new byte[0]),
+                    "raw hash must cover exactly the prefix bytes at length " + prefixLength);
+        }
+    }
+
+    @Test
+    void hashFilePrefix_binaryPrefixIsHashedRaw() throws IOException {
+        // Alternating null bytes guarantee the binary classification regardless of the sample.
+        byte[] data = new byte[10000];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = (i % 2 == 0) ? (byte) 0 : (byte) 'a';
+        }
+        File file = tempDir.resolve("data.bin").toFile();
+        Files.write(file.toPath(), data);
+
+        FileChangeDetector.PrefixHash hash = FileChangeDetector.hashFilePrefix(file, 6000);
+        assertEquals(HashUtil.md5Hex(Arrays.copyOf(data, 6000)), hash.manifestMd5());
+        assertEquals(
+                HashUtil.md5Hex(data),
+                hash.rawMd5With(Arrays.copyOfRange(data, 6000, data.length)),
+                "rawMd5With must continue over the remaining bytes");
+    }
+
+    @Test
+    void hashFilePrefix_throwsEofWhenFileIsShorterThanPrefix() throws IOException {
+        File file = tempDir.resolve("short.log").toFile();
+        Files.write(file.toPath(), "hello".getBytes(StandardCharsets.UTF_8));
+        assertThrows(EOFException.class, () -> FileChangeDetector.hashFilePrefix(file, 6));
     }
 }

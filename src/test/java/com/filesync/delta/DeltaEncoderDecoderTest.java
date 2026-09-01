@@ -5,7 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
 
@@ -37,19 +41,71 @@ class DeltaEncoderDecoderTest {
         return DeltaDecoder.decode(base, delta);
     }
 
+    /** One parsed token from a delta stream. */
+    private static final class Token {
+        final int tag;
+        final int blockIndex;
+        final int length;
+
+        Token(int tag, int blockIndex, int length) {
+            this.tag = tag;
+            this.blockIndex = blockIndex;
+            this.length = length;
+        }
+
+        boolean isCopy(int blockIndex, int length) {
+            return tag == DeltaCodec.TAG_COPY
+                    && this.blockIndex == blockIndex
+                    && this.length == length;
+        }
+
+        boolean isLiteral(int length) {
+            return tag == DeltaCodec.TAG_LITERAL && this.length == length;
+        }
+    }
+
+    /** Parse a delta stream into its token sequence (header skipped). */
+    private static List<Token> parseTokens(byte[] delta) throws IOException {
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(delta))) {
+            byte[] magic = new byte[4];
+            in.readFully(magic);
+            assertArrayEquals(DeltaCodec.MAGIC, magic);
+            in.readUnsignedByte(); // version
+            in.readInt(); // blockSize
+            in.readLong(); // sourceSize
+            List<Token> tokens = new ArrayList<>();
+            while (in.available() > 0) {
+                int tag = in.readUnsignedByte();
+                if (tag == DeltaCodec.TAG_COPY) {
+                    tokens.add(new Token(tag, in.readInt(), in.readInt()));
+                } else if (tag == DeltaCodec.TAG_LITERAL) {
+                    int len = in.readInt();
+                    in.readFully(new byte[len]);
+                    tokens.add(new Token(tag, -1, len));
+                } else {
+                    throw new IOException("Unknown token tag: " + tag);
+                }
+            }
+            return tokens;
+        }
+    }
+
     @Test
     void identicalFileProducesAllCopies() throws IOException {
         byte[] base = randomBytes(BLOCK * 4, 1);
         byte[] delta = encode(base, base);
         byte[] rebuilt = DeltaDecoder.decode(base, delta);
         assertArrayEquals(base, rebuilt);
-        // Delta should be much smaller than the source: header + 4 COPY tokens.
+        // Delta should be much smaller than the source: header + one coalesced COPY run.
         assertTrue(
                 delta.length < base.length / 2, "delta=" + delta.length + " base=" + base.length);
+        List<Token> tokens = parseTokens(delta);
+        assertEquals(1, tokens.size(), "identical file should be one COPY run");
+        assertTrue(tokens.get(0).isCopy(0, BLOCK * 4), "token=" + tokens.get(0).tag);
     }
 
     @Test
-    void appendedBytesReuseAllBaseBlocks() throws IOException {
+    void appendOnlyPrefixCoalescesIntoSingleCopyToken() throws IOException {
         byte[] base = randomBytes(BLOCK * 3, 2);
         byte[] source = new byte[base.length + 25];
         System.arraycopy(base, 0, source, 0, base.length);
@@ -59,6 +115,40 @@ class DeltaEncoderDecoderTest {
         byte[] rebuilt = DeltaDecoder.decode(base, delta);
         assertArrayEquals(source, rebuilt);
         assertTrue(delta.length < source.length / 2, "delta=" + delta.length);
+
+        List<Token> tokens = parseTokens(delta);
+        assertEquals(2, tokens.size(), "tokens=" + tokens.size());
+        assertTrue(
+                tokens.get(0).isCopy(0, BLOCK * 3),
+                "whole prefix must be one COPY run, got tag="
+                        + tokens.get(0).tag
+                        + " block="
+                        + tokens.get(0).blockIndex
+                        + " len="
+                        + tokens.get(0).length);
+        assertTrue(tokens.get(1).isLiteral(25));
+    }
+
+    @Test
+    void literalBetweenCopyRunsKeepsRunsSeparate() throws IOException {
+        byte[] base = randomBytes(BLOCK * 4, 13);
+        byte[] inserted = randomBytes(30, 14);
+        byte[] source = new byte[BLOCK * 4 + 30];
+        System.arraycopy(base, 0, source, 0, BLOCK * 2);
+        System.arraycopy(inserted, 0, source, BLOCK * 2, 30);
+        System.arraycopy(base, BLOCK * 2, source, BLOCK * 2 + 30, BLOCK * 2);
+
+        byte[] delta = encode(base, source);
+        byte[] rebuilt = DeltaDecoder.decode(base, delta);
+        assertArrayEquals(source, rebuilt);
+
+        // COPY(blocks 0-1) | LITERAL(inserted) | COPY(blocks 2-3): the inserted bytes must split
+        // the run into two COPY tokens even though all four base blocks match.
+        List<Token> tokens = parseTokens(delta);
+        assertEquals(3, tokens.size(), "tokens=" + tokens.size());
+        assertTrue(tokens.get(0).isCopy(0, BLOCK * 2));
+        assertTrue(tokens.get(1).isLiteral(30));
+        assertTrue(tokens.get(2).isCopy(2, BLOCK * 2));
     }
 
     @Test

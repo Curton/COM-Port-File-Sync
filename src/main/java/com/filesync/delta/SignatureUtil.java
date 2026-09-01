@@ -63,7 +63,11 @@ public final class SignatureUtil {
             int weak = RollingHash.weakChecksum(data, off, blockSize);
             md5.reset();
             byte[] strong = md5.digest(java.util.Arrays.copyOfRange(data, off, off + blockSize));
-            sigs.add(new BlockSignature(i, weak, strong));
+            sigs.add(
+                    new BlockSignature(
+                            i,
+                            weak,
+                            java.util.Arrays.copyOf(strong, BlockSignature.STRONG_HASH_LENGTH)));
         }
         return new FileSignatures(path, blockSize, blockCount, data.length, sigs);
     }

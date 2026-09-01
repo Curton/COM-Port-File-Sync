@@ -28,7 +28,9 @@ import java.util.Map;
 public final class SignatureSet {
 
     private static final byte[] MAGIC = new byte[] {0x53, 0x47, 0x53, 0x00}; // "SGS\0"
-    private static final int VERSION = 1;
+
+    /** Wire format version; package-visible so tests craft headers against the real value. */
+    static final int VERSION = 2;
 
     private final Map<String, FileSignatures> byPath;
 

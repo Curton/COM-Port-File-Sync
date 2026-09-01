@@ -10,12 +10,17 @@ import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
 import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,14 +52,19 @@ public class SyncCoordinator {
 
     private ScheduledExecutorService executor;
 
+    /**
+     * Signature cache of the sync currently in progress, if any. Shared with {@code
+     * handleIncomingBaseStale} (which may run on the listener thread): recording the rejection on
+     * the session's instance keeps a later session flush from overwriting it with the stale
+     * pre-rejection in-memory map.
+     */
+    private volatile SignatureCache activeSignatureCache;
+
     // Cancellation flag for ongoing sync operations
     private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
 
     /** Minimum file size for rsync-style delta transfer; below this a full transfer is cheaper. */
     static final long MIN_DELTA_SIZE = 8 * 1024L;
-
-    /** Sample size inspected to decide whether a candidate file is binary. */
-    private static final int BINARY_SAMPLE_SIZE = 4096;
 
     public SyncCoordinator(
             SyncProtocol protocol,
@@ -225,16 +235,16 @@ public class SyncCoordinator {
                             "Detected " + conflicts.size() + " potential conflict(s)"));
         }
 
-        // Identify binary delta candidates: files present on both sides that differ, are large
-        // enough, are binary (so raw-byte block matching is valid), and are not in conflict.
+        // Identify delta candidates: files present on both sides that differ, are large enough,
+        // and are not in conflict. Content type is not filtered — block matching is
+        // content-agnostic, and append-only logs in particular benefit from it.
         // Signatures are exchanged lazily in performSync only when a sync actually runs.
         Set<String> deltaCandidatePaths =
                 selectDeltaCandidates(filesToSync, remoteManifest, conflicts, syncFolder);
         if (!deltaCandidatePaths.isEmpty()) {
             eventBus.post(
                     new SyncEvent.LogEvent(
-                            deltaCandidatePaths.size()
-                                    + " binary file(s) eligible for delta transfer"));
+                            deltaCandidatePaths.size() + " file(s) eligible for delta transfer"));
         }
 
         return new SyncPreviewPlan(
@@ -246,13 +256,16 @@ public class SyncCoordinator {
                 strictMode,
                 conflicts,
                 deltaCandidatePaths,
-                new HashSet<>(remoteManifest.getFiles().keySet()));
+                new HashSet<>(remoteManifest.getFiles().keySet()),
+                remoteManifest.getFiles());
     }
 
     /**
      * Select paths eligible for rsync-style delta transfer: present on both sides (so the receiver
-     * has a base to diff against), large enough to be worth the signature round-trip, binary (raw
-     * block matching is only valid for binary content), and not subject to a conflict.
+     * has a base to diff against), large enough to be worth the signature round-trip, and not
+     * subject to a conflict. Text and binary content are treated alike; files whose blocks do not
+     * match (e.g. cross-platform line-ending variants) simply produce a non-beneficial delta and
+     * fall back to the full batch transfer.
      */
     Set<String> selectDeltaCandidates(
             List<FileChangeDetector.FileInfo> filesToSync,
@@ -276,7 +289,7 @@ public class SyncCoordinator {
                 continue; // conflicts need full-transfer / merge handling
             }
             File file = new File(syncFolder, path);
-            if (!file.isFile() || !isBinaryFile(file)) {
+            if (!file.isFile()) {
                 continue;
             }
             candidates.add(path);
@@ -284,24 +297,93 @@ public class SyncCoordinator {
         return candidates;
     }
 
-    /**
-     * Sample-based binary detection consistent with {@link FileChangeDetector#calculateMD5}: read
-     * up to {@value #BINARY_SAMPLE_SIZE} bytes and classify via {@link
-     * CompressionUtil#isLikelyBinaryContent}.
-     */
-    static boolean isBinaryFile(File file) {
-        try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
-            byte[] sample = new byte[BINARY_SAMPLE_SIZE];
-            int read = fis.read(sample);
-            if (read <= 0) {
-                return false;
-            }
-            byte[] buf =
-                    read == BINARY_SAMPLE_SIZE ? sample : java.util.Arrays.copyOf(sample, read);
-            return CompressionUtil.isLikelyBinaryContent(buf);
-        } catch (IOException e) {
-            return false;
+    /** An append-only transfer candidate: the sender's file is the receiver's file plus a tail. */
+    private static final class AppendCandidate {
+        final FileChangeDetector.FileInfo fileInfo;
+        final File file;
+        final String path;
+        final byte[] tail;
+        final long baseSize;
+        final long finalSize;
+        final String finalMd5;
+
+        AppendCandidate(
+                FileChangeDetector.FileInfo fileInfo,
+                File file,
+                byte[] tail,
+                long baseSize,
+                long finalSize,
+                String finalMd5) {
+            this.fileInfo = fileInfo;
+            this.file = file;
+            this.path = fileInfo.getPath();
+            this.tail = tail;
+            this.baseSize = baseSize;
+            this.finalSize = finalSize;
+            this.finalMd5 = finalMd5;
         }
+    }
+
+    /**
+     * Detect whether a delta candidate is a pure append of the receiver's file: the remote copy
+     * must have a manifest md5, be strictly shorter than the local file, and the local prefix of
+     * that length must hash (with the manifest's line-ending normalization) to the same md5. Only
+     * then is the change provably "old content + new tail", and only the tail needs transferring.
+     *
+     * <p>The prefix is hashed streaming off disk and only the tail is ever held in memory, so
+     * detection cost is bounded regardless of file size. Returns null when the shape does not hold
+     * (new file, shrink, mid-file edit, unreadable file, quick-hash manifest without an md5, or a
+     * receiver state that already rejected a previous transfer); the caller then keeps the file on
+     * the regular signature-delta path.
+     */
+    private AppendCandidate detectAppendCandidate(
+            FileChangeDetector.FileInfo fi,
+            SyncPreviewPlan syncPlan,
+            File syncFolder,
+            SignatureCache signatureCache) {
+        FileChangeDetector.FileInfo remote = syncPlan.getRemoteFileInfo(fi.getPath());
+        if (remote == null || remote.getMd5() == null || remote.getMd5().isEmpty()) {
+            return null;
+        }
+        if (signatureCache != null && signatureCache.isRejected(fi.getPath(), remote)) {
+            return null; // the receiver already refused a transfer against this exact state
+        }
+        File file = new File(syncFolder, fi.getPath());
+        long baseSize = remote.getSize();
+        long localLength = file.length();
+        if (!file.isFile()
+                || baseSize < 0
+                || localLength <= baseSize
+                || localLength > Integer.MAX_VALUE) {
+            return null;
+        }
+        FileChangeDetector.PrefixHash prefixHash;
+        try {
+            prefixHash = FileChangeDetector.hashFilePrefix(file, baseSize);
+        } catch (IOException e) {
+            return null; // unreadable, or the file shrank below the base while hashing
+        }
+        if (!prefixHash.manifestMd5().equals(remote.getMd5())) {
+            return null; // not a pure append: the prefix content differs
+        }
+        byte[] tail = new byte[(int) (localLength - baseSize)];
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(baseSize);
+            raf.readFully(tail);
+        } catch (IOException e) {
+            return null; // the file changed shape while the tail was being read
+        }
+        return new AppendCandidate(
+                fi, file, tail, baseSize, localLength, prefixHash.rawMd5With(tail));
+    }
+
+    /**
+     * Sender-side signature cache for the given sync folder. Factory method so tests can redirect
+     * the on-disk location; the default stores one JSON file per sync folder under {@code
+     * <user.home>/.filesync/}.
+     */
+    SignatureCache createSignatureCache(File syncFolder) {
+        return SignatureCache.forFolder(syncFolder);
     }
 
     /**
@@ -636,6 +718,103 @@ public class SyncCoordinator {
         }
     }
 
+    /**
+     * Receiver-side handler for {@link SyncProtocol#CMD_FILE_APPEND}: receive only the appended
+     * tail of a file whose prefix matches the local copy, verify the reconstruction against the
+     * sender's raw MD5, and write it. Failure handling mirrors {@link #handleIncomingFileDelta}: a
+     * locked-target write failure queues the reconstructed bytes for deferred retry; any other
+     * failure re-throws so the listen loop can restart (the file is re-evaluated on the next sync).
+     */
+    public void handleIncomingFileAppend(SyncProtocol.Message msg) throws IOException {
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null) {
+            syncing.set(false);
+            onSyncIdle.run();
+            return;
+        }
+        syncing.set(true);
+        String relativePath = msg.getParam(0);
+        int size = msg.getParamAsInt(1);
+        boolean compressed = msg.getParamAsBoolean(2);
+        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+        long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+        long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
+        String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
+
+        eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
+        protocol.sendAck();
+        try {
+            resolveSafe(syncFolder, relativePath);
+            protocol.receiveFileAppend(
+                    syncFolder,
+                    relativePath,
+                    size,
+                    compressed,
+                    lastModified,
+                    baseSize,
+                    finalSize,
+                    finalMd5);
+            eventBus.post(new SyncEvent.LogEvent("Append applied: " + relativePath));
+            pendingFileWriteService.markWritten(relativePath);
+            touchHeartbeat();
+            flushSharedTextBetweenOperations();
+        } catch (FileWriteException e) {
+            // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
+            syncing.set(false);
+            onSyncIdle.run();
+            // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
+            // append transfer left it as an enabled "Cancel", but syncing is now false.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            pendingFileWriteService.enqueue(
+                    syncFolder,
+                    e.getRelativePath(),
+                    e.getData(),
+                    e.getLastModified(),
+                    e.getMessage());
+        } catch (IOException e) {
+            syncing.set(false);
+            onSyncIdle.run();
+            // Re-throw: a verification failure aborts/restarts the sync; the file is recompared
+            // against fresh manifests on the next attempt and sent fully if needed.
+            throw e;
+        }
+    }
+
+    /**
+     * Sender-side handler for {@link SyncProtocol#CMD_BASE_STALE}: the receiver rejected a
+     * delta/append because its current file is not the state this side diffed against — a change
+     * the manifest cannot see (e.g. a lone-CR/LF swap with identical size, lastModified and
+     * normalized md5). Record the receiver state named in the message as rejected so both fast
+     * paths skip it until the file visibly changes; without the memo the sender would repeat the
+     * same rejected transfer on every sync. Must not throw: it also runs from the listener thread's
+     * dispatch and from the middle of {@code SyncProtocol#waitForCommand}.
+     */
+    public void handleIncomingBaseStale(SyncProtocol.Message msg) {
+        if (msg.getParams().length < 4) {
+            eventBus.post(new SyncEvent.LogEvent("Ignoring malformed BASE_STALE notification"));
+            return;
+        }
+        String path = msg.getParam(0);
+        long size = msg.getParamAsLong(1);
+        long lastModified = msg.getParamAsLong(2);
+        String md5 = msg.getParam(3);
+        eventBus.post(
+                new SyncEvent.LogEvent(
+                        "Remote rejected stale base for "
+                                + path
+                                + "; fresh data will be exchanged on the next sync"));
+        SignatureCache cache = activeSignatureCache;
+        if (cache == null) {
+            File syncFolder = syncFolderSupplier.get();
+            if (syncFolder == null) {
+                return;
+            }
+            cache = createSignatureCache(syncFolder);
+        }
+        cache.markRejected(path, size, lastModified, md5);
+        cache.flush();
+    }
+
     public void handleSyncComplete() {
         syncing.set(false);
         protocol.resetXmodemInProgress();
@@ -818,10 +997,11 @@ public class SyncCoordinator {
                 flushSharedTextBetweenOperations();
             }
 
-            // Partition regular files: binary delta candidates are sent individually via
-            // CMD_FILE_DELTA after a block-signature exchange; the rest go through the batch
-            // path. Candidates whose delta is not beneficial (or have no receiver signature)
-            // fall back to the batch path so total transferred content is unchanged.
+            // Partition regular files: delta candidates are sent individually via CMD_FILE_DELTA
+            // after a block-signature exchange (or via CMD_FILE_APPEND when the change is a pure
+            // appended tail); the rest go through the batch path. Candidates whose delta is not
+            // beneficial (or have no receiver signature) fall back to the batch path so total
+            // transferred content is unchanged.
             Set<String> deltaCandidatePaths = syncPlan.getDeltaCandidatePaths();
             List<FileChangeDetector.FileInfo> deltaCandidates = new ArrayList<>();
             List<FileChangeDetector.FileInfo> batchFiles = new ArrayList<>();
@@ -833,30 +1013,152 @@ public class SyncCoordinator {
                 }
             }
 
+            // The signature cache backs both fast paths: the append gate skips receiver states
+            // that rejected a previous transfer, and the delta path reuses cached signatures.
+            // Opened once here so handleIncomingBaseStale can share the instance mid-session.
+            SignatureCache signatureCache = null;
+            if (!deltaCandidates.isEmpty()) {
+                signatureCache = createSignatureCache(syncFolder);
+                activeSignatureCache = signatureCache;
+            }
+
+            // Append-only fast path: candidates whose local file is the receiver's file plus a
+            // pure appended tail — verified by hashing the local prefix the same way the remote
+            // manifest does — skip the signature exchange entirely and transfer only the tail.
+            // This is the common shape for actively-written log files. Each candidate is detected
+            // and sent immediately, so at most one tail is in memory at any moment.
+            Iterator<FileChangeDetector.FileInfo> candidateIt = deltaCandidates.iterator();
+            while (candidateIt.hasNext()) {
+                FileChangeDetector.FileInfo fi = candidateIt.next();
+                AppendCandidate append =
+                        detectAppendCandidate(fi, syncPlan, syncFolder, signatureCache);
+                if (append == null) {
+                    continue; // no append shape: the file stays on the signature-delta path
+                }
+                candidateIt.remove();
+                exitSyncIfCancelled();
+                operationIndex++;
+                String path = append.path;
+                long lastModified = append.file.lastModified();
+                long sendStart = System.currentTimeMillis();
+                try {
+                    boolean wasCompressed =
+                            protocol.sendFileAppend(
+                                    path,
+                                    append.tail,
+                                    lastModified,
+                                    append.baseSize,
+                                    append.finalSize,
+                                    append.finalMd5);
+                    long sendMs = System.currentTimeMillis() - sendStart;
+                    String msg =
+                            "Append-only syncing ["
+                                    + operationIndex
+                                    + "/"
+                                    + totalOperationsRef[0]
+                                    + "]: "
+                                    + path
+                                    + " (+"
+                                    + append.tail.length
+                                    + " bytes of "
+                                    + append.finalSize
+                                    + ")";
+                    if (wasCompressed) msg += " (compressed)";
+                    msg += String.format(" [%dms]", sendMs);
+                    eventBus.post(new SyncEvent.LogEvent(msg));
+                    eventBus.post(
+                            new SyncEvent.FileProgressEvent(
+                                    operationIndex, totalOperationsRef[0], path));
+                    savedOpIndex = operationIndex;
+                    touchHeartbeat();
+                    flushSharedTextBetweenOperations();
+                } catch (IOException e) {
+                    // The handshake failed: either the peer never ACKed the command (an older
+                    // peer that does not know FILE_APPEND silently ignores it) or the XMODEM
+                    // phase broke. Re-queue for the batch path: in the former case the batch
+                    // fallback lets this sync still complete; in the latter the link is already
+                    // lost, so the fallback (and the rest of the session) fails too and the
+                    // file is re-evaluated against fresh manifests on the next sync.
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Append fast path failed for "
+                                            + path
+                                            + " ("
+                                            + e.getMessage()
+                                            + "); using full transfer"));
+                    batchFiles.add(append.fileInfo);
+                }
+            }
+
             SignatureSet signatureSet = SignatureSet.empty();
             if (!deltaCandidates.isEmpty()) {
                 exitSyncIfCancelled();
+                // The signature exchange is the dominant serial-link cost of the delta path, so
+                // reuse the signatures cached from a previous sync while the receiver's file is
+                // unchanged (same size, lastModified and md5 as recorded with the cache entry).
+                if (!syncPlan.getExistingRemotePaths().isEmpty()) {
+                    // Only prune when the plan actually carries remote metadata, so a hand-built
+                    // plan cannot wipe the cache for paths it simply does not describe.
+                    signatureCache.prune(syncPlan.getExistingRemotePaths());
+                }
+                Map<String, FileSignatures> cachedSignatures = new HashMap<>();
                 List<String> candidatePaths = new ArrayList<>();
                 for (FileChangeDetector.FileInfo fi : deltaCandidates) {
-                    candidatePaths.add(fi.getPath());
+                    String path = fi.getPath();
+                    FileSignatures cached =
+                            signatureCache.lookup(path, syncPlan.getRemoteFileInfo(path));
+                    if (cached != null) {
+                        cachedSignatures.put(path, cached);
+                    } else {
+                        candidatePaths.add(path);
+                    }
                 }
-                eventBus.post(
-                        new SyncEvent.LogEvent(
-                                "Requesting block signatures for "
-                                        + candidatePaths.size()
-                                        + " binary file(s)..."));
-                try {
-                    signatureSet = protocol.requestDeltaSignatures(candidatePaths);
-                } catch (IOException e) {
-                    // The peer may not support delta sync (older version) or the exchange failed.
-                    // Fall back to full transfer for every candidate so the sync still completes.
-                    signatureSet = SignatureSet.empty();
+                if (!cachedSignatures.isEmpty()) {
                     eventBus.post(
                             new SyncEvent.LogEvent(
-                                    "Delta sync unavailable ("
-                                            + e.getMessage()
-                                            + "); using full transfer"));
+                                    "Using cached block signatures for "
+                                            + cachedSignatures.size()
+                                            + " file(s)"));
                 }
+                List<FileSignatures> merged = new ArrayList<>(cachedSignatures.values());
+                if (!candidatePaths.isEmpty()) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Requesting block signatures for "
+                                            + candidatePaths.size()
+                                            + " file(s)..."));
+                    try {
+                        SignatureSet fetched = protocol.requestDeltaSignatures(candidatePaths);
+                        for (String path : candidatePaths) {
+                            FileSignatures sigs = fetched.get(path);
+                            FileChangeDetector.FileInfo remote = syncPlan.getRemoteFileInfo(path);
+                            if (sigs != null && remote != null) {
+                                try {
+                                    signatureCache.store(path, remote, sigs);
+                                } catch (IOException e) {
+                                    // A failed cache write only costs a future exchange.
+                                }
+                            }
+                        }
+                        for (FileSignatures sigs : fetched.entries()) {
+                            if (!cachedSignatures.containsKey(sigs.getPath())) {
+                                merged.add(sigs);
+                            }
+                        }
+                    } catch (IOException e) {
+                        // The peer may not support delta sync (older version) or the exchange
+                        // failed. Cached signatures (if any) are still usable; every candidate
+                        // without one falls back to full transfer via the per-file null check.
+                        eventBus.post(
+                                new SyncEvent.LogEvent(
+                                        "Signature exchange failed ("
+                                                + e.getMessage()
+                                                + "); full transfer for files without"
+                                                + " cached signatures"));
+                    }
+                }
+                signatureCache.flush();
+                signatureSet = new SignatureSet(merged);
 
                 if (signatureSet.isEmpty()) {
                     // No signatures: send all candidates through the full batch path.
@@ -924,7 +1226,7 @@ public class SyncCoordinator {
                                                 * savedBytes
                                                 / Math.max(1, fullCompressed.getData().length));
                         String msg =
-                                "Delta syncing binary ["
+                                "Delta syncing ["
                                         + operationIndex
                                         + "/"
                                         + totalOperationsRef[0]
@@ -1218,6 +1520,7 @@ public class SyncCoordinator {
         } catch (IOException e) {
             eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
         } finally {
+            activeSignatureCache = null;
             syncing.set(false);
             protocol.resetXmodemInProgress();
             touchHeartbeat();
@@ -1392,7 +1695,7 @@ public class SyncCoordinator {
                 totalRead += read;
             }
         }
-        return totalRead < fileSize ? java.util.Arrays.copyOf(sample, totalRead) : sample;
+        return totalRead < fileSize ? Arrays.copyOf(sample, totalRead) : sample;
     }
 
     /**

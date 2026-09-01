@@ -25,7 +25,7 @@ class DeltaCoverageTest {
     private static final int BLOCK = 64;
 
     private byte[] sigStrong(byte seed) {
-        byte[] b = new byte[16];
+        byte[] b = new byte[BlockSignature.STRONG_HASH_LENGTH];
         java.util.Arrays.fill(b, seed);
         return b;
     }
@@ -35,8 +35,12 @@ class DeltaCoverageTest {
     @Test
     void blockSignature_constructorRejectsInvalidStrongHash() {
         assertThrows(IllegalArgumentException.class, () -> new BlockSignature(0, 0, null));
-        assertThrows(IllegalArgumentException.class, () -> new BlockSignature(0, 0, new byte[5]));
-        assertThrows(IllegalArgumentException.class, () -> new BlockSignature(0, 0, new byte[17]));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new BlockSignature(0, 0, new byte[BlockSignature.STRONG_HASH_LENGTH - 1]));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new BlockSignature(0, 0, new byte[BlockSignature.STRONG_HASH_LENGTH + 1]));
     }
 
     @Test
@@ -80,7 +84,14 @@ class DeltaCoverageTest {
     @Test
     void encode_nonPositiveBlockSizeEmitsAllLiteral() throws IOException {
         FileSignatures sigs =
-                new FileSignatures("x", 0, 1, 100, List.of(new BlockSignature(0, 0, new byte[16])));
+                new FileSignatures(
+                        "x",
+                        0,
+                        1,
+                        100,
+                        List.of(
+                                new BlockSignature(
+                                        0, 0, new byte[BlockSignature.STRONG_HASH_LENGTH])));
         byte[] source = new byte[100];
         byte[] delta = DeltaEncoder.encode(source, sigs);
         // No COPY tokens (TAG_COPY never appears after the 17-byte header). The header carries
@@ -102,7 +113,11 @@ class DeltaCoverageTest {
                         BLOCK,
                         1,
                         BLOCK,
-                        List.of(new BlockSignature(0, actualWeak, new byte[16])));
+                        List.of(
+                                new BlockSignature(
+                                        0,
+                                        actualWeak,
+                                        new byte[BlockSignature.STRONG_HASH_LENGTH])));
         byte[] delta = DeltaEncoder.encode(base, sigs);
         assertTrue(noCopyToken(delta), "no strong match -> delta should be all-literal");
         assertArrayEquals(base, DeltaDecoder.decode(base, delta));
@@ -277,7 +292,7 @@ class DeltaCoverageTest {
     void signatureSet_negativeCountThrows() {
         ByteBuffer b = ByteBuffer.allocate(9);
         b.put(SignatureSetBytes.MAGIC);
-        b.put((byte) 1);
+        b.put((byte) SignatureSet.VERSION);
         b.putInt(-1);
         assertThrows(IOException.class, () -> SignatureSet.fromBytes(b.array()));
     }
@@ -286,7 +301,7 @@ class DeltaCoverageTest {
     void signatureSet_negativeEntryLengthThrows() {
         ByteBuffer b = ByteBuffer.allocate(13);
         b.put(SignatureSetBytes.MAGIC);
-        b.put((byte) 1);
+        b.put((byte) SignatureSet.VERSION);
         b.putInt(1); // count
         b.putInt(-1); // entryLen
         assertThrows(IOException.class, () -> SignatureSet.fromBytes(b.array()));
@@ -319,11 +334,15 @@ class DeltaCoverageTest {
                         2,
                         128,
                         List.of(
-                                new BlockSignature(0, 1, new byte[16]),
-                                new BlockSignature(1, 2, new byte[16])));
+                                new BlockSignature(
+                                        0, 1, new byte[BlockSignature.STRONG_HASH_LENGTH]),
+                                new BlockSignature(
+                                        1, 2, new byte[BlockSignature.STRONG_HASH_LENGTH])));
         // 2 (pathLen) + 5 (path "a.bin") + 4 (blockSize) + 4 (blockCount) + 8 (sourceSize)
-        // + 2 blocks * 20 bytes
-        assertEquals(2 + 5 + 4 + 4 + 8 + 40, fs.encodedLength());
+        // + 2 blocks * (4 weak + 8 strong) bytes
+        assertEquals(
+                2 + 5 + 4 + 4 + 8 + 2 * (4 + BlockSignature.STRONG_HASH_LENGTH),
+                fs.encodedLength());
     }
 
     // ---------- SignatureUtil branches ----------

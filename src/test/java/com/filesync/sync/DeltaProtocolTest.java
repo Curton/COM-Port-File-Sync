@@ -135,6 +135,19 @@ class DeltaProtocolTest {
                 "error must mention verification: " + thrown.getMessage());
         // The base file must be left intact (write happens only after verification).
         assertArrayEquals(base, Files.readAllBytes(existing));
+        // The rejection must notify the sender (naming this receiver state) so it does not
+        // repeat the same rejected delta on every sync.
+        assertTrue(
+                serial.getWrittenLines()
+                        .contains(
+                                "[[SYNC:BASE_STALE:big.bin:"
+                                        + base.length
+                                        + ":"
+                                        + existing.toFile().lastModified()
+                                        + ":"
+                                        + HashUtil.md5Hex(base)
+                                        + "]]"),
+                "expected BASE_STALE notification, got: " + serial.getWrittenLines());
     }
 
     @Test
@@ -257,5 +270,263 @@ class DeltaProtocolTest {
                 thrown.getMessage().contains("Failed to receive file delta"),
                 "error must mention receive failure: " + thrown.getMessage());
         assertFalse(protocol.isXmodemInProgress());
+    }
+
+    // ========== receiveFileAppend (append-only tail transfer) ==========
+
+    /** Concatenate base and tail into the sender's expected full file. */
+    private byte[] concat(byte[] base, byte[] tail) {
+        byte[] full = new byte[base.length + tail.length];
+        System.arraycopy(base, 0, full, 0, base.length);
+        System.arraycopy(tail, 0, full, base.length, tail.length);
+        return full;
+    }
+
+    @Test
+    void receiveFileAppend_appliesTailAndWritesFile() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 20);
+        byte[] tail = randomBytes(30, 21);
+        byte[] full = concat(base, tail);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        protocol.receiveFileAppend(
+                tempDir.toFile(),
+                "app.log",
+                tail.length,
+                false,
+                12345L,
+                base.length,
+                full.length,
+                HashUtil.md5Hex(full));
+
+        assertArrayEquals(full, Files.readAllBytes(existing), "file must be base + tail");
+    }
+
+    @Test
+    void receiveFileAppend_compressedTailRoundTrip() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 22);
+        byte[] tail = "another log line\n".repeat(6).getBytes();
+        byte[] full = concat(base, tail);
+        byte[] compressedTail = CompressionUtil.compress(tail);
+        assertTrue(compressedTail.length <= 128, "compressed tail should fit one XMODEM block");
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(compressedTail));
+
+        protocol.receiveFileAppend(
+                tempDir.toFile(),
+                "app.log",
+                compressedTail.length,
+                true,
+                0L,
+                base.length,
+                full.length,
+                HashUtil.md5Hex(full));
+
+        assertArrayEquals(full, Files.readAllBytes(existing));
+    }
+
+    @Test
+    void receiveFileAppend_md5MismatchThrowsAndDoesNotCorruptFile() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 23);
+        byte[] tail = randomBytes(30, 24);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        // A wrong final MD5 simulates a receiver base that does not byte-match the sender's
+        // prefix (e.g. a CRLF/LF variant): the append must be rejected before any write.
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        tempDir.toFile(),
+                                        "app.log",
+                                        tail.length,
+                                        false,
+                                        0L,
+                                        base.length,
+                                        base.length + tail.length,
+                                        "00000000000000000000000000000000"));
+        assertTrue(
+                thrown.getMessage().contains("verification failed"),
+                "error must mention verification: " + thrown.getMessage());
+        assertArrayEquals(base, Files.readAllBytes(existing), "base file must be left intact");
+        // The rejection must notify the sender (naming this receiver state) so it does not
+        // repeat the same rejected append on every sync.
+        assertTrue(
+                serial.getWrittenLines()
+                        .contains(
+                                "[[SYNC:BASE_STALE:app.log:"
+                                        + base.length
+                                        + ":"
+                                        + existing.toFile().lastModified()
+                                        + ":"
+                                        + HashUtil.md5Hex(base)
+                                        + "]]"),
+                "expected BASE_STALE notification, got: " + serial.getWrittenLines());
+    }
+
+    @Test
+    void receiveFileAppend_baseSizeDriftThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 25);
+        byte[] tail = randomBytes(30, 26);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        // Announce a base size that does not match the on-disk file: the receiver state drifted
+        // since the manifest exchange, so the append must not be applied.
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        tempDir.toFile(),
+                                        "app.log",
+                                        tail.length,
+                                        false,
+                                        0L,
+                                        base.length - 1,
+                                        base.length - 1 + tail.length,
+                                        HashUtil.md5Hex(concat(base, tail))));
+        assertTrue(
+                thrown.getMessage().contains("size drifted"),
+                "error must mention the drift: " + thrown.getMessage());
+        assertArrayEquals(base, Files.readAllBytes(existing));
+    }
+
+    @Test
+    void receiveFileAppend_missingExistingFileThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] tail = randomBytes(30, 27);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        tempDir.toFile(),
+                                        "missing.log",
+                                        tail.length,
+                                        false,
+                                        0L,
+                                        200,
+                                        230,
+                                        "abc"));
+        assertTrue(
+                thrown.getMessage().contains("existing file missing"),
+                "error must mention missing base: " + thrown.getMessage());
+    }
+
+    @Test
+    void receiveFileAppend_finalSizeArithmeticMismatchThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 28);
+        byte[] tail = randomBytes(30, 29);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        tempDir.toFile(),
+                                        "app.log",
+                                        tail.length,
+                                        false,
+                                        0L,
+                                        base.length,
+                                        base.length + tail.length + 1,
+                                        "abc"));
+        assertTrue(
+                thrown.getMessage().contains("Append size mismatch"),
+                "error must mention the size mismatch: " + thrown.getMessage());
+        assertArrayEquals(base, Files.readAllBytes(existing));
+    }
+
+    @Test
+    void receiveFileAppend_oversizedFinalSizeThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 30);
+        byte[] tail = randomBytes(30, 31);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        // A final size beyond the 2 GB in-memory reconstruction limit must be rejected before
+        // the reconstruction buffer is allocated or anything is written.
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        tempDir.toFile(),
+                                        "app.log",
+                                        tail.length,
+                                        false,
+                                        0L,
+                                        base.length,
+                                        Integer.MAX_VALUE + 1L,
+                                        HashUtil.md5Hex(concat(base, tail))));
+        assertTrue(
+                thrown.getMessage().contains("too large"),
+                "error must mention the oversized target: " + thrown.getMessage());
+        assertArrayEquals(base, Files.readAllBytes(existing));
+    }
+
+    @Test
+    void receiveFileAppend_nullFinalMd5SkipsVerification() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] base = randomBytes(200, 30);
+        byte[] tail = randomBytes(30, 31);
+        byte[] full = concat(base, tail);
+
+        Path existing = tempDir.resolve("app.log");
+        Files.write(existing, base);
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+
+        protocol.receiveFileAppend(
+                tempDir.toFile(),
+                "app.log",
+                tail.length,
+                false,
+                0L,
+                base.length,
+                full.length,
+                null);
+        assertArrayEquals(full, Files.readAllBytes(existing));
     }
 }

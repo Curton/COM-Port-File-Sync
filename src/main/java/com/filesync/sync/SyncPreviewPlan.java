@@ -2,8 +2,10 @@ package com.filesync.sync;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Immutable result of a sync pre-check that shows all planned operations. */
@@ -19,6 +21,7 @@ public final class SyncPreviewPlan {
     private final List<ConflictInfo> conflicts;
     private final Set<String> deltaCandidatePaths;
     private final Set<String> existingRemotePaths;
+    private final Map<String, FileChangeDetector.FileInfo> remoteFileInfos;
 
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,
@@ -87,6 +90,35 @@ public final class SyncPreviewPlan {
             List<ConflictInfo> conflicts,
             Set<String> deltaCandidatePaths,
             Set<String> existingRemotePaths) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                deltaCandidatePaths,
+                existingRemotePaths,
+                Collections.emptyMap());
+    }
+
+    /**
+     * Full constructor, carrying the remote manifest's per-file metadata (size, md5, ...) for paths
+     * that exist on the receiver. The transfer phase uses this to detect append-only changes
+     * without re-exchanging manifests.
+     */
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths,
+            Set<String> existingRemotePaths,
+            Map<String, FileChangeDetector.FileInfo> remoteFileInfos) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -107,6 +139,10 @@ public final class SyncPreviewPlan {
                 existingRemotePaths != null
                         ? Collections.unmodifiableSet(new HashSet<>(existingRemotePaths))
                         : Collections.emptySet();
+        this.remoteFileInfos =
+                remoteFileInfos != null
+                        ? Collections.unmodifiableMap(new HashMap<>(remoteFileInfos))
+                        : Collections.emptyMap();
     }
 
     public SyncPreviewPlan createFilteredPlan(
@@ -143,7 +179,8 @@ public final class SyncPreviewPlan {
                 strictSyncMode,
                 conflicts,
                 filteredDeltaCandidates,
-                existingRemotePaths);
+                existingRemotePaths,
+                remoteFileInfos);
     }
 
     /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
@@ -247,8 +284,7 @@ public final class SyncPreviewPlan {
     }
 
     /**
-     * Paths of binary files eligible for rsync-style delta transfer (exist on both sides, large
-     * enough).
+     * Paths of files eligible for rsync-style delta transfer (exist on both sides, large enough).
      */
     public Set<String> getDeltaCandidatePaths() {
         return deltaCandidatePaths;
@@ -257,6 +293,14 @@ public final class SyncPreviewPlan {
     /** Paths that already exist on the remote side; used to tell NEW files from MODIFIED files. */
     public Set<String> getExistingRemotePaths() {
         return existingRemotePaths;
+    }
+
+    /**
+     * Remote manifest metadata (size, md5, lastModified) for a path that exists on the receiver, or
+     * null if the receiver does not have the file.
+     */
+    public FileChangeDetector.FileInfo getRemoteFileInfo(String path) {
+        return remoteFileInfos.get(path);
     }
 
     public boolean hasConflict(String path) {

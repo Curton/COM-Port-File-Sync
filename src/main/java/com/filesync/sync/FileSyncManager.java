@@ -140,6 +140,7 @@ public class FileSyncManager {
                         connectionService::recordMessageActivity);
 
         protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
+        protocol.setBaseStaleHandler(syncCoordinator::handleIncomingBaseStale);
 
         protocol.setProgressListener(
                 new XModemTransfer.TransferProgressListener() {
@@ -938,6 +939,8 @@ public class FileSyncManager {
             case SyncProtocol.CMD_DELTA_SIG_REQ ->
                     syncCoordinator.handleDeltaSigRequest(List.of(msg.getParams()));
             case SyncProtocol.CMD_FILE_DELTA -> syncCoordinator.handleIncomingFileDelta(msg);
+            case SyncProtocol.CMD_FILE_APPEND -> syncCoordinator.handleIncomingFileAppend(msg);
+            case SyncProtocol.CMD_BASE_STALE -> syncCoordinator.handleIncomingBaseStale(msg);
             case SyncProtocol.CMD_BATCH_DATA -> {
                 int expectedSize = msg.getParamAsInt(0);
                 protocol.sendAck();

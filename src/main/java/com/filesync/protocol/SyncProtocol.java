@@ -78,6 +78,8 @@ public class SyncProtocol {
     public static final String CMD_DELTA_SIG_REQ = "DELTA_SIG_REQ";
     public static final String CMD_DELTA_SIG_DATA = "DELTA_SIG_DATA";
     public static final String CMD_FILE_DELTA = "FILE_DELTA";
+    public static final String CMD_FILE_APPEND = "FILE_APPEND";
+    public static final String CMD_BASE_STALE = "BASE_STALE";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -95,6 +97,11 @@ public class SyncProtocol {
     private final XModemTransfer xmodem;
     private int timeoutMs;
     private Runnable messageActivityCallback;
+    // Fired when the peer reports (CMD_BASE_STALE) that a delta or append was rejected because
+    // the receiver's file is not the state the sender diffed against. Wired by FileSyncManager to
+    // the SyncCoordinator, which records the rejection before the notification aborts the
+    // in-flight operation, so the failed transfer is not repeated on every sync.
+    private java.util.function.Consumer<Message> baseStaleHandler;
 
     private static final java.util.Base64.Encoder BASE64_ENCODER = java.util.Base64.getEncoder();
     private static final java.util.Base64.Decoder BASE64_DECODER = java.util.Base64.getDecoder();
@@ -123,6 +130,15 @@ public class SyncProtocol {
      */
     public void setMessageActivityCallback(Runnable callback) {
         this.messageActivityCallback = callback;
+    }
+
+    /**
+     * Set the handler invoked when the peer sends {@link #CMD_BASE_STALE}. The handler must not
+     * throw: it runs in the middle of {@link #waitForCommand}, whose caller then aborts the
+     * in-flight operation with the notification's IOException.
+     */
+    public void setBaseStaleHandler(java.util.function.Consumer<Message> handler) {
+        this.baseStaleHandler = handler;
     }
 
     /** Send a command message */
@@ -455,7 +471,9 @@ public class SyncProtocol {
      *
      * <p>A write failure (e.g. the target is locked) throws {@link FileWriteException} carrying the
      * reconstructed bytes so the caller can queue a deferred retry. An MD5 mismatch or decode error
-     * throws a plain {@link IOException} so the caller can request a full retransfer.
+     * throws a plain {@link IOException} so the caller can request a full retransfer; the MD5
+     * mismatch first sends a {@link #CMD_BASE_STALE} notification so the sender does not repeat the
+     * rejected transfer against the same stale receiver state on every sync.
      *
      * @param baseDir base directory containing the existing file
      * @param relativePath relative path of the file
@@ -509,6 +527,7 @@ public class SyncProtocol {
         // (the receiver's file changed between signature generation and delta application).
         String actualMd5 = HashUtil.md5Hex(reconstructed);
         if (sourceMd5 != null && !sourceMd5.isEmpty() && !sourceMd5.equals(actualMd5)) {
+            sendBaseStale(relativePath, existing);
             throw new IOException(
                     "Delta reconstruction verification failed for "
                             + relativePath
@@ -530,6 +549,259 @@ public class SyncProtocol {
         }
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);
+        }
+    }
+
+    // ---- append-only tail transfer ----
+
+    /**
+     * Sender side: send only the appended tail of a file whose prefix already matches the
+     * receiver's copy (verified through the manifests, up to line-ending normalization). The {@code
+     * baseSize} is the receiver's expected file length before the append; {@code finalSize} and
+     * raw-byte {@code finalMd5} describe the sender's full file and let the receiver verify the
+     * reconstruction before writing.
+     *
+     * <p>Retry contract: identical to {@link #sendFileDelta} — the command/ACK handshake is retried
+     * up to {@code maxAttempts} times; once the XMODEM phase is entered, any failure is terminal
+     * (transfer-cancel releases the receiver from its blocking {@code xmodem.receive()}).
+     *
+     * @return true if the tail was compressed, false otherwise
+     */
+    public boolean sendFileAppend(
+            String relativePath,
+            byte[] tail,
+            long lastModified,
+            long baseSize,
+            long finalSize,
+            String finalMd5)
+            throws IOException {
+        CompressionUtil.CompressedData compressedData =
+                CompressionUtil.compressIfBeneficial(relativePath, tail);
+        boolean wasCompressed = compressedData.isCompressed();
+        long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
+
+        final int maxAttempts = 3;
+        int attemptsUsed = 0;
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attemptsUsed = attempt;
+            boolean xmodemPhase = false;
+            try {
+                sendCommand(
+                        CMD_FILE_APPEND,
+                        relativePath,
+                        String.valueOf(compressedData.getData().length),
+                        String.valueOf(wasCompressed),
+                        String.valueOf(ts),
+                        String.valueOf(baseSize),
+                        String.valueOf(finalSize),
+                        finalMd5);
+                waitForCommand(CMD_ACK);
+
+                xmodemInProgress.set(true);
+                xmodemPhase = true;
+                boolean success;
+                try {
+                    success = xmodem.send(compressedData.getData());
+                } finally {
+                    xmodemInProgress.set(false);
+                }
+                if (success) {
+                    return wasCompressed;
+                }
+            } catch (IOException e) {
+                lastFailure = e;
+            }
+
+            if (xmodemPhase) {
+                // XMODEM-phase failure: the receiver may still be blocked in xmodem.receive(),
+                // so a re-sent command would be swallowed as XMODEM data. Cancel the peer's
+                // receive and stop instead of retrying.
+                try {
+                    sendTransferCancel();
+                } catch (IOException ignored) {
+                }
+                try {
+                    serialPort.clearInputBuffer();
+                } catch (IOException ignored) {
+                }
+                break;
+            }
+
+            // Command/ACK-phase failure: the receiver has not entered xmodem.receive() yet, so
+            // re-sending the command is safe.
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException ignored) {
+            }
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        String detail = xmodem.getLastErrorMessage();
+        if (detail == null || detail.isEmpty()) {
+            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
+        }
+        IOException finalEx =
+                new IOException(
+                        "Failed to send file append for "
+                                + relativePath
+                                + " after "
+                                + attemptsUsed
+                                + " attempt(s) ("
+                                + detail
+                                + ")");
+        if (lastFailure != null) {
+            finalEx.addSuppressed(lastFailure);
+        }
+        try {
+            sendError("File append send failed: " + relativePath);
+        } catch (IOException ignored) {
+        }
+        throw finalEx;
+    }
+
+    /**
+     * Receiver side: receive only the appended tail of a file, verify the existing file still has
+     * the announced {@code baseSize}, concatenate, verify the full content against the sender's raw
+     * {@code finalMd5}, and write the result. The raw-byte verification guards against a prefix
+     * that only matched up to line-ending normalization (e.g. a CRLF/LF variant base), so a
+     * mismatch is rejected before anything is written.
+     *
+     * <p>As with {@link #receiveFileDelta}, a write failure (e.g. locked target) throws {@link
+     * FileWriteException} carrying the reconstructed full bytes for deferred retry; any other
+     * failure throws a plain {@link IOException} so the caller can request a full retransfer. The
+     * MD5 mismatch first sends a {@link #CMD_BASE_STALE} notification so the sender does not repeat
+     * the rejected transfer against the same stale receiver state on every sync. The existing bytes
+     * are streamed straight from disk into the reconstruction buffer, so only one full-size array
+     * is held in memory.
+     *
+     * @param baseDir base directory containing the existing file
+     * @param relativePath relative path of the file
+     * @param expectedSize announced compressed/raw tail length
+     * @param compressed whether the tail payload is GZIP-compressed
+     * @param lastModified sender timestamp to preserve
+     * @param baseSize expected receiver file length before the append
+     * @param finalSize sender's total file length after the append
+     * @param finalMd5 sender's raw MD5 of the full file, for reconstruction verification
+     */
+    public void receiveFileAppend(
+            File baseDir,
+            String relativePath,
+            int expectedSize,
+            boolean compressed,
+            long lastModified,
+            long baseSize,
+            long finalSize,
+            String finalMd5)
+            throws IOException {
+        xmodemInProgress.set(true);
+        byte[] payload;
+        try {
+            payload = xmodem.receive(expectedSize);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+        if (payload == null) {
+            try {
+                serialPort.clearInputBuffer();
+            } catch (IOException ignored) {
+            }
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw new IOException(
+                    "Failed to receive file append for " + relativePath + " (" + detail + ")");
+        }
+        validateReceivedSize("file append", relativePath, expectedSize, payload);
+
+        byte[] tail;
+        if (compressed) {
+            tail = CompressionUtil.decompress(payload);
+            payload = null; // release the compressed copy before building the reconstruction
+        } else {
+            tail = payload;
+        }
+
+        File existing = new File(baseDir, relativePath);
+        if (!existing.exists() || !existing.isFile()) {
+            throw new IOException(
+                    "Cannot apply append: existing file missing on receiver: " + relativePath);
+        }
+        if (existing.length() != baseSize) {
+            throw new IOException(
+                    "Cannot apply append: receiver file size drifted for "
+                            + relativePath
+                            + " (expected "
+                            + baseSize
+                            + ", found "
+                            + existing.length()
+                            + ")");
+        }
+        if (finalSize < 0 || finalSize > Integer.MAX_VALUE) {
+            throw new IOException(
+                    "Append target too large for " + relativePath + ": " + finalSize + " bytes");
+        }
+        if (finalSize != baseSize + tail.length) {
+            throw new IOException(
+                    "Append size mismatch for "
+                            + relativePath
+                            + ": announced "
+                            + finalSize
+                            + ", reconstructed "
+                            + (baseSize + tail.length));
+        }
+
+        // Reconstruct in place: stream the existing bytes straight from disk into the final
+        // buffer, so only one full-size array (plus the tail) is ever held in memory.
+        byte[] reconstructed = new byte[(int) finalSize];
+        long copied = 0;
+        try (FileInputStream fis = new FileInputStream(existing)) {
+            while (copied < baseSize) {
+                int want = (int) Math.min(8192, baseSize - copied);
+                int read = fis.read(reconstructed, (int) copied, want);
+                if (read < 0) {
+                    throw new IOException(
+                            "Cannot apply append: receiver file changed mid-transfer for "
+                                    + relativePath);
+                }
+                copied += read;
+            }
+        }
+        if (existing.length() != baseSize) {
+            throw new IOException(
+                    "Cannot apply append: receiver file changed mid-transfer for " + relativePath);
+        }
+        System.arraycopy(tail, 0, reconstructed, (int) baseSize, tail.length);
+
+        String actualMd5 = HashUtil.md5Hex(reconstructed);
+        if (finalMd5 != null && !finalMd5.isEmpty() && !finalMd5.equals(actualMd5)) {
+            sendBaseStale(relativePath, existing);
+            throw new IOException(
+                    "Append reconstruction verification failed for "
+                            + relativePath
+                            + " (expected "
+                            + finalMd5
+                            + ", got "
+                            + actualMd5
+                            + ")");
+        }
+
+        try (FileOutputStream fos = new FileOutputStream(existing)) {
+            fos.write(reconstructed);
+        } catch (IOException e) {
+            throw new FileWriteException(
+                    relativePath, reconstructed, lastModified, e.getMessage(), e);
+        }
+        if (lastModified > 0) {
+            existing.setLastModified(lastModified);
         }
     }
 
@@ -1420,6 +1692,27 @@ public class SyncProtocol {
         return encodedPayload.length() <= getSharedTextInlineEncodedLimit();
     }
 
+    /**
+     * Best-effort notification that a delta/append was rejected because the local file is not the
+     * state the sender diffed against — a change the manifest cannot see (e.g. a lone-CR/LF swap
+     * with identical size, lastModified and normalized md5). Carries the file's current
+     * manifest-equivalent identity so the sender can pin the rejection to exactly this state and
+     * exchange fresh signatures next sync instead of repeating the rejected transfer.
+     */
+    private void sendBaseStale(String relativePath, File existing) {
+        try {
+            String manifestMd5 = FileChangeDetector.calculateMD5(existing);
+            sendCommand(
+                    CMD_BASE_STALE,
+                    relativePath,
+                    String.valueOf(existing.length()),
+                    String.valueOf(existing.lastModified()),
+                    manifestMd5);
+        } catch (IOException e) {
+            // Best-effort: without the notification the sender simply retries next sync.
+        }
+    }
+
     private void validateReceivedSize(
             String transferType, String targetName, int expectedSize, byte[] actualData)
             throws IOException {
@@ -1487,6 +1780,19 @@ public class SyncProtocol {
                 if (CMD_ERROR.equals(cmd)) {
                     String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
                     throw new IOException("Remote error: " + errMsg);
+                }
+                if (CMD_BASE_STALE.equals(cmd)) {
+                    // The receiver rejected a delta/append against a base that is not its current
+                    // file state. Deliver the notification so the sender can pin the rejection to
+                    // that exact receiver state, then abort the in-flight operation promptly.
+                    if (baseStaleHandler != null) {
+                        baseStaleHandler.accept(msg);
+                    }
+                    String path = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException(
+                            "Remote rejected the transfer base for "
+                                    + path
+                                    + "; fresh data will be exchanged on the next sync");
                 }
                 if (CMD_HEARTBEAT.equals(cmd)) {
                     sendHeartbeatAck();

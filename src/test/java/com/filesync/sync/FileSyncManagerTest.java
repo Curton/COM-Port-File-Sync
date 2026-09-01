@@ -629,6 +629,41 @@ class FileSyncManagerTest {
     }
 
     @Test
+    void incomingBaseStale_isRoutedToCoordinator() throws Exception {
+        File folder = tempDir.resolve("stale").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        fsm.setSyncFolder(folder);
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // A malformed BASE_STALE (missing the md5 param) must be routed to the coordinator,
+            // which logs and ignores it — chosen so the test records no cache file in the real
+            // user-home .filesync directory.
+            serial.feedLine("[[SYNC:BASE_STALE:doc.txt:100:42]]");
+
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.LogEvent le
+                                                            && le.getMessage()
+                                                                    .contains(
+                                                                            "malformed BASE_STALE")),
+                    Duration.ofSeconds(5));
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
     void incomingFileDelta_reconstructsAndWritesFile() throws Exception {
         File folder = tempDir.resolve("delta").toFile();
         folder.mkdirs();
