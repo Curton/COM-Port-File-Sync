@@ -130,8 +130,8 @@ public class ConflictAnalyzer {
     }
 
     /**
-     * Remove conflicts whose receiver-side file is a byte-prefix of the sender's file, returning the
-     * set of exempted paths.
+     * Remove conflicts whose receiver-side file is a byte-prefix of the sender's file, returning
+     * the set of exempted paths.
      *
      * <p>This is the shape of a partially copied file: the receiver holds the sender's first N
      * bytes (e.g. an archive transferred halfway through some outside-the-sync channel, so the
@@ -140,9 +140,9 @@ public class ConflictAnalyzer {
      * delta candidates and forces a full transfer through the conflict dialog. Exempting it lets
      * the file reach the append/delta path, which sends only the missing tail.
      *
-     * <p>The match is verified by hashing the sender's first {@code remoteInfo.getSize()} bytes with
-     * the manifest algorithm ({@link FileChangeDetector#hashFilePrefix}) and comparing against the
-     * receiver's manifest md5. Conflicts without a receiver md5 (fast mode leaves binary files
+     * <p>The match is verified by hashing the sender's first {@code remoteInfo.getSize()} bytes
+     * with the manifest algorithm ({@link FileChangeDetector#hashFilePrefix}) and comparing against
+     * the receiver's manifest md5. Conflicts without a receiver md5 (fast mode leaves binary files
      * unhashed) are never exempted — an unverified exemption could silently overwrite a genuinely
      * receiver-modified file. Text conflicts are also left alone; they keep the merge flow.
      *

@@ -490,7 +490,9 @@ class ConflictAnalyzerTest {
 
     // ========== exemptPrefixShapedConflicts tests ==========
 
-    /** Receiver holds the first 64 bytes of the sender's 96-byte binary file, with a newer mtime. */
+    /**
+     * Receiver holds the first 64 bytes of the sender's 96-byte binary file, with a newer mtime.
+     */
     private List<ConflictInfo> createBinaryPrefixConflict(
             Path localDir, Path remoteDir, byte[] fullContent, int prefixLength)
             throws IOException {
