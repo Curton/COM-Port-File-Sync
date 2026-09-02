@@ -50,6 +50,7 @@ COM Port File Sync enables reliable file transfer between two machines connected
 - **Java 17** or higher
 - **Maven 3.6+** for building
 - A serial connection between two computers (null-modem cable, USB-serial adapters, or virtual COM port software)
+- **Both machines must run the same version.** This project does not maintain compatibility between versions: the wire protocol is free to change from one release to the next, and no handshake negotiates capabilities or falls back to an older dialect. Upgrade both ends together and expect a mismatched pair to fail, not to degrade gracefully.
 
 ## Installation
 
@@ -112,6 +113,8 @@ The Shared Text area allows text sharing between connected machines:
 - Click "Send Text" to send the current text to the other machine
 - Double-click to copy the entire text to clipboard
 - Word-style undo/redo: Ctrl+Z undoes the last change (typing runs, deletions, clipboard overwrites and even incoming remote overwrites each count as one step), Ctrl+Y or Ctrl+Shift+Z redoes it
+
+**Priority during transfers:** a text shared while a file transfer is running no longer waits for the whole transfer to finish. The sending side interleaves it on the idle line between two XMODEM data blocks (inline texts up to a baud-rate-derived budget, ~5 s of wire time), acknowledged by the receiver before the next block, so the transfer itself is unaffected. Oversized texts still ride a full XMODEM transfer and are delivered when the current transfer ends.
 
 ## Architecture
 

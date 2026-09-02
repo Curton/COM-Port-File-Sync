@@ -2,6 +2,7 @@ package com.filesync.serial;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -10,7 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -140,6 +146,385 @@ class XModemTransferTest {
 
         assertNotNull(result);
         assertArrayEquals(payload, result);
+    }
+
+    // ========== between-blocks interleave (shared text) ==========
+
+    private static final byte[] INTERLEAVE_FRAME =
+            "[[SYNC:SHARED_TEXT:123:QUJD]]\n".getBytes(StandardCharsets.UTF_8);
+
+    @Test
+    @Timeout(20)
+    void sendRunsBlockBoundaryHookAndDeliversFrameBetweenBlocks() throws IOException {
+        // 4200 bytes = one 4K block + one 1K block, so the hook runs at two boundaries.
+        // Scripted reads: 'C' handshake, ACK drained by drainExtraHandshakeChars, ACK drained
+        // by block 1's stale-char drain, ACK for block 1, ACK for the interleave frame, ACK
+        // drained by block 2's stale-char drain, ACK for block 2, ACK for the EOT.
+        byte[] payload = new byte[4200];
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] = (byte) (i * 31);
+        }
+        byte[] input = buildInput(XModemTransfer.C, 7);
+        RecordingTestSerialPortManager serialPort = new RecordingTestSerialPortManager(input);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        AtomicInteger hookCalls = new AtomicInteger();
+        transfer.setBlockBoundaryHook(
+                () -> {
+                    if (hookCalls.incrementAndGet() == 1) {
+                        return transfer.sendInterleavedFrame(INTERLEAVE_FRAME)
+                                ? XModemTransfer.InterleaveResult.SENT
+                                : XModemTransfer.InterleaveResult.FAILED;
+                    }
+                    return XModemTransfer.InterleaveResult.NOTHING_PENDING;
+                });
+
+        assertTrue(transfer.send(payload), "the session must complete after the interleave");
+
+        assertEquals(2, hookCalls.get(), "hook runs at every block boundary");
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), INTERLEAVE_FRAME),
+                "interleave frame written exactly once, between the two blocks");
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.EOT}),
+                "EOT must still be sent after the interleaved frame");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendKeepsAskingHookWhenNothingIsPending() throws IOException {
+        byte[] payload = new byte[4200];
+        byte[] input = buildInput(XModemTransfer.C, 6);
+        RecordingTestSerialPortManager serialPort = new RecordingTestSerialPortManager(input);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        AtomicInteger hookCalls = new AtomicInteger();
+        transfer.setBlockBoundaryHook(
+                () -> {
+                    hookCalls.incrementAndGet();
+                    return XModemTransfer.InterleaveResult.NOTHING_PENDING;
+                });
+
+        assertTrue(transfer.send(payload));
+
+        assertEquals(2, hookCalls.get(), "an empty boundary must not disable the hook");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendLatchesHookOffAfterFailedInterleaveAttempt() throws IOException {
+        // A FAILED result must not be re-tried at every remaining boundary, or an
+        // unacknowledged interleave would stall each one for the ACK timeout.
+        byte[] payload = new byte[4200];
+        byte[] input = buildInput(XModemTransfer.C, 6);
+        RecordingTestSerialPortManager serialPort = new RecordingTestSerialPortManager(input);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        AtomicInteger hookCalls = new AtomicInteger();
+        transfer.setBlockBoundaryHook(
+                () -> {
+                    hookCalls.incrementAndGet();
+                    return XModemTransfer.InterleaveResult.FAILED;
+                });
+
+        assertTrue(transfer.send(payload), "a failed interleave must not fail the session");
+
+        assertEquals(1, hookCalls.get(), "FAILED result latches the hook off for the session");
+    }
+
+    @Test
+    void sendInterleavedFrameResendsAfterNakUntilAcknowledged() throws IOException {
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(
+                        new byte[] {XModemTransfer.NAK, XModemTransfer.ACK});
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+        assertEquals(2, countWrites(serialPort.getWrites(), INTERLEAVE_FRAME));
+    }
+
+    @Test
+    void sendInterleavedFrameGivesUpAfterRepeatedUnacknowledgedAttempts() throws IOException {
+        // The port always answers with an immediate garbage byte (EOF read masked to 0xFF),
+        // so all three attempts fail without any real-time waiting.
+        GarbageResponseTestSerialPortManager serialPort =
+                new GarbageResponseTestSerialPortManager();
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertFalse(transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+        assertEquals(
+                3,
+                countWrites(serialPort.getWrites(), INTERLEAVE_FRAME),
+                "the frame is resent once per attempt, then the hook gives up");
+    }
+
+    @Test
+    void sendInterleavedFrameAbortsSessionOnCancel() {
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(new byte[] {XModemTransfer.CAN});
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertThrows(IOException.class, () -> transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+        assertTrue(transfer.wasCancelSignalled(), "a CAN during the interleave wait is a cancel");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveIntoConsumesInterleavedFrameBetweenBlocksAndKeepsSession() throws IOException {
+        byte[] payload = new byte[4200];
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] = (byte) (i * 31);
+        }
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(
+                        buildMultiBlockFrameWithInterleave(payload, INTERLEAVE_FRAME));
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> receivedLines = new ArrayList<>();
+        transfer.setInterleavedFrameHandler(receivedLines::add);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "the interleaved frame must not truncate payload");
+        assertArrayEquals(payload, sink.toByteArray(), "block data must survive the interleave");
+        assertEquals(
+                List.of("[[SYNC:SHARED_TEXT:123:QUJD]]"),
+                receivedLines,
+                "the handler gets the complete framed line");
+        assertEquals(
+                4,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK}),
+                "ACKs: block 1, interleave frame, block 2, EOT");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveIntoToleratesGarbageInterleavedLine() throws IOException {
+        byte[] payload = {'A'};
+        byte[] frame = "[[SYNC:BOGUS]]\n".getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.writeBytes(frame);
+        stream.writeBytes(buildSohFrame(payload));
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(stream.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> receivedLines = new ArrayList<>();
+        transfer.setInterleavedFrameHandler(receivedLines::add);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "garbage between frames must not end the session");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertEquals(List.of("[[SYNC:BOGUS]]"), receivedLines);
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveIntoAcksInterleavedFrameEvenWithoutHandler() throws IOException {
+        byte[] payload = {'A'};
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.writeBytes(INTERLEAVE_FRAME);
+        stream.writeBytes(buildSohFrame(payload));
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(stream.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "no handler installed must not stall the session");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertTrue(
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK}) >= 2,
+                "frame and blocks are acknowledged even with no handler");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveIntoAcksFrameAndCompletesWhenHandlerThrows() throws IOException {
+        // A handler failure must not escape the receive loop: the frame is still ACKed so the
+        // sender does not retry it, and the file session has to complete untouched.
+        byte[] payload = {'A'};
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.writeBytes(INTERLEAVE_FRAME);
+        stream.writeBytes(buildSohFrame(payload));
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(stream.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        transfer.setInterleavedFrameHandler(
+                line -> {
+                    throw new IllegalStateException("handler blew up");
+                });
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "a throwing handler must not abort the session");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertTrue(
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK}) >= 2,
+                "the frame is acknowledged even when the handler throws");
+    }
+
+    /** Build an input of one leading byte followed by {@code ackCount} ACK bytes. */
+    private static byte[] buildInput(byte first, int ackCount) {
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.write(first);
+        for (int i = 0; i < ackCount; i++) {
+            stream.write(XModemTransfer.ACK);
+        }
+        return stream.toByteArray();
+    }
+
+    private static int countWrites(List<byte[]> writes, byte[] expected) {
+        int count = 0;
+        for (byte[] write : writes) {
+            if (Arrays.equals(write, expected)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Like {@link #buildMultiBlockFrame(byte[])} but inserts a raw frame after the first block. */
+    private static byte[] buildMultiBlockFrameWithInterleave(byte[] payload, byte[] frame) {
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        int offset = 0;
+        int blockNumber = 1;
+        while (offset < payload.length) {
+            int remaining = payload.length - offset;
+            int blockSize;
+            byte header;
+            if (remaining >= 4096) {
+                blockSize = 4096;
+                header = XModemTransfer.STX4K;
+            } else if (remaining >= 1024 || remaining > 128) {
+                blockSize = 1024;
+                header = XModemTransfer.STX;
+            } else {
+                blockSize = 128;
+                header = XModemTransfer.SOH;
+            }
+            byte[] block = new byte[blockSize];
+            int toCopy = Math.min(remaining, blockSize);
+            System.arraycopy(payload, offset, block, 0, toCopy);
+            Arrays.fill(block, toCopy, blockSize, (byte) 0x1A);
+
+            int crc = XModemTransfer.calculateCRC16(block);
+            stream.write(header);
+            stream.write(blockNumber & 0xFF);
+            stream.write(255 - (blockNumber & 0xFF));
+            stream.writeBytes(block);
+            stream.write((crc >> 8) & 0xFF);
+            stream.write((crc & 0xFF));
+
+            offset += toCopy;
+            blockNumber++;
+            if (blockNumber == 2) {
+                stream.writeBytes(frame);
+            }
+        }
+        stream.write(XModemTransfer.EOT);
+        return stream.toByteArray();
+    }
+
+    /**
+     * Port manager that records every outbound write so frames and control bytes can be asserted.
+     */
+    private static final class RecordingTestSerialPortManager extends SerialPortManager {
+        private final ByteArrayInputStream inputStream;
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+
+        private RecordingTestSerialPortManager(byte[] input) {
+            this.inputStream = new ByteArrayInputStream(input);
+        }
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return inputStream.available();
+        }
+
+        @Override
+        public int read() throws IOException {
+            return inputStream.read();
+        }
+
+        @Override
+        public byte[] readExact(int length, int timeoutMs) throws IOException {
+            byte[] data = new byte[length];
+            int bytesRead = 0;
+            while (bytesRead < length) {
+                int read = inputStream.read(data, bytesRead, length - bytesRead);
+                if (read < 0) {
+                    throw new IOException(
+                            "Unexpected end of stream while reading " + length + " bytes");
+                }
+                bytesRead += read;
+            }
+            return data;
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
+        }
+
+        @Override
+        public void clearInputBuffer() {
+            // Intentionally ignored in test.
+        }
+    }
+
+    /**
+     * Port manager whose reads always yield an immediate garbage byte (available() reports data,
+     * read() returns EOF which readByteWithTimeout masks to 0xFF), so ACK waits fail instantly
+     * instead of after the full 10 s timeout.
+     */
+    private static final class GarbageResponseTestSerialPortManager extends SerialPortManager {
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return 1;
+        }
+
+        @Override
+        public int read() {
+            return -1;
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
+        }
     }
 
     private static byte[] buildMultiBlockFrame(byte[] payload) {

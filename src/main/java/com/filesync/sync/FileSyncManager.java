@@ -120,6 +120,10 @@ public class FileSyncManager {
         // (negotiation completion runs on the listener thread, which already sends on the serial
         // line for ACKs and the CMD_DIRECTION_CHANGE path, so this is safe here).
         roleNegotiationService.setOnNegotiated(sharedTextService::flushIfIdle);
+        // Between two XMODEM data blocks the sender's line is idle; let a queued shared text
+        // jump the queue there instead of waiting for the whole transfer to finish.
+        protocol.setInterleavableTextSource(sharedTextService);
+        protocol.setInterleavedFrameHandler(this::handleInterleavedFrameMessage);
 
         this.pendingFileWriteService = new PendingFileWriteService(eventBus);
 
@@ -130,7 +134,8 @@ public class FileSyncManager {
                         running::get,
                         connectionAlive::get,
                         syncing::get,
-                        protocol::isXmodemInProgress);
+                        protocol::isXmodemInProgress,
+                        sharedTextService::flushIfIdle);
 
         this.syncCoordinator =
                 new SyncCoordinator(
@@ -386,6 +391,25 @@ public class FileSyncManager {
     /** Send shared text to remote. */
     public void sendSharedText(String text) {
         sharedTextService.queueSharedText(text);
+    }
+
+    /**
+     * Handle a framed command the peer interleaved between the data blocks of a file session we are
+     * receiving. Only inline SHARED_TEXT is dispatched: it is processed entirely from the frame
+     * (decode + timestamp dedupe + UI event, no serial access), while anything else mid-session
+     * would either re-enter the serial stream (e.g. SHARED_TEXT_DATA) or have no meaning there.
+     * Runs on the listener thread, which is parked inside the XMODEM receive.
+     */
+    private void handleInterleavedFrameMessage(SyncProtocol.Message msg) {
+        if (!SyncProtocol.CMD_SHARED_TEXT.equals(msg.getCommand()) || msg.getParams().length != 2) {
+            return;
+        }
+        try {
+            sharedTextService.handleIncomingSharedText(msg.getParamAsLong(0), msg.getParam(1));
+        } catch (IllegalArgumentException e) {
+            // Malformed interleaved frame (e.g. bad timestamp): drop it, the file session
+            // is unaffected and the regular listener loop keeps handling well-formed traffic.
+        }
     }
 
     public void sendDropFile(File file) {

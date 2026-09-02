@@ -45,6 +45,19 @@ public class SyncProtocol {
     // stashed here instead of being silently dropped, and drained by the listener loop.
     private final Queue<Message> stashedMessages = new ConcurrentLinkedQueue<>();
 
+    // True while this side sends shared text itself via XMODEM (sendSharedTextData): the
+    // pending slot still holds that exact text until the transfer succeeds, so the
+    // between-blocks interleave hook must not re-send it inline.
+    private final AtomicBoolean interleaveSuppressed = new AtomicBoolean(false);
+
+    // Narrow view of the queued shared text, wired by FileSyncManager, so a file-transfer
+    // sender can flush one pending text in the gap between two XMODEM data blocks.
+    private InterleavableTextSource interleavableTextSource;
+
+    // Handler for framed commands the peer interleaves between our data blocks; runs on the
+    // transfer thread between blocks, so only cheap, non-serial commands may be dispatched.
+    private java.util.function.Consumer<Message> interleavedFrameHandler;
+
     // Protocol commands
     public static final String CMD_MANIFEST_REQ = "MANIFEST_REQ";
     public static final String CMD_MANIFEST_DATA = "MANIFEST_DATA";
@@ -112,6 +125,8 @@ public class SyncProtocol {
         this.serialPort = serialPort;
         this.xmodem = new XModemTransfer(serialPort);
         this.timeoutMs = DEFAULT_TIMEOUT_MS;
+        this.xmodem.setBlockBoundaryHook(this::flushPendingSharedTextBetweenBlocks);
+        this.xmodem.setInterleavedFrameHandler(this::dispatchInterleavedFrameLine);
     }
 
     public void setProgressListener(XModemTransfer.TransferProgressListener listener) {
@@ -143,15 +158,57 @@ public class SyncProtocol {
         this.baseStaleHandler = handler;
     }
 
+    /** One queued shared text that may be interleaved between file-transfer blocks. */
+    public interface PendingText {
+        long timestamp();
+
+        String text();
+    }
+
+    /**
+     * Narrow view of the pending shared text used by the between-blocks interleave hook. {@link
+     * #peek} must return the exact pending instance so {@link #clearIfCurrent} can CAS-clear that
+     * reference without ever dropping a text that was replaced or not sent.
+     */
+    public interface InterleavableTextSource {
+        /**
+         * @return the current pending text (after checking connection/role readiness), or null
+         */
+        PendingText peek();
+
+        /** Clear the pending text iff it is still the given instance. */
+        boolean clearIfCurrent(PendingText expected);
+    }
+
+    public void setInterleavableTextSource(InterleavableTextSource source) {
+        this.interleavableTextSource = source;
+    }
+
+    /**
+     * Set the handler for framed commands the peer interleaves between the data blocks of an XMODEM
+     * session it is receiving. The handler runs on whichever thread is parked inside the XMODEM
+     * receive loop (the listener thread), so only cheap commands that never touch the serial stream
+     * (inline SHARED_TEXT) may be dispatched; that loop owns the port while the session is open.
+     * Exceptions the handler throws are swallowed so a bad frame cannot abort the file session.
+     */
+    public void setInterleavedFrameHandler(java.util.function.Consumer<Message> handler) {
+        this.interleavedFrameHandler = handler;
+    }
+
     /** Send a command message */
     public synchronized void sendCommand(String command, String... params) throws IOException {
+        serialPort.writeLine(buildCommand(command, params));
+    }
+
+    /** Build the framed wire line for a command (without the trailing newline). */
+    private static String buildCommand(String command, String... params) {
         StringBuilder sb = new StringBuilder();
         sb.append(START_MARKER).append(command);
         for (String param : params) {
             sb.append(SEPARATOR).append(escapeProtocolParam(param));
         }
         sb.append(END_MARKER);
-        serialPort.writeLine(sb.toString());
+        return sb.toString();
     }
 
     /** Receive and parse a command message */
@@ -2069,6 +2126,9 @@ public class SyncProtocol {
         CompressionUtil.CompressedData payload =
                 CompressionUtil.compressIfBeneficial(SHARED_TEXT_TRANSFER_NAME, textBytes);
         xmodemInProgress.set(true);
+        // The pending slot still holds this text until the transfer succeeds; keep the
+        // between-blocks hook from re-sending it inline in parallel.
+        interleaveSuppressed.set(true);
         try {
             sendCommand(
                     CMD_SHARED_TEXT_DATA,
@@ -2087,12 +2147,79 @@ public class SyncProtocol {
                         "Shared text transfer cancelled by receiver");
             }
         } finally {
+            interleaveSuppressed.set(false);
             xmodemInProgress.set(false);
         }
     }
 
     private boolean shouldSendSharedTextInline(String encodedPayload) {
         return encodedPayload.length() <= getSharedTextInlineEncodedLimit();
+    }
+
+    /**
+     * Block-boundary hook: flush one queued shared text inline while the peer's receive loop is
+     * idle between data blocks of the session being sent. Returns {@code FAILED} when the text
+     * cannot be delivered inline (too large, or the receiver did not acknowledge it) so the session
+     * stops asking and the text waits for the regular flush points.
+     */
+    XModemTransfer.InterleaveResult flushPendingSharedTextBetweenBlocks() throws IOException {
+        if (interleaveSuppressed.get() || interleavableTextSource == null) {
+            return XModemTransfer.InterleaveResult.NOTHING_PENDING;
+        }
+        PendingText pending = interleavableTextSource.peek();
+        if (pending == null) {
+            return XModemTransfer.InterleaveResult.NOTHING_PENDING;
+        }
+        if (!sendSharedTextInterleaved(pending.timestamp(), pending.text())) {
+            return XModemTransfer.InterleaveResult.FAILED;
+        }
+        // A newer text may have replaced the pending slot mid-send; the CAS keeps that one queued.
+        interleavableTextSource.clearIfCurrent(pending);
+        return XModemTransfer.InterleaveResult.SENT;
+    }
+
+    /**
+     * Send one shared text as an inline framed command in the gap between two XMODEM data blocks
+     * and wait for the receiver's interleave ACK.
+     *
+     * @return false when the text exceeds the inline budget or the receiver did not acknowledge the
+     *     frame (line noise, a busy receiver, or a session torn down mid-transfer); the file
+     *     session is left untouched either way. Both ends always run the same build, so there is no
+     *     peer-version fallback to consider here.
+     */
+    public boolean sendSharedTextInterleaved(long timestamp, String text) throws IOException {
+        if (text == null) {
+            text = "";
+        }
+        // Base64 never shrinks, so an over-long plain text can skip the encode entirely.
+        if (text.length() > getSharedTextInlineEncodedLimit()) {
+            return false;
+        }
+        String encoded = encodeText(text);
+        if (!shouldSendSharedTextInline(encoded)) {
+            return false;
+        }
+        byte[] frame =
+                (buildCommand(CMD_SHARED_TEXT, String.valueOf(timestamp), encoded) + "\n")
+                        .getBytes(StandardCharsets.UTF_8);
+        return xmodem.sendInterleavedFrame(frame);
+    }
+
+    /**
+     * Adapt a raw interleaved line to the framed-message handler; unparseable lines are ignored.
+     *
+     * <p>Handler failures are contained by the XMODEM receive loop, which still ACKs the frame so
+     * the sender does not retry it and the file session completes: a bad interleaved frame must
+     * only ever cost the frame itself.
+     */
+    private void dispatchInterleavedFrameLine(String line) {
+        if (interleavedFrameHandler == null) {
+            return;
+        }
+        Message message = parseMessage(line);
+        if (message != null) {
+            interleavedFrameHandler.accept(message);
+        }
     }
 
     /**

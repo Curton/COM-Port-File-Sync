@@ -1,9 +1,13 @@
 package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.SyncProtocol.PendingText;
 import com.filesync.serial.SerialPortManager;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -481,6 +485,157 @@ class SharedTextServiceTest {
         service.handleIncomingSharedText(100L, "older but fresh");
 
         assertEquals(List.of("newer", "older but fresh"), receivedText);
+    }
+
+    // ========== between-blocks interleave source ==========
+
+    @Test
+    void peekReturnsPendingTextWhenConnectionIsReady() {
+        SharedTextService service =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true, // transfer busy: queueSharedText must keep the text pending
+                        () -> true);
+
+        service.queueSharedText("interleaved");
+
+        PendingText pending = service.peek();
+        assertNotNull(pending, "a queued text must be visible to the interleave hook");
+        assertEquals("interleaved", pending.text());
+        assertTrue(pending.timestamp() > 0);
+    }
+
+    @Test
+    void peekReturnsNullWhenConnectionIsNotReady() {
+        SharedTextService notRunning =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> false,
+                        () -> true,
+                        () -> false,
+                        () -> true,
+                        () -> true);
+        SharedTextService notConnected =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true);
+        SharedTextService notNegotiated =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true,
+                        () -> false);
+
+        notRunning.queueSharedText("text");
+        notConnected.queueSharedText("text");
+        notNegotiated.queueSharedText("text");
+
+        assertNull(notRunning.peek(), "no interleave while the service is not running");
+        assertNull(notConnected.peek(), "no interleave while disconnected");
+        assertNull(notNegotiated.peek(), "no interleave before role negotiation");
+    }
+
+    @Test
+    void clearIfCurrentClearsExactlyThePeekedTextAndLogs() {
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
+        SharedTextService service =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true, // transfer busy: the text must stay pending until cleared
+                        () -> true);
+
+        service.queueSharedText("in flight");
+        PendingText pending = service.peek();
+
+        assertTrue(service.clearIfCurrent(pending), "the peeked text must be clearable");
+        assertNull(service.peek(), "the pending slot is empty after the clear");
+        assertTrue(
+                logs.contains("Shared text sent (interleaved during transfer)"),
+                "the interleave send should be logged, got: " + logs);
+
+        assertFalse(
+                service.clearIfCurrent(pending), "clearing a stale reference must report false");
+    }
+
+    @Test
+    void clearIfCurrentDoesNotDropAQueuedNewerText() {
+        SharedTextService service =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true, // transfer busy: nothing flushes outside the hook
+                        () -> true);
+
+        service.queueSharedText("older");
+        PendingText inFlight = service.peek();
+        service.queueSharedText("newer"); // replaced the slot while "older" was on the wire
+
+        assertFalse(
+                service.clearIfCurrent(inFlight),
+                "the CAS must not clear a text that was replaced before the clear");
+        PendingText remaining = service.peek();
+        assertNotNull(remaining, "the newer text must stay queued for the next flush point");
+        assertEquals("newer", remaining.text());
+    }
+
+    @Test
+    void clearIfCurrentRejectsAForeignPendingText() {
+        SharedTextService service =
+                new SharedTextService(
+                        new TestSharedTextProtocol(),
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> true, // transfer busy: nothing flushes outside the hook
+                        () -> true);
+
+        service.queueSharedText("kept");
+
+        PendingText foreign =
+                new PendingText() {
+                    @Override
+                    public long timestamp() {
+                        return 1L;
+                    }
+
+                    @Override
+                    public String text() {
+                        return "kept";
+                    }
+                };
+
+        assertFalse(
+                service.clearIfCurrent(foreign),
+                "a foreign PendingText can never be the instance this service handed out");
+        assertNotNull(service.peek(), "the pending text must survive the rejected clear");
     }
 
     private static final class TestSharedTextProtocol extends SyncProtocol {

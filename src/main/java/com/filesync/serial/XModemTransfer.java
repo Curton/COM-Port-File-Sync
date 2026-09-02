@@ -3,7 +3,9 @@ package com.filesync.serial;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.function.Consumer;
 
 /**
  * Implements XMODEM protocol for reliable file transfer over serial port. Uses 4096-byte blocks for
@@ -28,6 +30,15 @@ public class XModemTransfer {
     private static final int MAX_RETRIES = 10;
     private static final int TIMEOUT_MS = 10000;
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
+    private static final int MAX_INTERLEAVE_RETRIES = 3;
+    // The interleave frame is short and the receiver answers as soon as it has consumed the
+    // line, so it gets its own ACK timeout instead of the 10 s block timeout: three full block
+    // timeouts would stall a single block boundary for 30 s on an unresponsive peer.
+    private static final int INTERLEAVE_ACK_TIMEOUT_MS = 2000;
+    // Sanity bound for a frame consumed at the block-header position; real frames stay far
+    // below this (the sender only interleaves inline-budget text).
+    private static final int MAX_INTERLEAVED_FRAME_BYTES = 2 * 1024 * 1024;
+    private static final byte FRAME_START_BYTE = '[';
     private static final byte PADDING = 0x1A; // CTRL-Z for padding
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
     private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
@@ -35,6 +46,8 @@ public class XModemTransfer {
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
+    private BlockBoundaryHook blockBoundaryHook;
+    private Consumer<String> interleavedFrameHandler;
 
     /**
      * Stores the last human-readable error message for diagnostics. Higher level code (e.g.
@@ -60,6 +73,14 @@ public class XModemTransfer {
         this.progressListener = listener;
     }
 
+    public void setBlockBoundaryHook(BlockBoundaryHook hook) {
+        this.blockBoundaryHook = hook;
+    }
+
+    public void setInterleavedFrameHandler(Consumer<String> handler) {
+        this.interleavedFrameHandler = handler;
+    }
+
     /** Send data using XMODEM protocol (supports 4096/1024/128-byte blocks) */
     public boolean send(byte[] data) throws IOException {
         cancelSignalled = false;
@@ -81,6 +102,7 @@ public class XModemTransfer {
         int dataOffset = 0;
         int blockNumber = 1;
         int totalBlocks = estimateTotalBlocks(data.length);
+        boolean interleaveDisabled = false;
 
         while (dataOffset < data.length) {
             int remaining = data.length - dataOffset;
@@ -120,6 +142,16 @@ public class XModemTransfer {
             totalBytesTransferred += bytesToCopy;
             reportProgress(blockNumber, totalBlocks, totalBytesTransferred);
             blockNumber++;
+
+            // Block boundary: the receiver has ACKed and is idle waiting for the next header,
+            // so the line is free. Let higher-priority traffic (e.g. queued shared text)
+            // interleave a short frame here. Once a hook attempt fails, stop trying for the
+            // rest of the session so a rejected interleave cannot stall every remaining block.
+            if (blockBoundaryHook != null && !interleaveDisabled) {
+                if (blockBoundaryHook.sendBetweenBlocks() == InterleaveResult.FAILED) {
+                    interleaveDisabled = true;
+                }
+            }
         }
 
         // Send EOT and wait for ACK
@@ -225,6 +257,16 @@ public class XModemTransfer {
                 cancelSignalled = true;
                 reportCancelled("Transfer cancelled by sender");
                 return -1;
+            }
+
+            if (header == FRAME_START_BYTE) {
+                // A framed control line (e.g. shared text) interleaved by the sender in the
+                // gap between two data blocks: consume it, hand it to the handler, ACK it,
+                // and keep waiting for the next block header without burning a retry.
+                if (consumeInterleavedFrame()) {
+                    serialPort.write(ACK);
+                }
+                continue;
             }
 
             // Determine block size based on header
@@ -432,6 +474,75 @@ public class XModemTransfer {
         return false;
     }
 
+    /**
+     * Send one framed control line in the gap between two data blocks and wait for the receiver's
+     * raw ACK. The receiver consumes the frame at the block-header position of its receive loop and
+     * ACKs it after handling, so the file session continues untouched. Retries resend the whole
+     * frame; duplicate delivery is harmless because interleaved payloads carry their own dedupe key
+     * (e.g. the shared-text timestamp). A CAN response aborts the send session the same way a
+     * cancel during a block wait does.
+     *
+     * @return true if the frame was acknowledged, false after {@link #MAX_INTERLEAVE_RETRIES}
+     *     unacknowledged attempts (the caller should let the file session continue)
+     */
+    public boolean sendInterleavedFrame(byte[] frame) throws IOException {
+        for (int attempt = 0; attempt < MAX_INTERLEAVE_RETRIES; attempt++) {
+            serialPort.write(frame);
+            int response = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
+            if (response == ACK) {
+                return true;
+            }
+            if (response == CAN) {
+                cancelSignalled = true;
+                throw new IOException("Transfer cancelled by receiver");
+            }
+            // NAK, stale handshake char, timeout, or a frame the receiver could not parse.
+        }
+        return false;
+    }
+
+    /**
+     * Read the rest of an interleaved frame line — the leading {@code '['} was already consumed as
+     * the block-header byte — and hand the complete line to the handler.
+     *
+     * <p>A handler failure is swallowed: this runs inside the receive loop, so letting it escape
+     * would skip the frame's ACK (making the sender retry or abandon the interleave) and abort the
+     * file session. A bad interleaved frame must only ever cost the frame itself.
+     *
+     * @return false when the line is truncated or implausibly long, leaving the frame
+     *     unacknowledged so the sender resends or gives up
+     */
+    private boolean consumeInterleavedFrame() throws IOException {
+        ByteArrayOutputStream lineBytes = new ByteArrayOutputStream();
+        while (true) {
+            int b = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
+            if (b == -1) {
+                return false;
+            }
+            if (b == '\n') {
+                break;
+            }
+            if (b == '\r') {
+                continue;
+            }
+            lineBytes.write(b);
+            if (lineBytes.size() > MAX_INTERLEAVED_FRAME_BYTES) {
+                return false;
+            }
+        }
+        if (interleavedFrameHandler != null) {
+            String line =
+                    ((char) (FRAME_START_BYTE & 0xFF))
+                            + lineBytes.toString(StandardCharsets.UTF_8.name());
+            try {
+                interleavedFrameHandler.accept(line);
+            } catch (RuntimeException e) {
+                // Contained on purpose: the frame is still ACKed and the session continues.
+            }
+        }
+        return true;
+    }
+
     public void sendCancelSignal() throws IOException {
         sendCancel();
     }
@@ -594,6 +705,28 @@ public class XModemTransfer {
      */
     public boolean wasCancelSignalled() {
         return cancelSignalled;
+    }
+
+    /** Outcome of a between-blocks interleave attempt. */
+    public enum InterleaveResult {
+        /** No interleave-eligible payload was pending; later boundaries should keep asking. */
+        NOTHING_PENDING,
+        /** A frame was sent and acknowledged by the receiver. */
+        SENT,
+        /**
+         * A pending payload existed but could not be delivered inline; the hook should not be asked
+         * again until the next session, and the payload waits for the regular flush points.
+         */
+        FAILED
+    }
+
+    /**
+     * Hook invoked between two data blocks of a send session, while the receiver is idle waiting
+     * for the next block header. Lets higher layers interleave a short higher-priority frame (e.g.
+     * a queued shared text) on the otherwise idle line.
+     */
+    public interface BlockBoundaryHook {
+        InterleaveResult sendBetweenBlocks() throws IOException;
     }
 
     /** Progress listener interface for transfer status updates */

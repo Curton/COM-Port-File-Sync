@@ -27,6 +27,9 @@ public class FileDropService {
     private final BooleanSupplier connectionAliveSupplier;
     private final BooleanSupplier syncingSupplier;
     private final BooleanSupplier transferBusySupplier;
+    // Drop transfers have no sync boundary to flush at, so a shared text queued while a drop
+    // transfer ran would otherwise wait for an unrelated trigger (next sync or next queue).
+    private final Runnable sharedTextFlushCallback;
     private final AtomicBoolean transferInProgress = new AtomicBoolean(false);
 
     public FileDropService(
@@ -35,13 +38,15 @@ public class FileDropService {
             BooleanSupplier runningSupplier,
             BooleanSupplier connectionAliveSupplier,
             BooleanSupplier syncingSupplier,
-            BooleanSupplier transferBusySupplier) {
+            BooleanSupplier transferBusySupplier,
+            Runnable sharedTextFlushCallback) {
         this.protocol = protocol;
         this.eventBus = eventBus;
         this.runningSupplier = runningSupplier;
         this.connectionAliveSupplier = connectionAliveSupplier;
         this.syncingSupplier = syncingSupplier;
         this.transferBusySupplier = transferBusySupplier;
+        this.sharedTextFlushCallback = sharedTextFlushCallback;
     }
 
     public void sendDropFile(File file) {
@@ -85,6 +90,9 @@ public class FileDropService {
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
+            if (sharedTextFlushCallback != null) {
+                sharedTextFlushCallback.run();
+            }
         }
     }
 
@@ -163,6 +171,9 @@ public class FileDropService {
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
+            if (sharedTextFlushCallback != null) {
+                sharedTextFlushCallback.run();
+            }
         }
     }
 

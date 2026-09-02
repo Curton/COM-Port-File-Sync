@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 /** Handles shared text send/receive with back-pressure during transfers. */
-public class SharedTextService {
+public class SharedTextService implements SyncProtocol.InterleavableTextSource {
 
     private final SyncProtocol protocol;
     private final SyncEventBus eventBus;
@@ -78,8 +78,7 @@ public class SharedTextService {
             }
             if (transferBusySupplier.getAsBoolean()) {
                 eventBus.post(
-                        new SyncEvent.LogEvent(
-                                "Shared text queued - will send when transfer finishes"));
+                        new SyncEvent.LogEvent("Shared text queued - will send in transfer gaps"));
                 return;
             }
             try {
@@ -149,6 +148,39 @@ public class SharedTextService {
         flushIfIdle();
     }
 
+    /**
+     * Current pending text for the between-blocks interleave hook. Readiness checks mirror {@link
+     * #flushIfIdle(boolean)} minus the sync/transfer gates: the hook only runs while this side is
+     * inside a transfer, which implies connected and role-negotiated in practice, but the checks
+     * keep the hook from sending into a half-torn-down session.
+     */
+    @Override
+    public SyncProtocol.PendingText peek() {
+        if (!runningSupplier.getAsBoolean() || !connectionAliveSupplier.getAsBoolean()) {
+            return null;
+        }
+        if (!roleNegotiatedSupplier.getAsBoolean()) {
+            return null;
+        }
+        return pendingSharedText.get();
+    }
+
+    @Override
+    public boolean clearIfCurrent(SyncProtocol.PendingText expected) {
+        // PendingText is a public interface: a foreign implementation can never be the instance
+        // this service handed out, so it is rejected instead of blowing up on the cast.
+        if (!(expected instanceof SharedTextPayload payload)) {
+            return false;
+        }
+        // The CAS needs the exact instance handed out by peek(): a text queued while the
+        // interleave frame was on the wire must stay pending for the next flush point.
+        if (pendingSharedText.compareAndSet(payload, null)) {
+            eventBus.post(new SyncEvent.LogEvent("Shared text sent (interleaved during transfer)"));
+            return true;
+        }
+        return false;
+    }
+
     public void clearPendingSharedText() {
         pendingSharedText.set(null);
         // Reset the high-water mark so a reconnected session does not silently reject
@@ -186,5 +218,6 @@ public class SharedTextService {
         return Objects.requireNonNullElse(text, "");
     }
 
-    private record SharedTextPayload(long timestamp, String text) {}
+    private record SharedTextPayload(long timestamp, String text)
+            implements SyncProtocol.PendingText {}
 }
