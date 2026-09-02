@@ -58,6 +58,7 @@ final class SyncPreviewRow {
             case TRANSFER_FILE -> "Transfer File";
             case NEW -> "New";
             case MODIFIED -> "Modified";
+            case APPEND -> "Append";
             case CREATE_DIR -> "Create Dir";
             case DELETE_FILE -> "Delete File";
             case DELETE_DIR -> "Delete Dir";

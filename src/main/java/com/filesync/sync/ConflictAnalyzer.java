@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -125,6 +127,76 @@ public class ConflictAnalyzer {
                     return false;
                 });
         return conflicts;
+    }
+
+    /**
+     * Remove conflicts whose receiver-side file is a byte-prefix of the sender's file, returning the
+     * set of exempted paths.
+     *
+     * <p>This is the shape of a partially copied file: the receiver holds the sender's first N
+     * bytes (e.g. an archive transferred halfway through some outside-the-sync channel, so the
+     * copy's mtime is newer than the sender's). Such a file is not receiver-modified content, but
+     * the md5/mtime manifests alone classify it as a binary conflict, which excludes it from the
+     * delta candidates and forces a full transfer through the conflict dialog. Exempting it lets
+     * the file reach the append/delta path, which sends only the missing tail.
+     *
+     * <p>The match is verified by hashing the sender's first {@code remoteInfo.getSize()} bytes with
+     * the manifest algorithm ({@link FileChangeDetector#hashFilePrefix}) and comparing against the
+     * receiver's manifest md5. Conflicts without a receiver md5 (fast mode leaves binary files
+     * unhashed) are never exempted — an unverified exemption could silently overwrite a genuinely
+     * receiver-modified file. Text conflicts are also left alone; they keep the merge flow.
+     *
+     * <p>Mutates the given list in place (like {@link #filterTrivialConflicts}).
+     *
+     * @param conflicts conflicts to filter, as returned by {@link #findConflicts}
+     * @param localFolder the sender's sync folder, used to resolve conflict paths to files
+     * @return paths that were exempted from the conflict path
+     */
+    public static Set<String> exemptPrefixShapedConflicts(
+            List<ConflictInfo> conflicts, File localFolder) {
+        Set<String> exempted = new LinkedHashSet<>();
+        if (conflicts == null || conflicts.isEmpty()) {
+            return exempted;
+        }
+        Iterator<ConflictInfo> iterator = conflicts.iterator();
+        while (iterator.hasNext()) {
+            ConflictInfo conflict = iterator.next();
+            if (!conflict.isBinary()) {
+                continue;
+            }
+            FileChangeDetector.FileInfo localInfo = conflict.getLocalInfo();
+            FileChangeDetector.FileInfo remoteInfo = conflict.getRemoteInfo();
+            if (localInfo == null || remoteInfo == null) {
+                continue;
+            }
+            long baseSize = remoteInfo.getSize();
+            String remoteMd5 = remoteInfo.getMd5();
+            if (baseSize <= 0 || baseSize >= localInfo.getSize()) {
+                // The receiver's copy must be a strictly shorter, non-empty prefix candidate.
+                continue;
+            }
+            if (remoteMd5 == null || remoteMd5.isEmpty()) {
+                continue;
+            }
+            File localFile = new File(localFolder, conflict.getPath());
+            if (!localFile.isFile()) {
+                continue;
+            }
+            try {
+                String prefixMd5 =
+                        FileChangeDetector.hashFilePrefix(localFile, baseSize).manifestMd5();
+                if (!remoteMd5.equals(prefixMd5)) {
+                    continue; // not a prefix: a genuine receiver modification
+                }
+            } catch (IOException e) {
+                // Unreadable or the on-disk file is shorter than the announced prefix: keep the
+                // conflict rather than guess.
+                continue;
+            }
+            iterator.remove();
+            exempted.add(conflict.getPath());
+        }
+        return exempted;
     }
 
     /**

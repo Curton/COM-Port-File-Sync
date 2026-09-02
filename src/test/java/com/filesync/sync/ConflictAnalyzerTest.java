@@ -12,7 +12,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -484,5 +486,189 @@ class ConflictAnalyzerTest {
 
         // Content loaded on first access
         assertEquals("local version", conflicts.get(0).getLocalContentAsString());
+    }
+
+    // ========== exemptPrefixShapedConflicts tests ==========
+
+    /** Receiver holds the first 64 bytes of the sender's 96-byte binary file, with a newer mtime. */
+    private List<ConflictInfo> createBinaryPrefixConflict(
+            Path localDir, Path remoteDir, byte[] fullContent, int prefixLength)
+            throws IOException {
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+
+        byte[] prefix = Arrays.copyOf(fullContent, prefixLength);
+        Path localFile = localDir.resolve("archive.gz");
+        Path remoteFile = remoteDir.resolve("archive.gz");
+        Files.write(localFile, fullContent);
+        Files.write(remoteFile, prefix);
+        // Receiver's copy is newer (e.g. an outside-the-sync copy made after the sender's file)
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
+
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        return ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+    }
+
+    @Test
+    void exemptPrefixShapedConflicts_exemptsVerifiedPrefix(@TempDir Path tempDir)
+            throws IOException {
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        // Binary-looking content so md5 is raw bytes on both sides
+        byte[] fullContent = new byte[96];
+        for (int i = 0; i < fullContent.length; i++) {
+            fullContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+        }
+        List<ConflictInfo> conflicts =
+                createBinaryPrefixConflict(localDir, remoteDir, fullContent, 64);
+        assertEquals(1, conflicts.size(), "prefix copy must be classified as a conflict first");
+        assertTrue(conflicts.get(0).isBinary());
+
+        Set<String> exempted =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
+
+        assertTrue(conflicts.isEmpty(), "verified prefix must be exempted from the conflict path");
+        assertEquals(1, exempted.size());
+        assertTrue(exempted.contains("archive.gz"));
+    }
+
+    @Test
+    void exemptPrefixShapedConflicts_keepsNonPrefixConflict(@TempDir Path tempDir)
+            throws IOException {
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        // Same sizes, but the receiver's bytes differ inside the prefix: a genuine modification
+        byte[] localContent = new byte[96];
+        byte[] remoteContent = new byte[96];
+        for (int i = 0; i < localContent.length; i++) {
+            localContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+            remoteContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x61 + (i % 26));
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Path localFile = localDir.resolve("archive.gz");
+        Path remoteFile = remoteDir.resolve("archive.gz");
+        Files.write(localFile, localContent);
+        Files.write(remoteFile, remoteContent);
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        assertEquals(1, conflicts.size());
+
+        Set<String> exempted =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
+
+        assertEquals(1, conflicts.size(), "non-prefix conflict must be kept");
+        assertTrue(exempted.isEmpty());
+    }
+
+    @Test
+    void exemptPrefixShapedConflicts_keepsConflictWithoutReceiverMd5(@TempDir Path tempDir)
+            throws IOException {
+        // Fast mode leaves binary files unhashed: without a receiver md5 the prefix cannot be
+        // verified, so the conflict must stay.
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] fullContent = new byte[96];
+        byte[] prefix = new byte[64];
+        for (int i = 0; i < fullContent.length; i++) {
+            fullContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+        }
+        System.arraycopy(fullContent, 0, prefix, 0, prefix.length);
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Path localFile = localDir.resolve("archive.gz");
+        Path remoteFile = remoteDir.resolve("archive.gz");
+        Files.write(localFile, fullContent);
+        Files.write(remoteFile, prefix);
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        assertEquals(1, conflicts.size());
+        assertNull(conflicts.get(0).getRemoteInfo().getMd5(), "fast mode: no binary md5");
+
+        Set<String> exempted =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
+
+        assertEquals(1, conflicts.size(), "unverifiable conflict must be kept");
+        assertTrue(exempted.isEmpty());
+    }
+
+    @Test
+    void exemptPrefixShapedConflicts_keepsTextConflicts(@TempDir Path tempDir) throws IOException {
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        // Receiver holds a textual prefix, but text conflicts keep the merge flow
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Path localFile = localDir.resolve("notes.txt");
+        Path remoteFile = remoteDir.resolve("notes.txt");
+        Files.writeString(localFile, "line1\nline2\nline3\n");
+        Files.writeString(remoteFile, "line1\nline2\n");
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        assertEquals(1, conflicts.size());
+
+        Set<String> exempted =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
+
+        assertEquals(1, conflicts.size(), "text conflicts are never exempted");
+        assertTrue(exempted.isEmpty());
+    }
+
+    @Test
+    void exemptPrefixShapedConflicts_keepsEqualOrEmptyReceiverFiles(@TempDir Path tempDir)
+            throws IOException {
+        // Receiver file same size as sender's: not an append shape
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] localContent = new byte[96];
+        byte[] remoteContent = new byte[96];
+        for (int i = 0; i < localContent.length; i++) {
+            localContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+            remoteContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x61 + (i % 26));
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Path localFile = localDir.resolve("archive.gz");
+        Path remoteFile = remoteDir.resolve("archive.gz");
+        Files.write(localFile, localContent);
+        Files.write(remoteFile, remoteContent);
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        assertEquals(1, conflicts.size());
+
+        Set<String> exempted =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
+
+        assertEquals(1, conflicts.size(), "equal-size receiver file is not a prefix shape");
+        assertTrue(exempted.isEmpty());
     }
 }

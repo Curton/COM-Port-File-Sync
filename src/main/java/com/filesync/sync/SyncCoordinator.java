@@ -277,6 +277,20 @@ public class SyncCoordinator {
                             "Detected " + conflicts.size() + " potential conflict(s)"));
         }
 
+        // A receiver file that is a byte-prefix of the sender's (e.g. an archive copied in halfway
+        // through an outside-the-sync transfer, so its copy mtime reads as "receiver modified") is
+        // not a conflict. Exempt it from the conflict path so it reaches the append/delta machinery
+        // and only the missing tail is transferred instead of the full file.
+        Set<String> appendResumablePaths =
+                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, syncFolder);
+        if (!appendResumablePaths.isEmpty()) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            appendResumablePaths.size()
+                                    + " conflicted file(s) match a receiver-side prefix;"
+                                    + " transferring only the missing tail"));
+        }
+
         // Identify delta candidates: files present on both sides that differ, are large enough,
         // and are not in conflict. Content type is not filtered — block matching is
         // content-agnostic, and append-only logs in particular benefit from it.
@@ -298,6 +312,7 @@ public class SyncCoordinator {
                 strictMode,
                 conflicts,
                 deltaCandidatePaths,
+                appendResumablePaths,
                 new HashSet<>(remoteManifest.getFiles().keySet()),
                 remoteManifest.getFiles());
     }

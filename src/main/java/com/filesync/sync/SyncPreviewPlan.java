@@ -20,6 +20,7 @@ public final class SyncPreviewPlan {
     private final int totalOperations;
     private final List<ConflictInfo> conflicts;
     private final Set<String> deltaCandidatePaths;
+    private final Set<String> appendResumablePaths;
     private final Set<String> existingRemotePaths;
     private final Map<String, FileChangeDetector.FileInfo> remoteFileInfos;
 
@@ -119,6 +120,37 @@ public final class SyncPreviewPlan {
             Set<String> deltaCandidatePaths,
             Set<String> existingRemotePaths,
             Map<String, FileChangeDetector.FileInfo> remoteFileInfos) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                deltaCandidatePaths,
+                Collections.emptySet(),
+                existingRemotePaths,
+                remoteFileInfos);
+    }
+
+    /**
+     * Full constructor including {@code appendResumablePaths}: binary conflicts that were exempted
+     * because the receiver's file is a verified byte-prefix of the sender's (a partially copied
+     * file). The preview labels these rows as APPEND instead of MODIFIED.
+     */
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths,
+            Set<String> appendResumablePaths,
+            Set<String> existingRemotePaths,
+            Map<String, FileChangeDetector.FileInfo> remoteFileInfos) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -134,6 +166,10 @@ public final class SyncPreviewPlan {
         this.deltaCandidatePaths =
                 deltaCandidatePaths != null
                         ? Collections.unmodifiableSet(new HashSet<>(deltaCandidatePaths))
+                        : Collections.emptySet();
+        this.appendResumablePaths =
+                appendResumablePaths != null
+                        ? Collections.unmodifiableSet(new HashSet<>(appendResumablePaths))
                         : Collections.emptySet();
         this.existingRemotePaths =
                 existingRemotePaths != null
@@ -169,6 +205,7 @@ public final class SyncPreviewPlan {
                         .sum();
 
         Set<String> filteredDeltaCandidates = filterDeltaCandidates(filteredFilesToTransfer);
+        Set<String> filteredAppendResumable = filterAppendResumable(filteredFilesToTransfer);
 
         return new SyncPreviewPlan(
                 filteredFilesToTransfer,
@@ -179,6 +216,7 @@ public final class SyncPreviewPlan {
                 strictSyncMode,
                 conflicts,
                 filteredDeltaCandidates,
+                filteredAppendResumable,
                 existingRemotePaths,
                 remoteFileInfos);
     }
@@ -191,6 +229,20 @@ public final class SyncPreviewPlan {
         Set<String> result = new HashSet<>();
         for (FileChangeDetector.FileInfo fi : filteredFiles) {
             if (deltaCandidatePaths.contains(fi.getPath())) {
+                result.add(fi.getPath());
+            }
+        }
+        return result;
+    }
+
+    /** Exempted prefix conflicts that survived the selection filter. */
+    private Set<String> filterAppendResumable(List<FileChangeDetector.FileInfo> filteredFiles) {
+        if (appendResumablePaths.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<String> result = new HashSet<>();
+        for (FileChangeDetector.FileInfo fi : filteredFiles) {
+            if (appendResumablePaths.contains(fi.getPath())) {
                 result.add(fi.getPath());
             }
         }
@@ -288,6 +340,14 @@ public final class SyncPreviewPlan {
      */
     public Set<String> getDeltaCandidatePaths() {
         return deltaCandidatePaths;
+    }
+
+    /**
+     * Binary conflicts exempted from the conflict path because the receiver's file verified as a
+     * byte-prefix of the sender's; the transfer phase should send only the missing tail.
+     */
+    public Set<String> getAppendResumablePaths() {
+        return appendResumablePaths;
     }
 
     /** Paths that already exist on the remote side; used to tell NEW files from MODIFIED files. */

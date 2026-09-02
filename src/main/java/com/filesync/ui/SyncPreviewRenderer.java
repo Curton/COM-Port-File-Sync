@@ -320,6 +320,7 @@ public class SyncPreviewRenderer {
                     case CONFLICT -> new Color(200, 0, 0);
                     case NEW -> new Color(0, 128, 0);
                     case MODIFIED -> new Color(0, 0, 180);
+                    case APPEND -> new Color(0, 128, 128);
                     default -> null;
                 };
             }
@@ -366,12 +367,17 @@ public class SyncPreviewRenderer {
 
         for (FileChangeDetector.FileInfo fileInfo : syncPreview.getFilesToTransfer()) {
             ConflictInfo conflict = syncPreview.getConflict(fileInfo.getPath());
-            SyncPreviewOperationType type =
-                    conflict != null
-                            ? SyncPreviewOperationType.CONFLICT
-                            : (syncPreview.getExistingRemotePaths().contains(fileInfo.getPath())
-                                    ? SyncPreviewOperationType.MODIFIED
-                                    : SyncPreviewOperationType.NEW);
+            SyncPreviewOperationType type;
+            if (conflict != null) {
+                type = SyncPreviewOperationType.CONFLICT;
+            } else if (syncPreview.getAppendResumablePaths().contains(fileInfo.getPath())) {
+                // Receiver holds a verified byte-prefix: only the missing tail will be sent.
+                type = SyncPreviewOperationType.APPEND;
+            } else if (syncPreview.getExistingRemotePaths().contains(fileInfo.getPath())) {
+                type = SyncPreviewOperationType.MODIFIED;
+            } else {
+                type = SyncPreviewOperationType.NEW;
+            }
             rows.add(
                     new SyncPreviewRow(
                             type,
@@ -441,7 +447,7 @@ public class SyncPreviewRenderer {
                 continue;
             }
             switch (row.getOperationType()) {
-                case CONFLICT, TRANSFER_FILE, NEW, MODIFIED ->
+                case CONFLICT, TRANSFER_FILE, NEW, MODIFIED, APPEND ->
                         selectedTransferFiles.add(row.getPath());
                 case CREATE_DIR -> selectedCreateDirs.add(row.getPath());
                 case DELETE_FILE -> selectedDeleteFiles.add(row.getPath());

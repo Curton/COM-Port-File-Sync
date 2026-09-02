@@ -4,6 +4,7 @@ public enum SyncPreviewOperationType {
     TRANSFER_FILE,
     NEW,
     MODIFIED,
+    APPEND,
     CONFLICT,
     CREATE_DIR,
     DELETE_FILE,
