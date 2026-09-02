@@ -378,12 +378,24 @@ public class SyncPreviewRenderer {
             } else {
                 type = SyncPreviewOperationType.NEW;
             }
+            long displaySize = fileInfo.getSize();
+            if (type == SyncPreviewOperationType.APPEND) {
+                FileChangeDetector.FileInfo remoteInfo =
+                        syncPreview.getRemoteFileInfo(fileInfo.getPath());
+                if (remoteInfo != null
+                        && remoteInfo.getSize() >= 0
+                        && displaySize > remoteInfo.getSize()) {
+                    // Show only the missing tail so the selected-bytes summary matches what the
+                    // sync will actually transfer.
+                    displaySize -= remoteInfo.getSize();
+                }
+            }
             rows.add(
                     new SyncPreviewRow(
                             type,
                             fileInfo.getPath(),
-                            UiFormatting.formatBytes(fileInfo.getSize()),
-                            fileInfo.getSize(),
+                            UiFormatting.formatBytes(displaySize),
+                            displaySize,
                             conflict));
         }
 

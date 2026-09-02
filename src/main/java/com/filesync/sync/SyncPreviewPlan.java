@@ -135,9 +135,11 @@ public final class SyncPreviewPlan {
     }
 
     /**
-     * Full constructor including {@code appendResumablePaths}: binary conflicts that were exempted
-     * because the receiver's file is a verified byte-prefix of the sender's (a partially copied
-     * file). The preview labels these rows as APPEND instead of MODIFIED.
+     * Full constructor including {@code appendResumablePaths}: paths whose receiver copy is a
+     * verified byte-prefix of the sender's file, so only the missing tail will be transferred —
+     * binary conflicts exempted from the conflict path (a partially copied file) and delta
+     * candidates verified as pure appends (e.g. an append resumed after an interruption). The
+     * preview labels these rows as APPEND instead of MODIFIED.
      */
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,

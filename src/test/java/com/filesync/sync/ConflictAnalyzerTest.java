@@ -673,4 +673,108 @@ class ConflictAnalyzerTest {
         assertEquals(1, conflicts.size(), "equal-size receiver file is not a prefix shape");
         assertTrue(exempted.isEmpty());
     }
+
+    // ========== findPrefixShapedDeltaCandidates tests ==========
+
+    @Test
+    void findPrefixShapedDeltaCandidates_reportsVerifiedAppend(@TempDir Path tempDir)
+            throws IOException {
+        // The receiver's copy is the first 64 bytes of the sender's 96-byte file: a pure append
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] fullContent = new byte[96];
+        for (int i = 0; i < fullContent.length; i++) {
+            fullContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Files.write(localDir.resolve("archive.gz"), fullContent);
+        Files.write(remoteDir.resolve("archive.gz"), Arrays.copyOf(fullContent, 64));
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        Set<String> appendShaped =
+                ConflictAnalyzer.findPrefixShapedDeltaCandidates(
+                        Set.of("archive.gz", "absent.bin"), remoteManifest, localDir.toFile());
+
+        assertEquals(Set.of("archive.gz"), appendShaped);
+    }
+
+    @Test
+    void findPrefixShapedDeltaCandidates_rejectsMidFileEdit(@TempDir Path tempDir)
+            throws IOException {
+        // The receiver's bytes differ inside the prefix: a genuine modification, not a tail
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] localContent = new byte[96];
+        byte[] remoteContent = new byte[64];
+        for (int i = 0; i < localContent.length; i++) {
+            localContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+            if (i < remoteContent.length) {
+                remoteContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x61 + (i % 26));
+            }
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Files.write(localDir.resolve("archive.gz"), localContent);
+        Files.write(remoteDir.resolve("archive.gz"), remoteContent);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        Set<String> appendShaped =
+                ConflictAnalyzer.findPrefixShapedDeltaCandidates(
+                        Set.of("archive.gz"), remoteManifest, localDir.toFile());
+
+        assertTrue(appendShaped.isEmpty(), "mid-file difference is not an append shape");
+    }
+
+    @Test
+    void findPrefixShapedDeltaCandidates_skipsFastModeWithoutReceiverMd5(@TempDir Path tempDir)
+            throws IOException {
+        // Fast mode leaves binary files unhashed: without a receiver md5 the shape is unverifiable
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] fullContent = new byte[96];
+        for (int i = 0; i < fullContent.length; i++) {
+            fullContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Files.write(localDir.resolve("archive.gz"), fullContent);
+        Files.write(remoteDir.resolve("archive.gz"), Arrays.copyOf(fullContent, 64));
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
+
+        Set<String> appendShaped =
+                ConflictAnalyzer.findPrefixShapedDeltaCandidates(
+                        Set.of("archive.gz"), remoteManifest, localDir.toFile());
+
+        assertTrue(appendShaped.isEmpty());
+    }
+
+    @Test
+    void findPrefixShapedDeltaCandidates_skipsEqualSizeReceiverFile(@TempDir Path tempDir)
+            throws IOException {
+        // Same size on both sides: nothing to append
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        byte[] localContent = new byte[96];
+        byte[] remoteContent = new byte[96];
+        for (int i = 0; i < localContent.length; i++) {
+            localContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
+            remoteContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x61 + (i % 26));
+        }
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Files.write(localDir.resolve("archive.gz"), localContent);
+        Files.write(remoteDir.resolve("archive.gz"), remoteContent);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        Set<String> appendShaped =
+                ConflictAnalyzer.findPrefixShapedDeltaCandidates(
+                        Set.of("archive.gz"), remoteManifest, localDir.toFile());
+
+        assertTrue(appendShaped.isEmpty());
+    }
 }

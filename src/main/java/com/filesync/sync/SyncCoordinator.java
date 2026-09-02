@@ -319,6 +319,24 @@ public class SyncCoordinator {
                             deltaCandidatePaths.size() + " file(s) eligible for delta transfer"));
         }
 
+        // Probe the non-conflict candidates for the same prefix shape: after an interrupted append
+        // is salvaged the receiver's mtime matches the sender's, so the file classifies as a plain
+        // modification even though only the missing tail will be sent. Skip paths already exempted
+        // above so a large file is not prefix-hashed twice per preview.
+        Set<String> probedCandidates = new LinkedHashSet<>(deltaCandidatePaths);
+        probedCandidates.removeAll(appendResumablePaths);
+        Set<String> appendShapedModified =
+                ConflictAnalyzer.findPrefixShapedDeltaCandidates(
+                        probedCandidates, remoteManifest, syncFolder);
+        if (!appendShapedModified.isEmpty()) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            appendShapedModified.size()
+                                    + " modified file(s) match a receiver-side prefix;"
+                                    + " transferring only the missing tail"));
+            appendResumablePaths.addAll(appendShapedModified);
+        }
+
         return new SyncPreviewPlan(
                 filesToSync,
                 emptyDirsToCreate,

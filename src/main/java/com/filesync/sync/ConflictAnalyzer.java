@@ -200,6 +200,59 @@ public class ConflictAnalyzer {
     }
 
     /**
+     * Among delta candidates, report the ones whose local file is the receiver's copy plus a tail:
+     * the receiver's manifest entry has an md5, its size is strictly shorter than the local file,
+     * and hashing the local prefix of that length (with the manifest algorithm) reproduces the
+     * receiver's md5.
+     *
+     * <p>This covers the same shape as {@link #exemptPrefixShapedConflicts} but outside the
+     * conflict path: after an interrupted append is salvaged the receiver's mtime matches the
+     * sender's, so the file classifies as a plain modification even though only the missing tail
+     * will be sent. The preview labels the reported paths APPEND; execution re-verifies the shape
+     * in {@code detectAppendCandidate} (including the rejection cache), so a stale label at worst
+     * falls back to the signature-delta path.
+     *
+     * @param candidatePaths delta candidate paths to probe, relative to the sync folder
+     * @param remoteManifest the receiver's manifest
+     * @param localFolder the sender's sync folder, used to resolve candidate paths to files
+     * @return the subset of {@code candidatePaths} verified as pure appends, never null
+     */
+    public static Set<String> findPrefixShapedDeltaCandidates(
+            Set<String> candidatePaths,
+            FileChangeDetector.FileManifest remoteManifest,
+            File localFolder) {
+        Set<String> appendShaped = new LinkedHashSet<>();
+        if (candidatePaths == null || candidatePaths.isEmpty() || remoteManifest == null) {
+            return appendShaped;
+        }
+        for (String path : candidatePaths) {
+            FileChangeDetector.FileInfo remoteInfo = remoteManifest.getFiles().get(path);
+            if (remoteInfo == null) {
+                continue;
+            }
+            long baseSize = remoteInfo.getSize();
+            String remoteMd5 = remoteInfo.getMd5();
+            if (baseSize <= 0 || remoteMd5 == null || remoteMd5.isEmpty()) {
+                continue; // unverified without a receiver md5 (fast mode) or empty receiver copy
+            }
+            File localFile = new File(localFolder, path);
+            if (!localFile.isFile() || localFile.length() <= baseSize) {
+                continue;
+            }
+            try {
+                String prefixMd5 =
+                        FileChangeDetector.hashFilePrefix(localFile, baseSize).manifestMd5();
+                if (remoteMd5.equals(prefixMd5)) {
+                    appendShaped.add(path);
+                }
+            } catch (IOException e) {
+                // Unreadable or the on-disk file shrank below the announced prefix: skip.
+            }
+        }
+        return appendShaped;
+    }
+
+    /**
      * Compute and store diff for a conflict. Useful when remote content has been fetched and we
      * need to prepare the conflict for UI display.
      *
