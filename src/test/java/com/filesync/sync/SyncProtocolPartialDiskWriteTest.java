@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.filesync.delta.HashUtil;
 import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import java.io.ByteArrayInputStream;
@@ -20,10 +22,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Tests for the partial disk-write receive of large NEW files: verified XMODEM blocks stream to a
+ * Tests for the partial disk-write receive of large transfers: verified XMODEM blocks stream to a
  * {@code .filesync-part} staging file next to the target as they arrive, and an interrupted
  * transfer salvages the staged prefix to the target path (stamped with the sender's lastModified)
  * so the next sync can append only the missing tail instead of restarting from byte zero.
+ *
+ * <p>Covers both staging flavors: large NEW files (whole payload staged) and large append tails
+ * (the received tail prefix is merged into the existing base, growing it into a longer prefix of
+ * the sender's file).
  */
 class SyncProtocolPartialDiskWriteTest {
 
@@ -219,6 +225,321 @@ class SyncProtocolPartialDiskWriteTest {
                 thrown.getData(),
                 "The exception must carry the full payload for a later retry");
         assertNoStageFile(baseDir, "locked.bin");
+    }
+
+    // ========== staged append tails ==========
+
+    @Test
+    void receiveFileAppend_largeTail_successAppliesTailAndDropsStage() throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] full = concat(base, tail);
+        SyncProtocol protocol =
+                new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(tail)));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        protocol.receiveFileAppend(
+                baseDir,
+                "growing.bin",
+                tail.length,
+                false,
+                77L,
+                base.length,
+                full.length,
+                HashUtil.md5Hex(full));
+
+        assertArrayEquals(full, Files.readAllBytes(target.toPath()));
+        assertEquals(77L, target.lastModified(), "Sender timestamp must be preserved");
+        assertNoStageFile(baseDir, "growing.bin");
+        assertFalse(protocol.isXmodemInProgress(), "xmodemInProgress must be reset after success");
+    }
+
+    @Test
+    void receiveFileAppend_largeTailCompressed_successDecodesFromStage() throws IOException {
+        byte[] base = patternedPayload(4096);
+        // Pseudo-random tail: the compressed wire size stays above the 4MB staging threshold.
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] compressed = CompressionUtil.compress(tail);
+        byte[] full = concat(base, tail);
+        SyncProtocol protocol =
+                new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(compressed)));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        protocol.receiveFileAppend(
+                baseDir,
+                "growing.bin",
+                compressed.length,
+                true,
+                88L,
+                base.length,
+                full.length,
+                HashUtil.md5Hex(full));
+
+        assertArrayEquals(full, Files.readAllBytes(target.toPath()));
+        assertEquals(88L, target.lastModified());
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_cancelledMidTail_mergesTailPrefixIntoBaseWithSenderMtime()
+            throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] full = concat(base, tail);
+        byte[] frame = buildXmodemFrame(tail);
+        // First tail block delivered, then the sender aborts with CAN.
+        byte[] cancelled = Arrays.copyOf(frame, FIRST_BLOCK_END + 1);
+        cancelled[FIRST_BLOCK_END] = XModemTransfer.CAN;
+        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(cancelled));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        TransferCancelledException thrown =
+                assertThrows(
+                        TransferCancelledException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        baseDir,
+                                        "growing.bin",
+                                        tail.length,
+                                        false,
+                                        1234567890L,
+                                        base.length,
+                                        full.length,
+                                        HashUtil.md5Hex(full)));
+
+        assertTrue(
+                thrown.getMessage().contains("4096 tail bytes salvaged"),
+                "The cancel must report the merged tail prefix: " + thrown.getMessage());
+        byte[] merged = Files.readAllBytes(target.toPath());
+        assertEquals(base.length + 4096, merged.length, "The base must grow by one verified block");
+        assertArrayEquals(concat(base, Arrays.copyOf(tail, 4096)), merged);
+        assertEquals(
+                1234567890L,
+                target.lastModified(),
+                "The merged prefix must carry the sender's timestamp so the next sync plans"
+                        + " another append instead of a conflict");
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_interruptedMidTail_keepsExactTailPrefixOnDisk() throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] full = concat(base, tail);
+        byte[] truncated = Arrays.copyOf(buildXmodemFrame(tail), FIRST_BLOCK_END + 10);
+        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(truncated));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        baseDir,
+                                        "growing.bin",
+                                        tail.length,
+                                        false,
+                                        42L,
+                                        base.length,
+                                        full.length,
+                                        HashUtil.md5Hex(full)));
+
+        assertFalse(
+                thrown instanceof TransferCancelledException,
+                "A communication failure must not be reported as a benign cancel");
+        assertTrue(
+                thrown.getMessage().contains("kept 4096 received tail bytes"),
+                "The failure must report the merged tail prefix: " + thrown.getMessage());
+        assertArrayEquals(
+                concat(base, Arrays.copyOf(tail, 4096)), Files.readAllBytes(target.toPath()));
+        assertEquals(42L, target.lastModified());
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_interruptedCompressedTail_mergesDecodedPrefix() throws IOException {
+        byte[] base = patternedPayload(4096);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] compressed = CompressionUtil.compress(tail);
+        byte[] full = concat(base, tail);
+        byte[] truncated = Arrays.copyOf(buildXmodemFrame(compressed), FIRST_BLOCK_END + 10);
+        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(truncated));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        assertThrows(
+                IOException.class,
+                () ->
+                        protocol.receiveFileAppend(
+                                baseDir,
+                                "growing.bin",
+                                compressed.length,
+                                true,
+                                42L,
+                                base.length,
+                                full.length,
+                                HashUtil.md5Hex(full)));
+
+        byte[] merged = Files.readAllBytes(target.toPath());
+        assertTrue(merged.length > base.length, "A decoded tail prefix must be merged");
+        assertTrue(merged.length < full.length, "A truncated tail cannot complete the file");
+        assertArrayEquals(Arrays.copyOf(full, merged.length), merged);
+        assertEquals(42L, target.lastModified());
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_cancelBeforeAnyTailByte_leavesBaseUntouched() throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        SyncProtocol protocol =
+                new SyncProtocol(new ByteStreamSerialPortManager(new byte[] {XModemTransfer.CAN}));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+        long beforeMtime = target.lastModified();
+
+        TransferCancelledException thrown =
+                assertThrows(
+                        TransferCancelledException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        baseDir,
+                                        "growing.bin",
+                                        tail.length,
+                                        false,
+                                        7L,
+                                        base.length,
+                                        base.length + tail.length,
+                                        HashUtil.md5Hex(concat(base, tail))));
+
+        assertFalse(
+                thrown.getMessage().contains("salvaged"),
+                "Nothing was received, so nothing may be reported as salvaged");
+        assertArrayEquals(base, Files.readAllBytes(target.toPath()));
+        assertEquals(beforeMtime, target.lastModified(), "The base must not even be re-stamped");
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_baseDriftedDuringInterrupt_leavesBaseUntouched() throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] truncated = Arrays.copyOf(buildXmodemFrame(tail), FIRST_BLOCK_END + 10);
+        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(truncated));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+        long beforeMtime = target.lastModified();
+
+        // The announced baseSize does not match the base on disk: the drift guard must refuse
+        // to extend a base the sender did not diff against.
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.receiveFileAppend(
+                                        baseDir,
+                                        "growing.bin",
+                                        tail.length,
+                                        false,
+                                        7L,
+                                        base.length + 123,
+                                        base.length + 123 + tail.length,
+                                        "irrelevant"));
+
+        assertFalse(
+                thrown.getMessage().contains("kept"),
+                "A drifted base must not be extended: " + thrown.getMessage());
+        assertArrayEquals(base, Files.readAllBytes(target.toPath()));
+        assertEquals(beforeMtime, target.lastModified());
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_wholeTailThenCancel_leavesBaseForCleanRetransfer() throws IOException {
+        byte[] base = patternedPayload(8192);
+        byte[] tail = pseudoRandomPayload(PAYLOAD_SIZE);
+        byte[] frame = buildXmodemFrame(tail);
+        // Every tail block is delivered, but the sender cancels instead of EOT: the
+        // reconstruction cannot be verified mid-failure, so the whole-tail case conservatively
+        // keeps the base for a clean retransfer of the tail.
+        byte[] cancelled = Arrays.copyOf(frame, frame.length);
+        cancelled[frame.length - 1] = XModemTransfer.CAN;
+        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(cancelled));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        assertThrows(
+                TransferCancelledException.class,
+                () ->
+                        protocol.receiveFileAppend(
+                                baseDir,
+                                "growing.bin",
+                                tail.length,
+                                false,
+                                7L,
+                                base.length,
+                                base.length + tail.length,
+                                HashUtil.md5Hex(concat(base, tail))));
+
+        assertArrayEquals(base, Files.readAllBytes(target.toPath()));
+        assertNoStageFile(baseDir, "growing.bin");
+    }
+
+    @Test
+    void receiveFileAppend_smallTail_keepsBufferedPathWithoutStaging() throws IOException {
+        byte[] base = patternedPayload(1024);
+        byte[] tail = pseudoRandomPayload(2048);
+        byte[] full = concat(base, tail);
+        SyncProtocol protocol =
+                new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(tail)));
+
+        File baseDir = tempDir.toFile();
+        File target = new File(baseDir, "growing.bin");
+        Files.write(target.toPath(), base);
+
+        protocol.receiveFileAppend(
+                baseDir,
+                "growing.bin",
+                tail.length,
+                false,
+                9L,
+                base.length,
+                full.length,
+                HashUtil.md5Hex(full));
+
+        assertArrayEquals(full, Files.readAllBytes(target.toPath()));
+        // Below the threshold nothing may be staged, not even transiently.
+        try (var files = Files.list(tempDir)) {
+            assertTrue(
+                    files.allMatch(f -> !f.getFileName().toString().startsWith(".")),
+                    "Small-tail appends must not create a staging file");
+        }
+    }
+
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] out = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
     }
 
     // ========== helpers ==========

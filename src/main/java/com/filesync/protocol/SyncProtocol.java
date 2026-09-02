@@ -687,6 +687,11 @@ public class SyncProtocol {
      * are streamed straight from disk into the reconstruction buffer, so only one full-size array
      * is held in memory.
      *
+     * <p>Tails above {@link #PARTIAL_DISK_WRITE_THRESHOLD_BYTES} are staged to disk while
+     * receiving; an interrupted transfer merges the verified tail prefix into the existing file
+     * (stamped with the sender's lastModified) so the next sync appends only what is still missing
+     * instead of retransferring the whole tail.
+     *
      * @param baseDir base directory containing the existing file
      * @param relativePath relative path of the file
      * @param expectedSize announced compressed/raw tail length
@@ -706,6 +711,20 @@ public class SyncProtocol {
             long finalSize,
             String finalMd5)
             throws IOException {
+        File existing = new File(baseDir, relativePath);
+        if (expectedSize > PARTIAL_DISK_WRITE_THRESHOLD_BYTES && existing.isFile()) {
+            receiveFileAppendStaged(
+                    existing,
+                    relativePath,
+                    expectedSize,
+                    compressed,
+                    lastModified,
+                    baseSize,
+                    finalSize,
+                    finalMd5);
+            return;
+        }
+
         xmodemInProgress.set(true);
         byte[] payload;
         try {
@@ -726,6 +745,100 @@ public class SyncProtocol {
                     "Append transfer of " + relativePath + " cancelled by sender",
                     "Failed to receive file append for " + relativePath + " (" + detail + ")");
         }
+        applyReceivedAppend(
+                existing,
+                relativePath,
+                expectedSize,
+                payload,
+                compressed,
+                lastModified,
+                baseSize,
+                finalSize,
+                finalMd5);
+    }
+
+    /**
+     * Staged receive for large append tails: verified XMODEM blocks stream to a {@code
+     * .filesync-part} staging file next to the base as they arrive. On a clean transfer the staged
+     * tail is applied exactly like the buffered path. On an interruption the decoded tail prefix is
+     * merged into the base file (stamped with the sender's lastModified), so the base grows into a
+     * longer prefix of the sender's file and the next sync appends only what is still missing
+     * instead of retransferring the whole tail.
+     */
+    private void receiveFileAppendStaged(
+            File existing,
+            String relativePath,
+            int expectedSize,
+            boolean compressed,
+            long lastModified,
+            long baseSize,
+            long finalSize,
+            String finalMd5)
+            throws IOException {
+        File stageFile =
+                new File(existing.getParentFile(), "." + existing.getName() + PARTIAL_SUFFIX);
+        long stagedBytes;
+        try {
+            xmodemInProgress.set(true);
+            try (OutputStream stage = new BufferedOutputStream(new FileOutputStream(stageFile))) {
+                stagedBytes = xmodem.receiveInto(expectedSize, stage);
+            }
+        } catch (IOException e) {
+            long saved =
+                    salvageAppendPrefix(
+                            stageFile, existing, compressed, lastModified, baseSize, finalSize);
+            throw appendReceiveFailure(relativePath, e.getMessage(), saved, e);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+
+        if (stagedBytes != expectedSize) {
+            long saved =
+                    salvageAppendPrefix(
+                            stageFile, existing, compressed, lastModified, baseSize, finalSize);
+            throw appendReceiveFailure(relativePath, xmodem.getLastErrorMessage(), saved, null);
+        }
+
+        // Clean transfer: read the tail back from the stage, apply it exactly like the buffered
+        // path, then drop the stage.
+        byte[] payload;
+        try {
+            payload = Files.readAllBytes(stageFile.toPath());
+        } catch (IOException e) {
+            throw new IOException("Failed to read staged append for " + relativePath, e);
+        } finally {
+            if (!stageFile.delete()) {
+                stageFile.deleteOnExit();
+            }
+        }
+        applyReceivedAppend(
+                existing,
+                relativePath,
+                expectedSize,
+                payload,
+                compressed,
+                lastModified,
+                baseSize,
+                finalSize,
+                finalMd5);
+    }
+
+    /**
+     * Apply a fully received append tail: verify the existing file still has the announced {@code
+     * baseSize}, concatenate, verify the full content against the sender's raw {@code finalMd5},
+     * and write the result. Shared by the buffered and staged receive paths.
+     */
+    private void applyReceivedAppend(
+            File existing,
+            String relativePath,
+            int expectedSize,
+            byte[] payload,
+            boolean compressed,
+            long lastModified,
+            long baseSize,
+            long finalSize,
+            String finalMd5)
+            throws IOException {
         validateReceivedSize("file append", relativePath, expectedSize, payload);
 
         byte[] tail;
@@ -736,7 +849,6 @@ public class SyncProtocol {
             tail = payload;
         }
 
-        File existing = new File(baseDir, relativePath);
         if (!existing.exists() || !existing.isFile()) {
             throw new IOException(
                     "Cannot apply append: existing file missing on receiver: " + relativePath);
@@ -809,6 +921,83 @@ public class SyncProtocol {
         if (lastModified > 0) {
             existing.setLastModified(lastModified);
         }
+    }
+
+    /**
+     * Best-effort salvage of an interrupted staged append: merge the decoded tail prefix into the
+     * base file, growing it into a longer prefix of the sender's file, and stamp the sender's
+     * lastModified so the next preview plans another append instead of a receiver-newer conflict.
+     * The merge is skipped — and the base left untouched — when the whole tail arrived (its
+     * reconstruction cannot be verified against the sender's final MD5 mid-failure, so the next
+     * sync retransfers the tail as before) or when the base drifted mid-transfer (appending then
+     * would corrupt it).
+     *
+     * @return the number of tail bytes merged into the base file (0 when nothing was merged)
+     */
+    private long salvageAppendPrefix(
+            File stageFile,
+            File existing,
+            boolean compressed,
+            long lastModified,
+            long baseSize,
+            long finalSize) {
+        long saved = 0;
+        try {
+            byte[] staged = Files.readAllBytes(stageFile.toPath());
+            byte[] tailPrefix = compressed ? CompressionUtil.decompressTruncated(staged) : staged;
+            boolean baseIntact = existing.isFile() && existing.length() == baseSize;
+            boolean partialTail = finalSize > 0 && baseSize + tailPrefix.length < finalSize;
+            if (tailPrefix != null && tailPrefix.length > 0 && baseIntact && partialTail) {
+                try (FileOutputStream fos = new FileOutputStream(existing, true)) {
+                    fos.write(tailPrefix);
+                }
+                if (lastModified > 0) {
+                    existing.setLastModified(lastModified);
+                }
+                saved = tailPrefix.length;
+            }
+        } catch (IOException e) {
+            // Salvage is best-effort; without it the next sync retransfers the tail from the base.
+        } finally {
+            if (!stageFile.delete()) {
+                stageFile.deleteOnExit();
+            }
+        }
+        return saved;
+    }
+
+    /**
+     * The failure for an interrupted staged append: a peer cancel is a benign {@link
+     * TransferCancelledException}, anything else a plain communication-failure IOException, and
+     * both note any tail bytes merged into the base file.
+     */
+    private IOException appendReceiveFailure(
+            String relativePath, String detail, long savedBytes, IOException cause) {
+        if (detail == null || detail.isEmpty()) {
+            detail = "no detailed XMODEM error available";
+        }
+        IOException failure =
+                xmodemReceiveFailure(
+                        "Append transfer of "
+                                + relativePath
+                                + " cancelled by sender"
+                                + (savedBytes > 0
+                                        ? " (" + savedBytes + " tail bytes salvaged)"
+                                        : ""),
+                        "Failed to receive file append for "
+                                + relativePath
+                                + " ("
+                                + detail
+                                + ")"
+                                + (savedBytes > 0
+                                        ? "; kept "
+                                                + savedBytes
+                                                + " received tail bytes on disk for the next sync"
+                                        : ""));
+        if (cause != null) {
+            failure.addSuppressed(cause);
+        }
+        return failure;
     }
 
     /**
