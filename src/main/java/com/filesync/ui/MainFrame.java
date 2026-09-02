@@ -1,13 +1,12 @@
 package com.filesync.ui;
 
+import com.filesync.AppVersion;
 import com.filesync.config.SettingsManager;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncEventListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
-import java.io.InputStream;
-import java.util.Properties;
 import javax.swing.JFrame;
 import javax.swing.JPanel;
 import javax.swing.WindowConstants;
@@ -95,10 +94,15 @@ public class MainFrame extends JFrame {
         dragDropController =
                 new DragDropController(mainPanel, components, syncManager, state, logController);
 
-        setTitle("COM Port File Sync v" + getApplicationVersion());
+        String appVersion = AppVersion.get();
+        setTitle("COM Port File Sync v" + appVersion);
         setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
         setContentPane(mainPanel);
         components.configureFrame(this);
+
+        // First log line: the combined-log merger pairs both peers' logs by timestamp, so the
+        // build each side runs is visible side by side in the merged file.
+        logController.log("COM Port File Sync v" + appVersion);
 
         initializeWorkflow();
     }
@@ -169,23 +173,6 @@ public class MainFrame extends JFrame {
 
     private void updateSettingsLabel() {
         components.setSettingsLabel(SettingsDialog.getSettingsString(settings));
-    }
-
-    private String getApplicationVersion() {
-        try (InputStream is =
-                getClass().getClassLoader().getResourceAsStream("version.properties")) {
-            if (is != null) {
-                Properties props = new Properties();
-                props.load(is);
-                String version = props.getProperty("application.version");
-                if (version != null && !version.trim().isEmpty()) {
-                    return version.trim();
-                }
-            }
-        } catch (Exception e) {
-            // Ignore and use fallback
-        }
-        return "1.0.0";
     }
 
     private void cleanup() {
