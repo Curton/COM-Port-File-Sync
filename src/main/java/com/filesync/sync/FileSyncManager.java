@@ -83,7 +83,6 @@ public class FileSyncManager {
 
     private ScheduledExecutorService executor;
     private Future<?> listenerFuture;
-    private volatile String lastPortName;
 
     public FileSyncManager(SerialPortManager serialPort, SettingsManager settings) {
         this.serialPort = serialPort;
@@ -299,7 +298,7 @@ public class FileSyncManager {
     /**
      * Start listening for incoming sync requests.
      *
-     * @param portName the serial port name (e.g. "COM3") used for re-opening on restart
+     * @param portName the serial port name (e.g. "COM3") of the opened port
      */
     public void startListening(String portName) {
         startListeningInternal(portName, true);
@@ -313,7 +312,6 @@ public class FileSyncManager {
         if (isFreshConnect) {
             wasManuallyDisconnected.set(false);
         }
-        this.lastPortName = portName;
         running.set(true);
         connectionAlive.set(false);
         roleNegotiated.set(false);
@@ -364,19 +362,6 @@ public class FileSyncManager {
         }
 
         shutdownExecutor();
-    }
-
-    /**
-     * Stop and immediately restart listening on the same serial port. Used for cancelling an
-     * ongoing sync -- behaves like disconnect followed by reconnect, resetting all protocol state.
-     */
-    public void restartListening() {
-        String portToReopen = this.lastPortName;
-        stopListening();
-        if (portToReopen != null && serialPort.open(portToReopen)) {
-            startListening(portToReopen);
-        }
-        syncCancelInProgress.set(false);
     }
 
     /**
@@ -442,12 +427,9 @@ public class FileSyncManager {
     public void cancelSync() {
         syncCoordinator.cancelOngoingSync();
         syncCancelInProgress.set(true);
-        // Notify the remote receiver so it aborts its blocking xmodem.receive() and resets its
-        // connection via the CMD_CANCEL handler (which calls restartListening()). Without this,
-        // the receiver's connection-loss detection stays suppressed while transferBusy is true, so
-        // it can only recover via a slow XMODEM timeout and an implicit (fragile) stream resync
-        // that
-        // can leave it unable to reconnect without a program restart.
+        // Notify the remote receiver so it aborts its blocking xmodem.receive() through the CAN
+        // signal. Without this, the receiver's connection-loss detection stays suppressed while
+        // transferBusy is true, so it could only recover via a slow XMODEM timeout.
         if (serialPort.isOpen()) {
             try {
                 protocol.sendTransferCancel();
@@ -457,7 +439,18 @@ public class FileSyncManager {
                                 "Failed to send cancel notification to remote: " + e.getMessage()));
             }
         }
-        restartListening();
+        // A cancel keeps the pre-cancel session state (link, listener, heartbeat, negotiated
+        // role); only the sync worker is stopped. Interrupting it unwinds any blocking serial
+        // read as an interrupt-driven IOException, which performSync surfaces as a cancellation.
+        syncCoordinator.interruptOngoingSync();
+        // Drop stale transfer bytes so the listener does not misread them; live frames that
+        // arrive later are unaffected (framing resync + periodic heartbeats).
+        try {
+            protocol.clearInputBuffer();
+        } catch (IOException ignored) {
+            // Best-effort hygiene; the frame resync also skips stale bytes.
+        }
+        syncCancelInProgress.set(false);
     }
 
     private static final int FOLDER_CONTEXT_TIMEOUT_MS = 5000;
@@ -1026,13 +1019,20 @@ public class FileSyncManager {
                 long sinceCancel = System.currentTimeMillis() - lastTransferCancelAtMillis;
                 if (sinceCancel >= 0 && sinceCancel < CANCEL_RESET_SUPPRESS_WINDOW_MS) {
                     // The transfer was already aborted via the CAN signal and the stream
-                    // resynced; this redundant control-plane cancel must not reset the
-                    // connection.
+                    // resynced; this redundant control-plane cancel needs no further action.
                     eventBus.post(new SyncEvent.LogEvent("Remote cancelled transfer"));
                 } else {
-                    eventBus.post(
-                            new SyncEvent.LogEvent("Remote cancelled sync, resetting connection"));
-                    restartListening();
+                    // The peer cancelled outside a CAN-aborted transfer (e.g. during a manifest
+                    // exchange). Clear local sync state benignly and drop stale transfer bytes;
+                    // the link, listener and negotiated role stay as they were.
+                    eventBus.post(new SyncEvent.LogEvent("Remote cancelled sync"));
+                    syncCoordinator.cancelOngoingSync();
+                    eventBus.post(new SyncEvent.SyncCancelledEvent());
+                    try {
+                        protocol.clearInputBuffer();
+                    } catch (IOException ignored) {
+                        // Stale bytes are also skipped by the frame resync on the next read.
+                    }
                 }
             }
             case SyncProtocol.CMD_HEARTBEAT -> {

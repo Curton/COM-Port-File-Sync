@@ -374,8 +374,8 @@ public class SyncProtocol {
      * returning {@code false} or throwing) is terminal: a transfer-cancel is sent to release the
      * receiver from its blocking {@code xmodem.receive()} and no further attempts are made. A
      * re-sent command after a mid-transfer failure would otherwise be consumed as XMODEM data,
-     * desynchronizing the peers; the cancel-driven reset (peer {@code restartListening}) is the
-     * intended recovery, and the file is re-evaluated on the next sync.
+     * desynchronizing the peers; the CAN abort plus the listener's frame resync is the intended
+     * recovery, and the file is re-evaluated on the next sync.
      *
      * @return true if the delta was compressed, false otherwise
      */
@@ -1027,7 +1027,7 @@ public class SyncProtocol {
         // Retry only the command/ACK handshake. Once the XMODEM phase is entered, a failure is
         // terminal: the receiver may be blocked in xmodem.receive() and a re-sent command would
         // be consumed as XMODEM data, desynchronizing the peers. See sendFileDelta for the full
-        // rationale; the cancel-driven reset (peer restartListening) is the intended recovery.
+        // rationale; the CAN abort plus the listener's frame resync is the intended recovery.
         final int maxAttempts = 3;
         int attemptsUsed = 0;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {

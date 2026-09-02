@@ -8,6 +8,7 @@ import com.filesync.delta.SignatureUtil;
 import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -22,6 +23,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -66,6 +68,12 @@ public class SyncCoordinator {
     private Consumer<String> communicationFailureReporter = reason -> {};
 
     private ScheduledExecutorService executor;
+
+    /**
+     * The worker running the current sync, if any. Held only to interrupt a worker blocked in a
+     * serial read when the user cancels; cleared by the worker itself on exit.
+     */
+    private volatile Future<?> syncWorkerFuture;
 
     /**
      * Signature cache of the sync currently in progress, if any. Shared with {@code
@@ -194,7 +202,7 @@ public class SyncCoordinator {
         cancelRequested.set(false); // Reset cancellation flag before starting new sync
         syncing.set(true);
         if (executor != null) {
-            executor.submit(() -> performSync(planToUse));
+            syncWorkerFuture = executor.submit(() -> performSync(planToUse));
         } else {
             performSync(planToUse);
         }
@@ -453,12 +461,25 @@ public class SyncCoordinator {
 
     /**
      * Cancel the ongoing sync. Clears sync state so the coordinator is ready for the next sync
-     * attempt. Protocol-level cancellation is handled by the caller (FileSyncManager) via
-     * restartListening which fully resets the connection.
+     * attempt. The connection, listener and negotiated role are untouched; the caller
+     * (FileSyncManager) notifies the peer and calls {@link #interruptOngoingSync()} so a worker
+     * blocked in a serial read aborts promptly instead of at the next retry timeout.
      */
     public void cancelOngoingSync() {
         cancelRequested.set(true);
         syncing.set(false);
+    }
+
+    /**
+     * Interrupt the worker of the sync currently in progress (if any), so a blocking serial read
+     * unwinds as an interrupt-driven IOException and performSync exits through its benign
+     * cancellation path. The link, listener and heartbeat scheduler stay up.
+     */
+    public void interruptOngoingSync() {
+        Future<?> worker = syncWorkerFuture;
+        if (worker != null) {
+            worker.cancel(true);
+        }
     }
 
     /**
@@ -1139,6 +1160,16 @@ public class SyncCoordinator {
                     touchHeartbeat();
                     flushSharedTextBetweenOperations();
                 } catch (IOException e) {
+                    if (e instanceof TransferCancelledException) {
+                        // The peer cancelled the session; re-sending this file (or the rest of
+                        // the plan) would push data the peer just refused. Abort the sync.
+                        throw (TransferCancelledException) e;
+                    }
+                    if (cancelRequested.get()) {
+                        // A local cancel interrupted the blocked send; exit as cancelled instead
+                        // of re-queueing the file for a full transfer.
+                        exitSyncIfCancelled();
+                    }
                     // The handshake failed: either the peer never ACKed the command (an older
                     // peer that does not know FILE_APPEND silently ignores it) or the XMODEM
                     // phase broke. Re-queue for the batch path: in the former case the batch
@@ -1212,6 +1243,14 @@ public class SyncCoordinator {
                             }
                         }
                     } catch (IOException e) {
+                        if (e instanceof TransferCancelledException) {
+                            // The peer cancelled the session; do not resume sending.
+                            throw (TransferCancelledException) e;
+                        }
+                        if (cancelRequested.get()) {
+                            // A local cancel interrupted the exchange; exit as cancelled.
+                            exitSyncIfCancelled();
+                        }
                         // The peer may not support delta sync (older version) or the exchange
                         // failed. Cached signatures (if any) are still usable; every candidate
                         // without one falls back to full transfer via the per-file null check.
@@ -1341,6 +1380,10 @@ public class SyncCoordinator {
                         try {
                             sentOk = protocol.sendFile(syncFolder, fileInfo.getPath());
                         } catch (IOException | IllegalStateException e) {
+                            if (e instanceof TransferCancelledException) {
+                                // The peer cancelled the session; do not send the next file.
+                                throw (TransferCancelledException) e;
+                            }
                             if (cancelRequested.get()) {
                                 break;
                             }
@@ -1435,6 +1478,11 @@ public class SyncCoordinator {
                                 try {
                                     sentOk = protocol.sendFile(syncFolder, rp);
                                 } catch (IOException | IllegalStateException e) {
+                                    if (e instanceof TransferCancelledException) {
+                                        // The peer cancelled the session; do not send the
+                                        // remaining fallback files.
+                                        throw (TransferCancelledException) e;
+                                    }
                                     if (cancelRequested.get()) {
                                         break;
                                     }
@@ -1645,21 +1693,37 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.SyncCompleteEvent());
         } catch (SyncCancelledException e) {
             // Cancellation was already posted by exitSyncIfCancelled(); only cleanup needed here.
+        } catch (TransferCancelledException e) {
+            // The peer aborted the session (its user clicked cancel). A peer cancel applies to
+            // the whole sync, so stop here instead of pushing the remaining files it refused.
+            eventBus.post(new SyncEvent.LogEvent("Sync cancelled by remote"));
+            eventBus.post(new SyncEvent.SyncCancelledEvent());
         } catch (IOException e) {
-            // A read timeout means the peer stopped responding mid-exchange (link torn down on its
-            // side, cable pulled, ...). Fail the connection immediately so recovery starts instead
-            // of idling until the next heartbeat check declares the loss.
-            if (isReadTimeout(e)) {
-                communicationFailureReporter.accept(
-                        "Connection lost - read timeout during sync: " + e.getMessage());
+            if (cancelRequested.get()) {
+                // The user's cancel interrupted a blocking serial read; surface it as a
+                // cancellation, not as a failed sync.
+                eventBus.post(new SyncEvent.LogEvent("Sync cancelled"));
+                eventBus.post(new SyncEvent.SyncCancelledEvent());
+            } else {
+                // A read timeout means the peer stopped responding mid-exchange (link torn down
+                // on its side, cable pulled, ...). Fail the connection immediately so recovery
+                // starts instead of idling until the next heartbeat check declares the loss.
+                if (isReadTimeout(e)) {
+                    communicationFailureReporter.accept(
+                            "Connection lost - read timeout during sync: " + e.getMessage());
+                }
+                eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
             }
-            eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
         } finally {
             activeSignatureCache = null;
+            syncWorkerFuture = null;
             syncing.set(false);
             protocol.resetXmodemInProgress();
             touchHeartbeat();
             onSyncIdle.run();
+            // The sync just released the transfer gates; refresh the sync controls in case a
+            // cancellation event reached the UI before this cleanup ran.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         }
     }
 

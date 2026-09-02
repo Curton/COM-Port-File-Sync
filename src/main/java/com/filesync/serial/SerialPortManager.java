@@ -68,8 +68,8 @@ public class SerialPortManager {
      * Open the specified COM port.
      *
      * <p>Retries a few times: on Windows the OS may not release the COM port immediately after a
-     * {@link #close()}, so the first {@code openPort()} can fail. This is exercised by {@code
-     * restartListening()} and the reconnect path, which close and immediately reopen the same port.
+     * {@link #close()}, so the first {@code openPort()} can fail. This is exercised when a port is
+     * closed and immediately reopened, e.g. a manual reconnect after a link loss.
      */
     public boolean open(String portName) {
         final int maxAttempts = 3;

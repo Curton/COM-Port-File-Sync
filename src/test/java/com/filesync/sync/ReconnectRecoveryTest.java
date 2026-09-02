@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.SerialPortManager;
 import java.io.File;
 import java.io.IOException;
@@ -367,6 +368,140 @@ class ReconnectRecoveryTest {
                 transportCancellationProtocol.transferCancelSent.get(),
                 "Cancel should not send an XMODEM cancel signal");
         assertFalse(syncing.get(), "Cancelling should clear syncing flag");
+    }
+
+    @Test
+    void interruptOngoingSyncUnblocksWorkerAsBenignCancellation() throws Exception {
+        Files.writeString(tempDir.resolve("test.txt"), "payload");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        BlockingSyncProtocol protocol = new BlockingSyncProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        AtomicInteger cancelEvents = new AtomicInteger();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
+                        errors.add(errorEvent.getMessage());
+                    } else if (event instanceof SyncEvent.SyncCancelledEvent) {
+                        cancelEvents.incrementAndGet();
+                    }
+                });
+
+        SyncCoordinator coordinator =
+                new SyncCoordinator(
+                        protocol,
+                        eventBus,
+                        () -> tempDir.toFile(),
+                        () -> false,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        pendingWriteService,
+                        syncing,
+                        () -> {},
+                        () -> {},
+                        () -> {});
+        coordinator.setCommunicationFailureReporter(failures::add);
+
+        ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
+        coordinator.setExecutor(executor);
+        try {
+            protocol.setBlockAtManifestWait(true);
+            coordinator.startSync();
+            assertTrue(
+                    protocol.awaitFirstWaitEntered(Duration.ofSeconds(2)),
+                    "Sync should reach the blocked manifest wait");
+
+            // The user's cancel: stop the worker by interrupt, keeping the link state intact.
+            coordinator.cancelOngoingSync();
+            coordinator.interruptOngoingSync();
+
+            waitUntil(() -> cancelEvents.get() >= 1, Duration.ofSeconds(2));
+
+            assertTrue(errors.isEmpty(), "A local cancel must not surface as an error");
+            assertTrue(failures.isEmpty(), "A local cancel must not report a link failure");
+            assertEquals(1, cancelEvents.get(), "Exactly one cancellation event should be posted");
+            assertEquals(
+                    1,
+                    logs.stream().filter("Sync cancelled"::equals).count(),
+                    "Cancellation should be logged exactly once");
+            assertFalse(syncing.get(), "Syncing flag should be cleared after cancel");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void peerCancelledTransferAbortsSyncWithoutErrorOrFallback() throws Exception {
+        File dir = tempDir.resolve("input").toFile();
+        dir.mkdirs();
+        Files.writeString(dir.toPath().resolve("file_0.txt"), "content 0");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        PeerCancellingProtocol protocol = new PeerCancellingProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<String> logs = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        AtomicInteger cancelEvents = new AtomicInteger();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
+                        errors.add(errorEvent.getMessage());
+                    } else if (event instanceof SyncEvent.SyncCancelledEvent) {
+                        cancelEvents.incrementAndGet();
+                    }
+                });
+
+        SyncCoordinator coordinator =
+                new SyncCoordinator(
+                        protocol,
+                        eventBus,
+                        () -> dir,
+                        () -> false,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        pendingWriteService,
+                        syncing,
+                        () -> {},
+                        () -> {},
+                        () -> {});
+        coordinator.setCommunicationFailureReporter(failures::add);
+
+        SyncPreviewPlan plan =
+                new SyncPreviewPlan(
+                        List.of(new FileChangeDetector.FileInfo("file_0.txt", 9L, 0L, "md5")),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        9L,
+                        false);
+
+        coordinator.startSyncWithPlan(plan);
+        waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(5));
+
+        assertTrue(errors.isEmpty(), "A peer cancel must not surface as an error");
+        assertTrue(failures.isEmpty(), "A peer cancel must not report a link failure");
+        assertEquals(1, cancelEvents.get(), "Exactly one cancellation event should be posted");
+        assertTrue(
+                logs.stream().anyMatch("Sync cancelled by remote"::equals),
+                "The peer cancel should be logged benignly");
+        assertEquals(
+                0,
+                protocol.perFileSendCount.get(),
+                "A file the peer cancelled must not be re-sent via the per-file fallback");
     }
 
     @Test
@@ -954,6 +1089,46 @@ class ReconnectRecoveryTest {
         public void sendTransferCancel() {
             transferCancelSent.set(true);
         }
+    }
+
+    /** Simulates the peer aborting the batch mid-transfer with an XMODEM CAN signal. */
+    private static final class PeerCancellingProtocol extends SyncProtocol {
+        private final AtomicInteger perFileSendCount = new AtomicInteger();
+
+        PeerCancellingProtocol() {
+            super(new StubSerialPortManager(true));
+        }
+
+        @Override
+        public boolean sendBatch(
+                List<Object[]> files,
+                int maxBatchSizeBytes,
+                BatchTransferSession.BatchProgressCallback callback,
+                File baseDir)
+                throws IOException {
+            throw new TransferCancelledException("Batch transfer cancelled by remote");
+        }
+
+        @Override
+        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+            perFileSendCount.incrementAndGet();
+            return true;
+        }
+
+        @Override
+        public void sendMkdir(String relativePath) {}
+
+        @Override
+        public void sendFileDelete(String relativePath) {}
+
+        @Override
+        public void sendRmdir(String relativePath) {}
+
+        @Override
+        public void sendSyncComplete() {}
+
+        @Override
+        public void sendAck() {}
     }
 
     // ----- Batch Transfer Tests -----
