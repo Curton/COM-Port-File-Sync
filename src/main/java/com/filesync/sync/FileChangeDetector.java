@@ -1,5 +1,6 @@
 package com.filesync.sync;
 
+import com.filesync.delta.HashUtil;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
@@ -42,6 +43,12 @@ public class FileChangeDetector {
     // NTFS has 100ns precision, FAT32 has 2-second precision, and setLastModified() may not
     // preserve exact values across different filesystems. 3 seconds covers most cases.
     static final long MODIFY_WINDOW_MS = 3000;
+
+    // Persisted-manifest cache location, mirroring SignatureCache: under <user.home>/.filesync/
+    // (outside the sync folder so the manifest scan never sees it), one JSON file per folder.
+    private static final String CACHE_DIR_NAME = ".filesync";
+    private static final String MANIFEST_CACHE_PREFIX = "manifest-cache-";
+    private static final String MANIFEST_CACHE_SUFFIX = ".json";
 
     /**
      * Callback interface for manifest generation progress. Default methods allow callers to
@@ -184,6 +191,12 @@ public class FileChangeDetector {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    /**
+     * Compact JSON for the persisted cache file: a large folder's manifest stays much smaller than
+     * the pretty wire format, and {@link #manifestFromJson} parses it back either way.
+     */
+    private static final Gson PERSIST_GSON = new GsonBuilder().create();
+
     /** Generate a manifest of all files in a directory */
     public static FileManifest generateManifest(File directory) throws IOException {
         return generateManifest(directory, false, false);
@@ -277,36 +290,34 @@ public class FileChangeDetector {
         ManifestProgressCallback progressCallback = resolvedOptions.getProgressCallback();
 
         if (progressCallback != null) {
-            try (Stream<Path> countPaths = Files.walk(basePath)) {
-                countPaths.forEach(
-                        path -> {
-                            try {
-                                if (!Files.isRegularFile(path)) {
-                                    return;
+            // Files.find hands the walk's already-read attributes to the predicate, so counting
+            // does not re-stat every path.
+            try (Stream<Path> countPaths =
+                    Files.find(
+                            basePath,
+                            Integer.MAX_VALUE,
+                            (path, attrs) -> {
+                                try {
+                                    if (!attrs.isRegularFile() || isHidden(attrs)) {
+                                        return false;
+                                    }
+
+                                    String relativePath = toRelativePath(basePath, path);
+
+                                    // Skip .gitignore files themselves when respectGitignore is
+                                    // enabled
+                                    if (parser != null && relativePath.endsWith(".gitignore")) {
+                                        return false;
+                                    }
+
+                                    // Check if file should be ignored based on .gitignore
+                                    return parser == null || !parser.isIgnored(relativePath, false);
+                                } catch (Exception e) {
+                                    // Skip files that can't be accessed during counting
+                                    return false;
                                 }
-
-                                // Skip Windows hidden files when generating manifest
-                                if (isWindowsHidden(path)) {
-                                    return;
-                                }
-
-                                String relativePath = toRelativePath(basePath, path);
-
-                                // Skip .gitignore files themselves when respectGitignore is enabled
-                                if (parser != null && relativePath.endsWith(".gitignore")) {
-                                    return;
-                                }
-
-                                // Check if file should be ignored based on .gitignore
-                                if (parser != null && parser.isIgnored(relativePath, false)) {
-                                    return;
-                                }
-
-                                totalFiles.incrementAndGet();
-                            } catch (Exception e) {
-                                // Skip files that can't be accessed during counting
-                            }
-                        });
+                            })) {
+                totalFiles.set((int) countPaths.count());
             }
             progressCallback.onStart(totalFiles.get());
         }
@@ -328,7 +339,7 @@ public class FileChangeDetector {
                         }
 
                         // Skip Windows hidden directories when generating manifest
-                        if (isWindowsHidden(dir)) {
+                        if (isHidden(attrs)) {
                             return FileVisitResult.SKIP_SUBTREE;
                         }
 
@@ -349,8 +360,14 @@ public class FileChangeDetector {
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
                             throws IOException {
+                        // Regular files read their metadata from the attributes walkFileTree
+                        // already fetched; other entries (symlinks) keep the link-following File
+                        // APIs so their manifest metadata keeps describing the target.
+                        boolean regularFile = attrs.isRegularFile();
+                        boolean hidden = regularFile ? isHidden(attrs) : isWindowsHidden(file);
+
                         // Skip Windows hidden files when generating manifest
-                        if (isWindowsHidden(file)) {
+                        if (hidden) {
                             return FileVisitResult.CONTINUE;
                         }
 
@@ -367,8 +384,11 @@ public class FileChangeDetector {
                         }
 
                         File fileObj = file.toFile();
-                        long size = fileObj.length();
-                        long lastModified = fileObj.lastModified();
+                        long size = regularFile ? attrs.size() : fileObj.length();
+                        long lastModified =
+                                regularFile
+                                        ? attrs.lastModifiedTime().toMillis()
+                                        : fileObj.lastModified();
 
                         FileInfo cachedInfo = cachedFiles.get(relativePath);
                         boolean quickMode = resolvedOptions.isUseQuickHash();
@@ -455,6 +475,51 @@ public class FileChangeDetector {
         }
 
         return manifest;
+    }
+
+    /**
+     * Generate a manifest for a sync flow, reusing checksums cached from the previous generation of
+     * the same folder.
+     *
+     * <p>Enables the per-folder persisted manifest (see {@link #persistedManifestFileFor(File)}),
+     * so a file whose size and lastModified are unchanged since the last generation reuses its
+     * cached MD5 without reading the file. The first generation of a folder is a full hash;
+     * subsequent ones only re-read files that visibly changed, which is what makes repeated sync
+     * previews of large folders cheap. Correctness is unaffected: the persisted manifest is
+     * discarded on any schema mismatch, and entries without a checksum (quick-mode binary files)
+     * always fall back to hashing.
+     */
+    public static FileManifest generateManifestWithCache(
+            File directory, boolean respectGitignore, boolean useQuickHash) throws IOException {
+        return generateManifestWithCache(
+                directory, respectGitignore, useQuickHash, persistedManifestFileFor(directory));
+    }
+
+    /**
+     * Variant of {@link #generateManifestWithCache(File, boolean, boolean)} backed by the given
+     * cache file instead of the default location.
+     */
+    static FileManifest generateManifestWithCache(
+            File directory, boolean respectGitignore, boolean useQuickHash, File cacheFile)
+            throws IOException {
+        return generateManifest(
+                directory,
+                ManifestGenerationOptions.builder()
+                        .withRespectGitignore(respectGitignore)
+                        .withUseQuickHash(useQuickHash)
+                        .withPersistedManifestFile(cacheFile)
+                        .build());
+    }
+
+    /**
+     * Persisted-manifest cache file for a sync folder: {@code <user.home>/.filesync/
+     * manifest-cache-<md5-of-absolute-path>.json}, one file per folder.
+     */
+    public static File persistedManifestFileFor(File directory) {
+        String folderKey =
+                HashUtil.md5Hex(directory.getAbsolutePath().getBytes(StandardCharsets.UTF_8));
+        File cacheDir = new File(System.getProperty("user.home"), CACHE_DIR_NAME);
+        return new File(cacheDir, MANIFEST_CACHE_PREFIX + folderKey + MANIFEST_CACHE_SUFFIX);
     }
 
     /**
@@ -864,9 +929,21 @@ public class FileChangeDetector {
     }
 
     /**
-     * Determine whether a path is hidden using Windows DOS attributes. This ignores Unix-style
-     * hidden semantics (names starting with '.') and only treats entries with the DOS hidden
-     * attribute as hidden.
+     * Whether an entry is hidden by Windows DOS attributes, taken from the attributes the walk
+     * already read (on Windows those implement {@link DosFileAttributes}). Ignores Unix-style
+     * hidden semantics (names starting with '.') and reports not-hidden on filesystems without DOS
+     * attributes — same semantics as {@link #isWindowsHidden(Path)} minus the extra attribute read.
+     */
+    private static boolean isHidden(BasicFileAttributes attrs) {
+        return attrs instanceof DosFileAttributes dosAttrs && dosAttrs.isHidden();
+    }
+
+    /**
+     * Determine whether a path is hidden using Windows DOS attributes. Reads through symbolic
+     * links, so it is used for walk entries whose manifest metadata also follows the target
+     * (non-regular files); regular files use {@link #isHidden(BasicFileAttributes)} instead. This
+     * ignores Unix-style hidden semantics (names starting with '.') and only treats entries with
+     * the DOS hidden attribute as hidden.
      */
     private static boolean isWindowsHidden(Path path) {
         try {
@@ -960,7 +1037,7 @@ public class FileChangeDetector {
         }
         Files.writeString(
                 path,
-                manifestToJson(manifest),
+                PERSIST_GSON.toJson(manifest),
                 StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING);

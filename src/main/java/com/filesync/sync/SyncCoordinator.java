@@ -204,7 +204,8 @@ public class SyncCoordinator {
         boolean fastMode = fastModeSupplier.getAsBoolean();
 
         FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(syncFolder, respectGitignore, fastMode);
+                FileChangeDetector.generateManifestWithCache(
+                        syncFolder, respectGitignore, fastMode);
 
         eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
         // Send our settings to the receiver so it generates manifest with the same options
@@ -486,7 +487,8 @@ public class SyncCoordinator {
 
             eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
             FileChangeDetector.FileManifest manifest =
-                    FileChangeDetector.generateManifest(syncFolder, respectGitignore, fastMode);
+                    FileChangeDetector.generateManifestWithCache(
+                            syncFolder, respectGitignore, fastMode);
             protocol.sendManifest(manifest);
             String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
             if (manifest.getEmptyDirectoryCount() > 0) {
