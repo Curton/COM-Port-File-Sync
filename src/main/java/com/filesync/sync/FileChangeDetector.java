@@ -44,9 +44,8 @@ public class FileChangeDetector {
     // preserve exact values across different filesystems. 3 seconds covers most cases.
     static final long MODIFY_WINDOW_MS = 3000;
 
-    // Persisted-manifest cache location, mirroring SignatureCache: under <user.home>/.filesync/
-    // (outside the sync folder so the manifest scan never sees it), one JSON file per folder.
-    private static final String CACHE_DIR_NAME = ".filesync";
+    // Persisted-manifest cache location, mirroring SignatureCache: one JSON file per folder under
+    // the shared cache directory (outside the sync folder so the manifest scan never sees it).
     private static final String MANIFEST_CACHE_PREFIX = "manifest-cache-";
     private static final String MANIFEST_CACHE_SUFFIX = ".json";
 
@@ -512,14 +511,16 @@ public class FileChangeDetector {
     }
 
     /**
-     * Persisted-manifest cache file for a sync folder: {@code <user.home>/.filesync/
-     * manifest-cache-<md5-of-absolute-path>.json}, one file per folder.
+     * Persisted-manifest cache file for a sync folder: {@code
+     * manifest-cache-<md5-of-absolute-path>.json} under {@link CacheLocations#cacheDir()}, one file
+     * per folder.
      */
     public static File persistedManifestFileFor(File directory) {
         String folderKey =
                 HashUtil.md5Hex(directory.getAbsolutePath().getBytes(StandardCharsets.UTF_8));
-        File cacheDir = new File(System.getProperty("user.home"), CACHE_DIR_NAME);
-        return new File(cacheDir, MANIFEST_CACHE_PREFIX + folderKey + MANIFEST_CACHE_SUFFIX);
+        return new File(
+                CacheLocations.cacheDir(),
+                MANIFEST_CACHE_PREFIX + folderKey + MANIFEST_CACHE_SUFFIX);
     }
 
     /**

@@ -34,13 +34,12 @@ import java.util.Set;
  * fresh signatures instead of repeating the rejected transfer. The memo is dropped automatically
  * once the receiver's file visibly changes or a later signature exchange overwrites the entry.
  *
- * <p>Cache files live under {@code <user.home>/.filesync/} (outside the sync folder so the manifest
- * scan never sees them), one JSON file per sync folder.
+ * <p>Cache files live under the shared cache directory ({@link CacheLocations#cacheDir()}, outside
+ * the sync folder so the manifest scan never sees them), one JSON file per sync folder.
  */
 public final class SignatureCache {
 
     private static final int SCHEMA_VERSION = 1;
-    private static final String CACHE_DIR_NAME = ".filesync";
     private static final String CACHE_FILE_PREFIX = "sigcache-";
     private static final String CACHE_FILE_SUFFIX = ".json";
 
@@ -69,8 +68,10 @@ public final class SignatureCache {
     public static SignatureCache forFolder(File syncFolder) {
         String folderKey =
                 HashUtil.md5Hex(syncFolder.getAbsolutePath().getBytes(StandardCharsets.UTF_8));
-        File dir = new File(System.getProperty("user.home"), CACHE_DIR_NAME);
-        return new SignatureCache(new File(dir, CACHE_FILE_PREFIX + folderKey + CACHE_FILE_SUFFIX));
+        return new SignatureCache(
+                new File(
+                        CacheLocations.cacheDir(),
+                        CACHE_FILE_PREFIX + folderKey + CACHE_FILE_SUFFIX));
     }
 
     /** Open (or start) the cache backed by the given file. */

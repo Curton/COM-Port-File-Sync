@@ -21,6 +21,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -50,6 +52,18 @@ import org.junit.jupiter.api.io.TempDir;
 class FileSyncManagerTest {
 
     @TempDir Path tempDir;
+
+    // The manager routes manifest requests into the real coordinator, so any disk cache it
+    // touches must land in the temp dir, never in the user's ~/.filesync.
+    @BeforeEach
+    void redirectDiskCaches() {
+        CacheLocations.setOverrideForTest(tempDir.resolve("cache-dir").toFile());
+    }
+
+    @AfterEach
+    void restoreDiskCaches() {
+        CacheLocations.clearOverrideForTest();
+    }
 
     @Test
     void remoteInitiatedDisconnect_tearsDownWithoutAutoReconnect() throws Exception {

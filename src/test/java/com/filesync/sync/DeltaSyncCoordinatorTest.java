@@ -42,6 +42,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,6 +56,19 @@ import org.mockito.ArgumentCaptor;
 class DeltaSyncCoordinatorTest {
 
     @TempDir Path tempDir;
+
+    // The delta path persists manifest and signature caches; keep them in the temp dir
+    // instead of the user's ~/.filesync.
+    @BeforeEach
+    void redirectDiskCaches() {
+        CacheLocations.setOverrideForTest(tempDir.resolve("cache-dir").toFile());
+    }
+
+    @AfterEach
+    void restoreDiskCaches() {
+        CacheLocations.clearOverrideForTest();
+    }
+
     private SyncProtocol mockProtocol;
     private SyncEventBus mockEventBus;
     private PendingFileWriteService pendingWriteService;

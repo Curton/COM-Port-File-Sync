@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -46,6 +47,18 @@ import org.junit.jupiter.api.io.TempDir;
 class SyncCoordinatorTest {
 
     @TempDir Path tempDir;
+
+    // Manifest generation in these tests persists real caches; keep them in the temp dir
+    // instead of the user's ~/.filesync.
+    @BeforeEach
+    void redirectDiskCaches() {
+        CacheLocations.setOverrideForTest(tempDir.resolve("cache-dir").toFile());
+    }
+
+    @AfterEach
+    void restoreDiskCaches() {
+        CacheLocations.clearOverrideForTest();
+    }
 
     private SyncProtocol mockProtocol;
     private SyncEventBus mockEventBus;

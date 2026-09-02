@@ -22,12 +22,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class ReconnectRecoveryTest {
 
     @TempDir Path tempDir;
+
+    // Coordinator constructions persist disk caches; keep them in the temp dir
+    // instead of the user's ~/.filesync.
+    @BeforeEach
+    void redirectDiskCaches() {
+        CacheLocations.setOverrideForTest(tempDir.resolve("cache-dir").toFile());
+    }
+
+    @AfterEach
+    void restoreDiskCaches() {
+        CacheLocations.clearOverrideForTest();
+    }
 
     /** Shared for coordinator constructions; these tests never trigger pending writes. */
     private final PendingFileWriteService pendingWriteService =
