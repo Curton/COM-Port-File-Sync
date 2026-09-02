@@ -189,7 +189,6 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         components.getConnectButton().setText("Disconnect");
         components.getDirectionButton().setEnabled(false);
         updateSyncButtonState();
-        logController.log("Sync cancelled");
     }
 
     private void runSyncWithPreflight(Runnable onProceed) {
