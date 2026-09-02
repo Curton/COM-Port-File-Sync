@@ -843,7 +843,7 @@ public class FileSyncManager {
                 // using SyncProtocol.waitForCommand(), which reads from the same serial stream.
                 // If this listener loop also reads at the same time, it can "steal" those ACKs,
                 // causing the sender to never start XMODEM and the receiver to hit
-                // "no response from sender after 10 handshake attempts".
+                // "no response from sender within the 10000ms handshake window".
                 //
                 // To avoid concurrent consumption of the command stream, pause this listener
                 // only while a synchronous serial read is actually in progress. The

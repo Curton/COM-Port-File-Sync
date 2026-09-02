@@ -5,12 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class XModemTransferTest {
 
@@ -104,6 +106,42 @@ class XModemTransferTest {
                 "A clean-but-short transfer must fail the known-length contract");
     }
 
+    @Test
+    @Timeout(20)
+    void sendSucceedsWhenHandshakeCharArrivesBeforeSendStarts() throws IOException {
+        // The receiver ACKs the transfer command and sends its 'C' immediately; by the time the
+        // sender enters the XMODEM phase the 'C' is usually already buffered. Purging the input
+        // here discarded it and stalled the session for a full receiver re-send cycle.
+        byte[] input = {
+            XModemTransfer.C,
+            XModemTransfer.ACK, // consumed by drainExtraHandshakeChars
+            XModemTransfer.ACK, // consumed by sendBlock's stale-char drain
+            XModemTransfer.ACK, // acknowledges the data block
+            XModemTransfer.ACK // acknowledges the EOT
+        };
+        PurgingTestSerialPortManager serialPort = new PurgingTestSerialPortManager(input);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(new byte[10]), "an early 'C' must complete the handshake");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveToleratesSenderThatAnswersAfterSeveralResendCycles() throws IOException {
+        // The receiver re-sends 'C' every 200ms; a sender that only answers after ~450ms —
+        // past one resend cycle — must still connect, because the receive window spans
+        // many cycles.
+        byte[] payload = {'A'};
+        DelayedTestSerialPortManager serialPort =
+                new DelayedTestSerialPortManager(buildSohFrame(payload), 450);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] result = transfer.receive(payload.length);
+
+        assertNotNull(result);
+        assertArrayEquals(payload, result);
+    }
+
     private static byte[] buildMultiBlockFrame(byte[] payload) {
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
         int offset = 0;
@@ -174,6 +212,118 @@ class XModemTransferTest {
         @Override
         public int available() {
             return inputStream.available();
+        }
+
+        @Override
+        public int read() throws IOException {
+            return inputStream.read();
+        }
+
+        @Override
+        public byte[] readExact(int length, int timeoutMs) throws IOException {
+            byte[] data = new byte[length];
+            int bytesRead = 0;
+            while (bytesRead < length) {
+                int read = inputStream.read(data, bytesRead, length - bytesRead);
+                if (read < 0) {
+                    throw new IOException(
+                            "Unexpected end of stream while reading " + length + " bytes");
+                }
+                bytesRead += read;
+            }
+            return data;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            // Intentionally ignored in test.
+        }
+
+        @Override
+        public void write(byte[] data) throws IOException {
+            // Intentionally ignored in test.
+        }
+
+        @Override
+        public void clearInputBuffer() throws IOException {
+            // Intentionally ignored in test.
+        }
+    }
+
+    /** Port manager whose clearInputBuffer purges buffered input, like the real serial driver. */
+    private static final class PurgingTestSerialPortManager extends SerialPortManager {
+        private final ByteArrayInputStream inputStream;
+
+        private PurgingTestSerialPortManager(byte[] input) {
+            this.inputStream = new ByteArrayInputStream(input);
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return inputStream.available();
+        }
+
+        @Override
+        public int read() throws IOException {
+            return inputStream.read();
+        }
+
+        @Override
+        public byte[] readExact(int length, int timeoutMs) throws IOException {
+            byte[] data = new byte[length];
+            int bytesRead = 0;
+            while (bytesRead < length) {
+                int read = inputStream.read(data, bytesRead, length - bytesRead);
+                if (read < 0) {
+                    throw new IOException(
+                            "Unexpected end of stream while reading " + length + " bytes");
+                }
+                bytesRead += read;
+            }
+            return data;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            // Intentionally ignored in test.
+        }
+
+        @Override
+        public void write(byte[] data) throws IOException {
+            // Intentionally ignored in test.
+        }
+
+        @Override
+        public void clearInputBuffer() throws IOException {
+            while (inputStream.available() > 0) {
+                inputStream.read();
+            }
+        }
+    }
+
+    /** Port manager whose input only becomes visible after a delay, simulating a slow sender. */
+    private static final class DelayedTestSerialPortManager extends SerialPortManager {
+        private final ByteArrayInputStream inputStream;
+        private final long deliverAtMillis;
+
+        private DelayedTestSerialPortManager(byte[] input, long delayMillis) {
+            this.inputStream = new ByteArrayInputStream(input);
+            this.deliverAtMillis = System.currentTimeMillis() + delayMillis;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return System.currentTimeMillis() >= deliverAtMillis ? inputStream.available() : 0;
         }
 
         @Override

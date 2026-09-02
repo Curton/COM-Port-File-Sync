@@ -291,11 +291,12 @@ class DeltaSyncCoordinatorTest {
 
     @Test
     void performSync_beneficialDelta_sendsFileDeltaAndSkipsBatch() throws IOException {
-        byte[] data = randomBytes(10 * 1024, 1);
+        byte[] data = randomBytes(64 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
         // Signatures computed from the same bytes -> every block matches -> delta is tiny ->
-        // beneficial.
+        // beneficial, and the absolute saving (random data does not compress) clears the
+        // per-session threshold with room to spare.
         SignatureSet sigs =
                 new SignatureSet(
                         List.of(
@@ -371,6 +372,61 @@ class DeltaSyncCoordinatorTest {
     }
 
     @Test
+    void performSync_ratioBeneficialButSmallSaving_fallsBackToBatch() throws IOException {
+        // 48KB of repetitive text: the full transfer compresses to a few hundred bytes, so a
+        // block-matching delta passes the ratio test, but its absolute wire saving is far
+        // below the handshake cost of a dedicated session — the file must ride the batch.
+        byte[] data =
+                "hello world\n".repeat(4000).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(tempDir.resolve("big.txt"), data);
+
+        SignatureSet sigs =
+                new SignatureSet(
+                        List.of(
+                                SignatureUtil.compute(
+                                        "big.txt",
+                                        data,
+                                        SignatureUtil.chooseBlockSize(data.length))));
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class)))
+                .thenAnswer(
+                        inv -> {
+                            BatchTransferSession.BatchProgressCallback cb = inv.getArgument(2);
+                            @SuppressWarnings("unchecked")
+                            List<Object[]> batch = inv.getArgument(0);
+                            for (int i = 0; i < batch.size(); i++) {
+                                cb.onEntryProcessed(i, batch.size(), (String) batch.get(i)[1]);
+                            }
+                            return true;
+                        });
+
+        SyncCoordinator coordinator = createCoordinator();
+        coordinator.setExecutor(null);
+        coordinator.startSyncWithPlan(planFor("big.txt", data.length));
+
+        verify(mockProtocol).requestDeltaSignatures(anyList());
+        verify(mockProtocol, never())
+                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol)
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
+        assertTrue(
+                postedEvents.stream()
+                        .filter(e -> e instanceof SyncEvent.LogEvent)
+                        .map(e -> ((SyncEvent.LogEvent) e).getMessage())
+                        .anyMatch(s -> s.contains("too small") && s.contains("big.txt")),
+                "the below-threshold saving must be logged");
+    }
+
+    @Test
     void performSync_noSignaturesForCandidate_fallsBackToBatch() throws IOException {
         byte[] data = randomBytes(10 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
@@ -401,7 +457,7 @@ class DeltaSyncCoordinatorTest {
 
     @Test
     void performSync_cachedSignatures_skipSecondSignatureExchange() throws IOException {
-        byte[] data = randomBytes(10 * 1024, 1);
+        byte[] data = randomBytes(64 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
         // The receiver state (size/mtime/md5) is stable across both syncs, so after the first
@@ -1215,7 +1271,7 @@ class DeltaSyncCoordinatorTest {
 
     @Test
     void performSync_beneficialCompressedDelta_logsCompressedTag() throws IOException {
-        byte[] data = randomBytes(10 * 1024, 1);
+        byte[] data = randomBytes(64 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
         SignatureSet sigs =

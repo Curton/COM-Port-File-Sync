@@ -81,6 +81,14 @@ public class SyncCoordinator {
     /** Minimum file size for rsync-style delta transfer; below this a full transfer is cheaper. */
     static final long MIN_DELTA_SIZE = 8 * 1024L;
 
+    /**
+     * Minimum wire-byte saving for a delta to justify its own XMODEM session. Every per-file
+     * session pays several hundred milliseconds of handshaking — roughly this many wire bytes at
+     * the default baud rate — so a smaller saving makes the batch path, which amortizes one session
+     * across many files, the faster choice.
+     */
+    static final long MIN_DELTA_SAVINGS_BYTES = 8 * 1024L;
+
     public SyncCoordinator(
             SyncProtocol protocol,
             SyncEventBus eventBus,
@@ -1256,15 +1264,23 @@ public class SyncCoordinator {
                                 CompressionUtil.compressIfBeneficial(path, delta);
                         CompressionUtil.CompressedData fullCompressed =
                                 CompressionUtil.compressIfBeneficial(path, source);
+                        long savedBytes =
+                                (long) fullCompressed.getData().length
+                                        - deltaCompressed.getData().length;
                         if (!DeltaEncoder.isBeneficial(
-                                deltaCompressed.getData().length,
-                                fullCompressed.getData().length)) {
+                                        deltaCompressed.getData().length,
+                                        fullCompressed.getData().length)
+                                || savedBytes < MIN_DELTA_SAVINGS_BYTES) {
+                            // The saving does not pay for a dedicated XMODEM session: the
+                            // batch path amortizes one session across many files.
                             deltaFallback.add(fi);
                             eventBus.post(
                                     new SyncEvent.LogEvent(
-                                            "Delta not beneficial for "
+                                            "Delta saving for "
                                                     + path
-                                                    + "; using full transfer"));
+                                                    + " too small ("
+                                                    + savedBytes
+                                                    + " bytes); using batch transfer"));
                             continue;
                         }
                         String sourceMd5 = HashUtil.md5Hex(source);
@@ -1275,9 +1291,6 @@ public class SyncCoordinator {
                                 protocol.sendFileDelta(
                                         path, delta, lastModified, source.length, sourceMd5);
                         long sendMs = System.currentTimeMillis() - sendStart;
-                        long savedBytes =
-                                (long) fullCompressed.getData().length
-                                        - deltaCompressed.getData().length;
                         int pct =
                                 (int)
                                         (100

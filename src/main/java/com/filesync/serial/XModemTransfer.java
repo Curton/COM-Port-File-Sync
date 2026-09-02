@@ -30,6 +30,8 @@ public class XModemTransfer {
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
     private static final byte PADDING = 0x1A; // CTRL-Z for padding
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
+    private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
+    private static final long RECEIVE_HANDSHAKE_WINDOW_MS = (long) MAX_RETRIES * 1000;
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
@@ -179,9 +181,9 @@ public class XModemTransfer {
 
             String detailedMessage =
                     "Failed to initiate transfer: "
-                            + "no response from sender after "
-                            + MAX_RETRIES
-                            + " handshake attempts"
+                            + "no response from sender within the "
+                            + RECEIVE_HANDSHAKE_WINDOW_MS
+                            + "ms handshake window"
                             + " (portOpen="
                             + portOpen
                             + ", bytesAvailable="
@@ -312,7 +314,14 @@ public class XModemTransfer {
 
     private boolean waitForHandshake() throws IOException {
         long startTime = System.currentTimeMillis();
-        serialPort.clearInputBuffer();
+        // The receiver sends its 'C' immediately after the command ACK, so the 'C' has usually
+        // already arrived by now; discarding it would stall the session until the receiver's
+        // next re-send cycle. Drain stale bytes but keep an early 'C'.
+        while (serialPort.available() > 0) {
+            if ((serialPort.read() & 0xFF) == C) {
+                return true;
+            }
+        }
 
         while (System.currentTimeMillis() - startTime < HANDSHAKE_TIMEOUT_MS) {
             int b = readByteWithTimeout(1000);
@@ -353,13 +362,15 @@ public class XModemTransfer {
     private boolean initiateReceive() throws IOException {
         serialPort.clearInputBuffer();
 
-        // Send 'C' to request CRC mode
-        for (int i = 0; i < MAX_RETRIES; i++) {
+        // Send 'C' to request CRC mode, re-sending every HANDSHAKE_RESEND_INTERVAL_MS so a 'C'
+        // the sender missed costs one short cycle instead of a full second. The overall wait
+        // keeps the former MAX_RETRIES x 1s budget.
+        long deadline = System.currentTimeMillis() + RECEIVE_HANDSHAKE_WINDOW_MS;
+        while (System.currentTimeMillis() < deadline) {
             serialPort.write(C);
 
-            // Wait up to 1 second for response, checking frequently
             long waitStart = System.currentTimeMillis();
-            while (System.currentTimeMillis() - waitStart < 1000) {
+            while (System.currentTimeMillis() - waitStart < HANDSHAKE_RESEND_INTERVAL_MS) {
                 if (serialPort.available() > 0) {
                     return true;
                 }
