@@ -2,6 +2,7 @@ package com.filesync.serial;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Arrays;
 
 /**
@@ -39,6 +40,13 @@ public class XModemTransfer {
      */
     private String lastErrorMessage;
 
+    /**
+     * Set when the last transfer failed because the peer sent a CAN signal. A peer cancel is an
+     * expected outcome, not a communication failure; SyncProtocol consults this to surface the
+     * failure as {@code TransferCancelledException} instead of a plain IOException.
+     */
+    private boolean cancelSignalled;
+
     private long transferStartTime;
     private long totalBytesTransferred;
 
@@ -52,6 +60,8 @@ public class XModemTransfer {
 
     /** Send data using XMODEM protocol (supports 4096/1024/128-byte blocks) */
     public boolean send(byte[] data) throws IOException {
+        cancelSignalled = false;
+
         // Wait for receiver to send 'C' to initiate CRC mode
         if (!waitForHandshake()) {
             reportError("Handshake failed: receiver not responding");
@@ -89,12 +99,17 @@ public class XModemTransfer {
 
             // Send block with retries
             if (!sendBlock(block, blockNumber, headerByte)) {
-                reportError(
-                        "Failed to send block "
-                                + blockNumber
-                                + " after "
-                                + MAX_RETRIES
-                                + " retries");
+                if (cancelSignalled) {
+                    // The receiver aborted deliberately: an expected outcome, not a failure.
+                    reportCancelled("Transfer cancelled by receiver");
+                } else {
+                    reportError(
+                            "Failed to send block "
+                                    + blockNumber
+                                    + " after "
+                                    + MAX_RETRIES
+                                    + " retries");
+                }
                 sendCancel();
                 return false;
             }
@@ -126,7 +141,30 @@ public class XModemTransfer {
      * @return received bytes, with padding removed only when expectedDataLength is unknown
      */
     public byte[] receive(int expectedDataLength) throws IOException {
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        long written = receiveInto(expectedDataLength, buffer);
+        if (written < 0) {
+            return null;
+        }
+        byte[] result = buffer.toByteArray();
+        if (expectedDataLength > 0) {
+            return enforceExpectedLength(result, expectedDataLength);
+        }
+        return removePadding(result);
+    }
+
+    /**
+     * Receive data using XMODEM, streaming each verified block into {@code sink} as it arrives so
+     * callers can stage large payloads on disk instead of buffering them in memory. When {@code
+     * expectedDataLength} is known, at most that many bytes are written — trailing padding of the
+     * final block is dropped — and a clean-but-short transfer is reported by returning fewer bytes
+     * than expected rather than failing.
+     *
+     * @return the number of bytes written to the sink, or -1 if the transfer failed (handshake
+     *     rejection, sender cancel, or retry exhaustion)
+     */
+    public long receiveInto(int expectedDataLength, OutputStream sink) throws IOException {
+        cancelSignalled = false;
 
         // Initiate transfer by sending 'C' for CRC mode
         if (!initiateReceive()) {
@@ -158,7 +196,7 @@ public class XModemTransfer {
                 // Ignore secondary failure during cancel
             }
 
-            return null;
+            return -1;
         }
 
         // Initialize transfer tracking
@@ -169,6 +207,7 @@ public class XModemTransfer {
 
         int expectedBlockNumber = 1;
         int retryCount = 0;
+        long written = 0;
 
         while (true) {
             int header = readByteWithTimeout(TIMEOUT_MS);
@@ -180,8 +219,10 @@ public class XModemTransfer {
             }
 
             if (header == CAN) {
-                reportError("Transfer cancelled by sender");
-                return null;
+                // The sender aborted deliberately: an expected outcome, not a link failure.
+                cancelSignalled = true;
+                reportCancelled("Transfer cancelled by sender");
+                return -1;
             }
 
             // Determine block size based on header
@@ -195,7 +236,7 @@ public class XModemTransfer {
                     if (retryCount > MAX_RETRIES) {
                         reportError("Too many errors, aborting transfer");
                         sendCancel();
-                        return null;
+                        return -1;
                     }
                     serialPort.write(NAK);
                     continue;
@@ -236,7 +277,7 @@ public class XModemTransfer {
                 if (retryCount > MAX_RETRIES) {
                     reportError("Too many CRC errors, aborting transfer");
                     sendCancel();
-                    return null;
+                    return -1;
                 }
                 serialPort.write(NAK);
                 continue;
@@ -244,7 +285,14 @@ public class XModemTransfer {
 
             // Check block number
             if (blockNum == (expectedBlockNumber & 0xFF)) {
-                outputStream.write(block);
+                int toWrite = blockSize;
+                if (expectedDataLength >= 0 && written + toWrite > expectedDataLength) {
+                    toWrite = (int) (expectedDataLength - written);
+                }
+                if (toWrite > 0) {
+                    sink.write(block, 0, toWrite);
+                    written += toWrite;
+                }
                 expectedBlockNumber++;
                 retryCount = 0;
                 serialPort.write(ACK);
@@ -259,12 +307,7 @@ public class XModemTransfer {
             }
         }
 
-        // Normalize received bytes based on expected length expectations
-        byte[] result = outputStream.toByteArray();
-        if (expectedDataLength > 0) {
-            return enforceExpectedLength(result, expectedDataLength);
-        }
-        return removePadding(result);
+        return written;
     }
 
     private boolean waitForHandshake() throws IOException {
@@ -359,6 +402,7 @@ public class XModemTransfer {
                 return true;
             }
             if (response == CAN) {
+                cancelSignalled = true;
                 return false;
             }
             // NAK, 'C' (stale handshake char), or timeout - retry
@@ -511,6 +555,18 @@ public class XModemTransfer {
         }
     }
 
+    /**
+     * Report a deliberate peer cancel: remembered for diagnostics like an error, but surfaced
+     * through {@link TransferProgressListener#onCancelled} so listeners log it as a normal event
+     * instead of raising an ERROR.
+     */
+    private void reportCancelled(String message) {
+        this.lastErrorMessage = message;
+        if (progressListener != null) {
+            progressListener.onCancelled(message);
+        }
+    }
+
     private record BlockFormat(int size, byte header) {}
 
     /**
@@ -521,11 +577,22 @@ public class XModemTransfer {
         return lastErrorMessage;
     }
 
+    /**
+     * Whether the last transfer failure was a peer cancel (CAN signal) rather than a genuine
+     * communication problem. Reset at the start of every send/receive.
+     */
+    public boolean wasCancelSignalled() {
+        return cancelSignalled;
+    }
+
     /** Progress listener interface for transfer status updates */
     public interface TransferProgressListener {
         void onProgress(
                 int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec);
 
         void onError(String message);
+
+        /** A deliberate cancel (CAN) ended the transfer; an expected, benign outcome. */
+        default void onCancelled(String message) {}
     }
 }

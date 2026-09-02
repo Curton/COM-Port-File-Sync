@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -241,6 +242,38 @@ public class CompressionUtil {
                                     + " bytes");
                 }
                 baos.write(buffer, 0, bytesRead);
+            }
+        }
+        return baos.toByteArray();
+    }
+
+    /**
+     * Decompress GZIP data, tolerating a stream truncated mid-transfer. Everything readable before
+     * the truncation point is returned — an exact byte prefix of the original input, because
+     * deflate decodes deterministically from the start. Used to salvage the partial content of an
+     * interrupted compressed transfer; unlike {@link #decompress(byte[])} no output-size cap is
+     * applied, since the caller is recovering data it already accepted from the wire.
+     *
+     * @return the decompressed prefix (possibly empty when nothing readable was received)
+     */
+    public static byte[] decompressTruncated(byte[] compressedData) throws IOException {
+        if (compressedData == null || compressedData.length == 0) {
+            return compressedData;
+        }
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (GZIPInputStream gzis =
+                new GZIPInputStream(new ByteArrayInputStream(compressedData), 8192)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = gzis.read(buffer)) != -1) {
+                baos.write(buffer, 0, bytesRead);
+            }
+        } catch (IOException e) {
+            // Truncation surfaces as EOF; a cut inside the deflate stream may instead surface as
+            // a decode error. Keep whatever decoded cleanly, and only fail when nothing was
+            // recovered and the failure is not a plain truncation (e.g. not GZIP data at all).
+            if (baos.size() == 0 && !(e instanceof EOFException)) {
+                throw e;
             }
         }
         return baos.toByteArray();

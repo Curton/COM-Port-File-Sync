@@ -809,6 +809,61 @@ class FileSyncManagerTest {
         }
     }
 
+    /**
+     * Regression: a sender-side cancel (CAN during an incoming file transfer) is an expected
+     * outcome. The listen loop must log it benignly and keep the connection up instead of reporting
+     * a communication error and tearing the link down.
+     */
+    @Test
+    void incomingTransferCancelledByRemote_keepsConnectionUp() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(tempDir.toFile());
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // Feed a FILE_DATA command; the listener thread ACKs and blocks in xmodem.receive.
+            serial.feedLine("[[SYNC:FILE_DATA:incoming.bin:50:false:0]]");
+            waitUntil(
+                    () -> serial.getWrittenLines().contains("[[SYNC:ACK]]"), Duration.ofSeconds(5));
+            // The sender cancels: XMODEM CAN followed by the control-plane CMD_CANCEL.
+            serial.feedBytes(new byte[] {XModemTransfer.CAN, XModemTransfer.CAN});
+            serial.feedLine("[[SYNC:CANCEL]]");
+
+            // The cancel is logged as a benign event...
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.LogEvent le
+                                                            && le.getMessage()
+                                                                    .contains(
+                                                                            "cancelled by sender")),
+                    Duration.ofSeconds(10));
+
+            // ...no ERROR is raised anywhere...
+            assertTrue(
+                    events.stream().noneMatch(e -> e instanceof SyncEvent.ErrorEvent),
+                    "A peer cancel must not surface as an ERROR: "
+                            + events.stream()
+                                    .filter(e -> e instanceof SyncEvent.ErrorEvent)
+                                    .toList());
+
+            // ...and the connection survives the cancel.
+            assertTrue(fsm.isRunning(), "Listen loop must keep running after a cancelled transfer");
+            assertTrue(
+                    fsm.isConnectionAlive(),
+                    "Connection must stay alive after a cancelled transfer");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
     /** Build a single-frame batch from (relativePath, content) pairs, keeping the pair order. */
     private static byte[] buildBatch(String[] paths, String[] contents) throws Exception {
         List<Object[]> files = new ArrayList<>();

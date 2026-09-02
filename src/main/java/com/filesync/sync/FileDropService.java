@@ -1,6 +1,7 @@
 package com.filesync.sync;
 
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -73,6 +74,10 @@ public class FileDropService {
         try {
             protocol.sendDropFile(file);
             eventBus.post(new SyncEvent.LogEvent("Dropped file sent: " + file.getName()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+        } catch (TransferCancelledException e) {
+            // A peer cancel is expected; log it benignly instead of raising an error.
+            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
@@ -147,6 +152,10 @@ public class FileDropService {
             eventBus.post(
                     new SyncEvent.LogEvent(
                             "Dropped file received: " + savedFile.getAbsolutePath()));
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+        } catch (TransferCancelledException e) {
+            // A peer cancel is expected; log it benignly instead of raising an error.
+            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(

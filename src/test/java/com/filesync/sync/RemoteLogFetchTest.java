@@ -265,17 +265,24 @@ class RemoteLogFetchTest {
 
             assertFalse(feeder.isAlive(), "Feeder thread should have completed");
             assertNull(result, "An aborted XMODEM receive must yield null");
+            // A peer cancel is a benign outcome: reported as a plain log line, not an ERROR.
             assertTrue(
                     events.stream()
                             .anyMatch(
                                     e ->
+                                            e instanceof SyncEvent.LogEvent le
+                                                    && le.getMessage()
+                                                            .contains("cancelled by sender")),
+                    "The cancel must be reported as a benign log event");
+            assertTrue(
+                    events.stream()
+                            .noneMatch(
+                                    e ->
                                             e instanceof SyncEvent.ErrorEvent ee
                                                     && ee.getMessage()
-                                                            .contains("Failed to fetch remote log:")
-                                                    && ee.getMessage()
                                                             .contains(
-                                                                    "Transfer cancelled by sender")),
-                    "The abort must be reported with the XMODEM cancellation detail");
+                                                                    "Failed to fetch remote log")),
+                    "A peer cancel must not surface as a fetch error");
         } finally {
             stopQuietly(fsm);
         }

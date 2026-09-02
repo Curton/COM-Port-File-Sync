@@ -1,6 +1,7 @@
 package com.filesync.sync;
 
 import com.filesync.delta.HashUtil;
+import com.filesync.protocol.SyncProtocol;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
@@ -303,6 +304,12 @@ public class FileChangeDetector {
 
                                     String relativePath = toRelativePath(basePath, path);
 
+                                    // Skip large-transfer staging files (partial disk-write);
+                                    // they are protocol state, not user content
+                                    if (isPartialStagePath(relativePath)) {
+                                        return false;
+                                    }
+
                                     // Skip .gitignore files themselves when respectGitignore is
                                     // enabled
                                     if (parser != null && relativePath.endsWith(".gitignore")) {
@@ -371,6 +378,12 @@ public class FileChangeDetector {
                         }
 
                         String relativePath = toRelativePath(basePath, file);
+
+                        // Skip large-transfer staging files (partial disk-write); they are
+                        // protocol state, not user content
+                        if (isPartialStagePath(relativePath)) {
+                            return FileVisitResult.CONTINUE;
+                        }
 
                         // Skip .gitignore files themselves when respectGitignore is enabled
                         if (parser != null && relativePath.endsWith(".gitignore")) {
@@ -937,6 +950,20 @@ public class FileChangeDetector {
      */
     private static boolean isHidden(BasicFileAttributes attrs) {
         return attrs instanceof DosFileAttributes dosAttrs && dosAttrs.isHidden();
+    }
+
+    /**
+     * Whether a relative path is a large-transfer staging file written by SyncProtocol's partial
+     * disk-write receive ({@code ".<name>" + SyncProtocol.PARTIAL_SUFFIX}). The dot prefix alone is
+     * not sufficient: the hidden check above is DOS-attribute-based, so the manifest must
+     * explicitly skip these so a stage left behind by a crashed transfer is never synced as user
+     * content. It is either consumed by the failure salvage or overwritten by the next transfer of
+     * the same path.
+     */
+    private static boolean isPartialStagePath(String relativePath) {
+        int slash = relativePath.lastIndexOf('/');
+        String name = slash >= 0 ? relativePath.substring(slash + 1) : relativePath;
+        return name.startsWith(".") && name.endsWith(SyncProtocol.PARTIAL_SUFFIX);
     }
 
     /**

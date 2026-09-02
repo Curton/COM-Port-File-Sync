@@ -6,10 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -422,5 +424,63 @@ class CompressionUtilTest {
 
         CompressionUtil.CompressedData cdFalse = new CompressionUtil.CompressedData(data, false);
         assertFalse(cdFalse.isCompressed());
+    }
+
+    @Test
+    void decompressTruncatedReturnsFullDataForCompleteStream() throws IOException {
+        byte[] original = repeatingBytes(100_000);
+        byte[] compressed = CompressionUtil.compress(original);
+
+        assertArrayEquals(
+                original,
+                CompressionUtil.decompressTruncated(compressed),
+                "A complete stream must decompress exactly");
+    }
+
+    @Test
+    void decompressTruncatedReturnsPrefixOfTruncatedStream() throws IOException {
+        byte[] original = repeatingBytes(200_000);
+        byte[] compressed = CompressionUtil.compress(original);
+        byte[] cut = Arrays.copyOf(compressed, compressed.length / 2);
+
+        byte[] prefix = CompressionUtil.decompressTruncated(cut);
+
+        assertTrue(prefix.length > 0, "A mid-stream cut must still decode something");
+        assertTrue(prefix.length < original.length, "The decoded output must be partial");
+        assertArrayEquals(
+                Arrays.copyOf(original, prefix.length),
+                prefix,
+                "Everything decoded before the cut must be an exact byte prefix of the original");
+    }
+
+    @Test
+    void decompressTruncatedReturnsEmptyWhenHeaderIsTruncated() throws IOException {
+        byte[] compressed = CompressionUtil.compress("hello".getBytes(StandardCharsets.UTF_8));
+        byte[] cut = Arrays.copyOf(compressed, 4);
+
+        assertEquals(0, CompressionUtil.decompressTruncated(cut).length);
+    }
+
+    @Test
+    void decompressTruncatedRejectsNonGzipData() {
+        assertThrows(
+                IOException.class,
+                () ->
+                        CompressionUtil.decompressTruncated(
+                                "not gzip".getBytes(StandardCharsets.UTF_8)),
+                "Garbage input must fail, not return silently");
+    }
+
+    @Test
+    void decompressTruncatedHandlesEmptyInput() throws IOException {
+        assertEquals(0, CompressionUtil.decompressTruncated(new byte[0]).length);
+    }
+
+    private static byte[] repeatingBytes(int size) {
+        byte[] data = new byte[size];
+        for (int i = 0; i < size; i++) {
+            data[i] = (byte) ('a' + (i % 26));
+        }
+        return data;
     }
 }

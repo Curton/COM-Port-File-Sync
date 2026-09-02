@@ -9,6 +9,7 @@ import com.filesync.delta.BlockSignature;
 import com.filesync.delta.FileSignatures;
 import com.filesync.delta.SignatureSet;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
 import java.io.IOException;
@@ -144,7 +145,10 @@ class DeltaSyncProtocolTest {
                         () ->
                                 protocol.sendFileDelta(
                                         "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
-        assertTrue(thrown.getMessage().contains("Failed to send file delta"));
+        assertTrue(
+                thrown instanceof TransferCancelledException,
+                "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("cancelled by receiver"));
         // XMODEM-phase failure must not retry: exactly one FILE_DELTA frame was written.
         assertEquals(
                 1,
@@ -158,7 +162,6 @@ class DeltaSyncProtocolTest {
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
                 "must send a transfer cancel on XMODEM-phase failure: " + serial.getWrittenLines());
-        assertTrue(thrown.getMessage().contains("after 1 attempt(s)"));
         assertFalse(protocol.isXmodemInProgress());
     }
 
@@ -176,14 +179,17 @@ class DeltaSyncProtocolTest {
                 assertThrows(
                         IOException.class,
                         () -> protocol.sendDeltaSignatures(SignatureSet.empty()));
-        assertTrue(thrown.getMessage().contains("Failed to send delta signatures"));
+        assertTrue(
+                thrown instanceof TransferCancelledException,
+                "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("cancelled by receiver"));
         assertFalse(protocol.isXmodemInProgress());
     }
 
     @Test
-    void requestDeltaSignatures_receiveFailureThrows() throws IOException {
+    void requestDeltaSignatures_senderCancelThrowsCancelled() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        // Announce the data, then feed CAN so xmodem.receive aborts and returns null immediately.
+        // Announce the data, then feed CAN so xmodem.receive aborts as a deliberate cancel.
         serial.feedLine("[[SYNC:DELTA_SIG_DATA:10]]");
         serial.feedBytes(
                 new byte[] {
@@ -191,9 +197,31 @@ class DeltaSyncProtocolTest {
                 });
         SyncProtocol protocol = new SyncProtocol(serial);
 
+        TransferCancelledException thrown =
+                assertThrows(
+                        TransferCancelledException.class,
+                        () -> protocol.requestDeltaSignatures(List.of("a.bin")));
+        assertTrue(
+                thrown.getMessage().contains("cancelled by sender"),
+                "cancel must be reported as such: " + thrown.getMessage());
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void requestDeltaSignatures_receiveFailureThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        // Announce the data, then feed EOT with no blocks: a short receive is a genuine failure
+        // (not a cancel) and must stay a plain IOException.
+        serial.feedLine("[[SYNC:DELTA_SIG_DATA:10]]");
+        serial.feedBytes(new byte[] {XModemTransfer.EOT});
+        SyncProtocol protocol = new SyncProtocol(serial);
+
         IOException thrown =
                 assertThrows(
                         IOException.class, () -> protocol.requestDeltaSignatures(List.of("a.bin")));
+        assertFalse(
+                thrown instanceof TransferCancelledException,
+                "a short transfer is not a cancel: " + thrown.getMessage());
         assertTrue(
                 thrown.getMessage().contains("Failed to receive delta signatures"),
                 "msg: " + thrown.getMessage());
@@ -262,7 +290,10 @@ class DeltaSyncProtocolTest {
                         () ->
                                 protocol.sendFile(
                                         tempDir.toFile(), "a.bin", new byte[] {1, 2, 3}, 1234L));
-        assertTrue(thrown.getMessage().contains("Failed to send merged file"));
+        assertTrue(
+                thrown instanceof TransferCancelledException,
+                "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("cancelled by receiver"));
         assertEquals(
                 1,
                 serial.getWrittenLines().stream()
@@ -272,7 +303,6 @@ class DeltaSyncProtocolTest {
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
                 "must send a transfer cancel: " + serial.getWrittenLines());
-        assertTrue(thrown.getMessage().contains("after 1 attempt(s)"));
         assertFalse(protocol.isXmodemInProgress());
     }
 

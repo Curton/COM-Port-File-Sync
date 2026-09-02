@@ -2,10 +2,12 @@ package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.delta.HashUtil;
+import com.filesync.protocol.SyncProtocol;
 import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
@@ -26,6 +28,22 @@ import org.junit.jupiter.api.io.TempDir;
 class FileChangeDetectorTest {
 
     @TempDir Path tempDir;
+
+    @Test
+    void manifestSkipsLargeTransferStagingFiles() throws IOException {
+        Files.writeString(tempDir.resolve(".big.bin" + SyncProtocol.PARTIAL_SUFFIX), "stage bytes");
+        Files.writeString(tempDir.resolve("real.txt"), "real");
+
+        FileChangeDetector.FileManifest manifest =
+                FileChangeDetector.generateManifest(
+                        tempDir.toFile(),
+                        FileChangeDetector.ManifestGenerationOptions.builder().build());
+
+        assertNull(
+                manifest.getFiles().get(".big.bin" + SyncProtocol.PARTIAL_SUFFIX),
+                "A transfer staging file must never be synced as user content");
+        assertNotNull(manifest.getFiles().get("real.txt"));
+    }
 
     @Test
     void reusesCachedHashWhenMetadataUnchanged() throws IOException {

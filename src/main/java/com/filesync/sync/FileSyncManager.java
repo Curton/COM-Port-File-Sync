@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
@@ -37,6 +38,16 @@ public class FileSyncManager {
 
     private volatile File syncFolder;
     private volatile boolean strictSyncMode = false;
+
+    /**
+     * When a cancelled transfer was just aborted via the CAN signal, the peer's redundant
+     * control-plane CMD_CANCEL (sent in the same burst) must not reset the connection: the stream
+     * was already resynced. This records when such an abort happened; a CMD_CANCEL arriving within
+     * {@link #CANCEL_RESET_SUPPRESS_WINDOW_MS} is acknowledged benignly instead.
+     */
+    private static final long CANCEL_RESET_SUPPRESS_WINDOW_MS = 2000;
+
+    private volatile long lastTransferCancelAtMillis;
     private volatile boolean respectGitignoreMode = false;
     private volatile boolean fastMode = false;
 
@@ -175,6 +186,15 @@ public class FileSyncManager {
                                 || fileDropService.isTransferInProgress()
                                 || protocol.isXmodemInProgress()) {
                             eventBus.post(new SyncEvent.ErrorEvent(message));
+                        }
+                    }
+
+                    @Override
+                    public void onCancelled(String message) {
+                        if (syncCoordinator.isSyncing()
+                                || fileDropService.isTransferInProgress()
+                                || protocol.isXmodemInProgress()) {
+                            eventBus.post(new SyncEvent.LogEvent(message));
                         }
                     }
                 });
@@ -642,6 +662,9 @@ public class FileSyncManager {
                     protocol.stashAsyncMessage(msg);
                 }
             }
+        } catch (TransferCancelledException e) {
+            // A peer cancel is an expected outcome; log it benignly instead of raising an error.
+            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent(
@@ -753,6 +776,9 @@ public class FileSyncManager {
                     protocol.stashAsyncMessage(msg);
                 }
             }
+        } catch (TransferCancelledException e) {
+            // A peer cancel is an expected outcome; log it benignly instead of raising an error.
+            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
@@ -867,6 +893,19 @@ public class FileSyncManager {
                         // Ignore send failures while handling malformed inbound messages.
                     }
                 }
+            } catch (TransferCancelledException e) {
+                // A peer-cancelled transfer is an expected outcome, not a link failure: log it
+                // benignly and drain any residual cancel bytes so the session continues. The
+                // timestamp suppresses the redundant CMD_CANCEL-triggered connection reset.
+                lastTransferCancelAtMillis = System.currentTimeMillis();
+                if (running.get()) {
+                    eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+                    try {
+                        protocol.clearInputBuffer();
+                    } catch (IOException ignored) {
+                        // The link is gone for another reason; liveness detection handles it.
+                    }
+                }
             } catch (IOException e) {
                 if (running.get()) {
                     eventBus.post(
@@ -957,6 +996,11 @@ public class FileSyncManager {
                 protocol.sendAck();
                 try {
                     syncCoordinator.handleIncomingBatchUnknownTotal(expectedSize);
+                } catch (TransferCancelledException e) {
+                    // A peer cancel is expected; log it benignly instead of raising an error.
+                    // The stream was resynced, so also suppress the redundant CMD_CANCEL reset.
+                    lastTransferCancelAtMillis = System.currentTimeMillis();
+                    eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
                 } catch (IOException e) {
                     eventBus.post(
                             new SyncEvent.ErrorEvent("Batch receive failed: " + e.getMessage()));
@@ -979,9 +1023,17 @@ public class FileSyncManager {
                 eventBus.post(new SyncEvent.ErrorEvent("Remote error: " + msg.getParam(0)));
             }
             case SyncProtocol.CMD_CANCEL -> {
-                eventBus.post(
-                        new SyncEvent.LogEvent("Remote cancelled sync, resetting connection"));
-                restartListening();
+                long sinceCancel = System.currentTimeMillis() - lastTransferCancelAtMillis;
+                if (sinceCancel >= 0 && sinceCancel < CANCEL_RESET_SUPPRESS_WINDOW_MS) {
+                    // The transfer was already aborted via the CAN signal and the stream
+                    // resynced; this redundant control-plane cancel must not reset the
+                    // connection.
+                    eventBus.post(new SyncEvent.LogEvent("Remote cancelled transfer"));
+                } else {
+                    eventBus.post(
+                            new SyncEvent.LogEvent("Remote cancelled sync, resetting connection"));
+                    restartListening();
+                }
             }
             case SyncProtocol.CMD_HEARTBEAT -> {
                 // Echo an ACK so the peer's liveness flips on this frame instead of waiting up

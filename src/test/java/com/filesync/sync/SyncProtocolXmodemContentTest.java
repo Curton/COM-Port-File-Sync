@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import java.io.File;
@@ -240,7 +241,8 @@ class SyncProtocolXmodemContentTest {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         // Scripted peer: ACK the LOG_XFER announcement, then handshake with 'C'. Each drain step
         // (extra handshake char, stale pre-block char) consumes one non-C/NAK byte, so the third
-        // CAN is what readByteWithTimeout sees as the block response, failing sendBlock.
+        // CAN is what readByteWithTimeout sees as the block response, failing sendBlock. A CAN
+        // block response is a deliberate peer cancel and must surface as such.
         serial.feedLine("[[SYNC:ACK]]");
         serial.feedBytes(
                 new byte[] {
@@ -254,11 +256,9 @@ class SyncProtocolXmodemContentTest {
                 assertThrows(IOException.class, () -> protocol.sendLogViaXmodem(data, data.length));
 
         assertTrue(
-                thrown.getMessage().contains("Failed to send log via XMODEM"),
-                "A rejected transfer must fail with the XMODEM error detail");
-        assertTrue(
-                thrown.getMessage().contains("Failed to send block"),
-                "The peer CAN must surface as the block-level failure detail");
+                thrown instanceof TransferCancelledException,
+                "a CAN block response is a deliberate peer cancel: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("cancelled by receiver"));
         assertFalse(
                 protocol.isXmodemInProgress(),
                 "xmodemInProgress must be reset even when the log XMODEM send fails");

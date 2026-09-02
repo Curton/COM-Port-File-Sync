@@ -7,10 +7,12 @@ import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.FileChangeDetector;
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -278,7 +280,9 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException("Failed to receive manifest data (" + detail + ")");
+            throw xmodemReceiveFailure(
+                    "Manifest transfer cancelled by sender",
+                    "Failed to receive manifest data (" + detail + ")");
         }
 
         byte[] data = CompressionUtil.decompress(compressed);
@@ -323,7 +327,9 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException("Failed to receive delta signatures (" + detail + ")");
+            throw xmodemReceiveFailure(
+                    "Delta signature transfer cancelled by sender",
+                    "Failed to receive delta signatures (" + detail + ")");
         }
         byte[] data = CompressionUtil.decompress(compressed);
         return SignatureSet.fromBytes(data);
@@ -348,7 +354,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException("Failed to send delta signatures (" + detail + ")");
+                throw maybePeerCancelled(
+                        new IOException("Failed to send delta signatures (" + detail + ")"),
+                        "Delta signature transfer cancelled by receiver");
             }
         } finally {
             xmodemInProgress.set(false);
@@ -458,11 +466,9 @@ public class SyncProtocol {
         if (lastFailure != null) {
             finalEx.addSuppressed(lastFailure);
         }
-        try {
-            sendError("File delta send failed: " + relativePath);
-        } catch (IOException ignored) {
-        }
-        throw finalEx;
+        notifyPeerOfSendFailure("File delta send failed: " + relativePath);
+        throw maybePeerCancelled(
+                finalEx, "Delta transfer of " + relativePath + " cancelled by receiver");
     }
 
     /**
@@ -508,7 +514,8 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException(
+            throw xmodemReceiveFailure(
+                    "Delta transfer of " + relativePath + " cancelled by sender",
                     "Failed to receive file delta for " + relativePath + " (" + detail + ")");
         }
         validateReceivedSize("file delta", relativePath, expectedSize, payload);
@@ -660,11 +667,9 @@ public class SyncProtocol {
         if (lastFailure != null) {
             finalEx.addSuppressed(lastFailure);
         }
-        try {
-            sendError("File append send failed: " + relativePath);
-        } catch (IOException ignored) {
-        }
-        throw finalEx;
+        notifyPeerOfSendFailure("File append send failed: " + relativePath);
+        throw maybePeerCancelled(
+                finalEx, "Append transfer of " + relativePath + " cancelled by receiver");
     }
 
     /**
@@ -717,7 +722,8 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException(
+            throw xmodemReceiveFailure(
+                    "Append transfer of " + relativePath + " cancelled by sender",
                     "Failed to receive file append for " + relativePath + " (" + detail + ")");
         }
         validateReceivedSize("file append", relativePath, expectedSize, payload);
@@ -889,11 +895,7 @@ public class SyncProtocol {
         }
         // All attempts failed. Notify the receiver so it exits any XMODEM receive loop still
         // pending from a command-phase failure (an XMODEM-phase failure already sent a cancel).
-        try {
-            sendError("Batch transfer failed after " + attemptsUsed + " attempt(s)");
-        } catch (IOException ignored) {
-            // Best-effort; if this also fails, receiver will eventually timeout
-        }
+        notifyPeerOfSendFailure("Batch transfer failed after " + attemptsUsed + " attempt(s)");
         return false;
     }
 
@@ -943,7 +945,9 @@ public class SyncProtocol {
             xmodemInProgress.set(false);
         }
         if (batch == null) {
-            throw new IOException("Failed to receive batch: " + xmodem.getLastErrorMessage());
+            throw xmodemReceiveFailure(
+                    "Batch transfer cancelled by sender",
+                    "Failed to receive batch: " + xmodem.getLastErrorMessage());
         }
 
         return BatchTransferSession.decodeAndWriteBatch(
@@ -1072,12 +1076,9 @@ public class SyncProtocol {
         }
         // Notify the receiver so it exits any XMODEM receive loop still pending from a
         // command-phase failure (an XMODEM-phase failure already sent a cancel).
-        try {
-            sendError("File send failed: " + relativePath);
-        } catch (IOException ignored) {
-            // Best-effort; if this also fails, receiver will eventually timeout
-        }
-        throw finalEx;
+        notifyPeerOfSendFailure("File send failed: " + relativePath);
+        throw maybePeerCancelled(
+                finalEx, "File transfer of " + relativePath + " cancelled by receiver");
     }
 
     /**
@@ -1200,12 +1201,9 @@ public class SyncProtocol {
         }
         // Notify the receiver so it exits any XMODEM receive loop still pending from a
         // command-phase failure (an XMODEM-phase failure already sent a cancel).
-        try {
-            sendError("File send failed: " + relativePath);
-        } catch (IOException ignored) {
-            // Best-effort; if this also fails, receiver will eventually timeout
-        }
-        throw finalEx;
+        notifyPeerOfSendFailure("File send failed: " + relativePath);
+        throw maybePeerCancelled(
+                finalEx, "File transfer of " + relativePath + " cancelled by receiver");
     }
 
     /** Send a single dropped file to the peer. */
@@ -1236,17 +1234,65 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException(
-                        "Failed to send dropped file " + fileName + " (" + detail + ")");
+                throw maybePeerCancelled(
+                        new IOException(
+                                "Failed to send dropped file " + fileName + " (" + detail + ")"),
+                        "Dropped file transfer of " + fileName + " cancelled by receiver");
             }
         } finally {
             xmodemInProgress.set(false);
         }
     }
 
-    /** Receive file data and save to directory */
+    /**
+     * Wire size above which a NEW file's transfer is staged to disk while receiving (partial
+     * disk-write) instead of buffered in memory, so an interrupted transfer leaves a resumable
+     * prefix at the target path for the next sync's append/delta fast paths. The sync planner also
+     * uses this to route files of this size individually rather than through the batch envelope.
+     */
+    public static final int PARTIAL_DISK_WRITE_THRESHOLD_BYTES = 4 * 1024 * 1024;
+
+    /**
+     * Suffix of the receive-side staging file ({@code ".<name>"} + this) written next to the target
+     * while a large new file transfers. The manifest scan skips these so a stage left behind by a
+     * crash is never synced as user content.
+     */
+    public static final String PARTIAL_SUFFIX = ".filesync-part";
+
+    /**
+     * Receive file data and save to directory. Payloads above {@link
+     * #PARTIAL_DISK_WRITE_THRESHOLD_BYTES} for a target that does not exist yet are streamed to a
+     * staging file next to the target as blocks arrive, so an interrupted transfer leaves a
+     * resumable prefix on disk; everything else keeps the buffered receive, which never touches the
+     * target unless the whole transfer completed.
+     */
     public void receiveFile(
             File baseDir,
+            String relativePath,
+            int expectedSize,
+            boolean compressed,
+            long lastModified)
+            throws IOException {
+        File targetFile = new File(baseDir, relativePath);
+        File parentDir = targetFile.getParentFile();
+        if (parentDir != null && !parentDir.exists()) {
+            parentDir.mkdirs();
+        }
+
+        if (expectedSize <= PARTIAL_DISK_WRITE_THRESHOLD_BYTES || targetFile.exists()) {
+            receiveFileBuffered(targetFile, relativePath, expectedSize, compressed, lastModified);
+        } else {
+            receiveFileStaged(targetFile, relativePath, expectedSize, compressed, lastModified);
+        }
+    }
+
+    /**
+     * Buffered receive: the whole payload is held in memory and written once, at the end. Used for
+     * small payloads and for targets that already exist (so an interruption leaves the existing
+     * file untouched).
+     */
+    private void receiveFileBuffered(
+            File targetFile,
             String relativePath,
             int expectedSize,
             boolean compressed,
@@ -1271,7 +1317,8 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException(
+            throw xmodemReceiveFailure(
+                    "File transfer of " + relativePath + " cancelled by sender",
                     "Failed to receive file data for " + relativePath + " (" + detail + ")");
         }
 
@@ -1281,13 +1328,6 @@ public class SyncProtocol {
         // Decompress if needed
         if (compressed) {
             data = CompressionUtil.decompress(data);
-        }
-
-        // Create directories if needed
-        File targetFile = new File(baseDir, relativePath);
-        File parentDir = targetFile.getParentFile();
-        if (parentDir != null && !parentDir.exists()) {
-            parentDir.mkdirs();
         }
 
         // Write file; a failure here (e.g. target locked by another program) is surfaced as a
@@ -1303,6 +1343,124 @@ public class SyncProtocol {
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);
         }
+    }
+
+    /**
+     * Staged receive for large NEW files: verified XMODEM blocks are streamed to a {@code
+     * .filesync-part} staging file next to the target as they arrive. On a clean transfer the stage
+     * is decoded and written exactly like the buffered path. On an interruption the stage holds an
+     * in-order run of verified blocks — an exact byte prefix of the sender's file — which is
+     * salvaged to the target path (stamped with the sender's lastModified) so the next sync
+     * transfers only the missing tail through the append/delta paths instead of restarting from
+     * byte zero.
+     */
+    private void receiveFileStaged(
+            File targetFile,
+            String relativePath,
+            int expectedSize,
+            boolean compressed,
+            long lastModified)
+            throws IOException {
+        File stageFile =
+                new File(targetFile.getParentFile(), "." + targetFile.getName() + PARTIAL_SUFFIX);
+        long stagedBytes;
+        try {
+            xmodemInProgress.set(true);
+            try (OutputStream stage = new BufferedOutputStream(new FileOutputStream(stageFile))) {
+                stagedBytes = xmodem.receiveInto(expectedSize, stage);
+            }
+        } catch (IOException e) {
+            long saved = salvagePartialTransfer(stageFile, targetFile, compressed, lastModified);
+            throw new IOException(
+                    interruptedTransferMessage(relativePath, e.getMessage(), saved), e);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+
+        if (stagedBytes != expectedSize) {
+            long saved = salvagePartialTransfer(stageFile, targetFile, compressed, lastModified);
+            if (xmodem.wasCancelSignalled()) {
+                // Deliberate cancel: the salvaged prefix is intentional (the next sync appends
+                // the missing tail), so report it as a benign cancellation, not a failure.
+                throw new TransferCancelledException(
+                        "File transfer of "
+                                + relativePath
+                                + " cancelled by sender"
+                                + (saved > 0 ? " (" + saved + " bytes salvaged)" : ""));
+            }
+            throw new IOException(
+                    interruptedTransferMessage(relativePath, xmodem.getLastErrorMessage(), saved));
+        }
+
+        // Clean transfer: decode from the stage and write the target exactly like the buffered
+        // path, then drop the stage.
+        byte[] data;
+        try {
+            data = Files.readAllBytes(stageFile.toPath());
+        } catch (IOException e) {
+            throw new IOException("Failed to read staged transfer for " + relativePath, e);
+        }
+        validateReceivedSize("file", relativePath, expectedSize, data);
+        if (compressed) {
+            data = CompressionUtil.decompress(data);
+        }
+        try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+            fos.write(data);
+        } catch (IOException e) {
+            // The stage is redundant from here on: the payload travels with the exception for a
+            // deferred retry.
+            stageFile.delete();
+            throw new FileWriteException(relativePath, data, lastModified, e.getMessage(), e);
+        }
+
+        // Preserve sender timestamp so subsequent manifest comparisons match
+        if (lastModified > 0) {
+            targetFile.setLastModified(lastModified);
+        }
+        stageFile.delete();
+    }
+
+    /**
+     * Best-effort salvage of an interrupted staged transfer: decode the staged prefix (an in-order
+     * run of XMODEM-verified blocks) and write it to the target path, stamped with the sender's
+     * lastModified so the next preview plans an append instead of a receiver-newer conflict.
+     *
+     * @return the number of original bytes kept on disk (0 when nothing usable was staged)
+     */
+    private long salvagePartialTransfer(
+            File stageFile, File targetFile, boolean compressed, long lastModified) {
+        long saved = 0;
+        try {
+            byte[] staged = Files.readAllBytes(stageFile.toPath());
+            byte[] prefix = compressed ? CompressionUtil.decompressTruncated(staged) : staged;
+            if (prefix != null && prefix.length > 0) {
+                Files.write(targetFile.toPath(), prefix);
+                if (lastModified > 0) {
+                    targetFile.setLastModified(lastModified);
+                }
+                saved = prefix.length;
+            }
+        } catch (IOException e) {
+            // Salvage is best-effort; without it the next sync simply retransfers from scratch.
+        } finally {
+            if (!stageFile.delete()) {
+                stageFile.deleteOnExit();
+            }
+        }
+        return saved;
+    }
+
+    /** The failure message for an interrupted staged receive, noting any salvaged prefix. */
+    private static String interruptedTransferMessage(
+            String relativePath, String detail, long savedBytes) {
+        if (detail == null || detail.isEmpty()) {
+            detail = "no detailed XMODEM error available";
+        }
+        String message = "Failed to receive file data for " + relativePath + " (" + detail + ")";
+        if (savedBytes > 0) {
+            message += "; kept " + savedBytes + " received bytes on disk for the next sync";
+        }
+        return message;
     }
 
     /** Receive a dropped file and save it to the Downloads directory. */
@@ -1335,7 +1493,8 @@ public class SyncProtocol {
             if (detail == null || detail.isEmpty()) {
                 detail = "no detailed XMODEM error available";
             }
-            throw new IOException(
+            throw xmodemReceiveFailure(
+                    "Dropped file transfer of " + fileName + " cancelled by sender",
                     "Failed to receive dropped file " + fileName + " (" + detail + ")");
         }
 
@@ -1458,7 +1617,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException("Failed to send file content via XMODEM (" + detail + ")");
+                throw maybePeerCancelled(
+                        new IOException("Failed to send file content via XMODEM (" + detail + ")"),
+                        "File content transfer cancelled by receiver");
             }
         } finally {
             xmodemInProgress.set(false);
@@ -1481,7 +1642,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "no detailed XMODEM error available";
                 }
-                throw new IOException("Failed to receive file content via XMODEM (" + detail + ")");
+                throw xmodemReceiveFailure(
+                        "File content transfer cancelled by sender",
+                        "Failed to receive file content via XMODEM (" + detail + ")");
             }
             return data;
         } finally {
@@ -1526,7 +1689,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException("Failed to send log via XMODEM (" + detail + ")");
+                throw maybePeerCancelled(
+                        new IOException("Failed to send log via XMODEM (" + detail + ")"),
+                        "Log transfer cancelled by receiver");
             }
         } finally {
             xmodemInProgress.set(false);
@@ -1546,6 +1711,51 @@ public class SyncProtocol {
     /** Send error message */
     public void sendError(String message) throws IOException {
         sendCommand(CMD_ERROR, message);
+    }
+
+    /**
+     * Build the exception for a failed XMODEM receive: a peer cancel (CAN) is an expected, benign
+     * outcome and must surface as {@link TransferCancelledException} so callers keep the connection
+     * up; anything else stays a plain communication-failure IOException.
+     */
+    private IOException xmodemReceiveFailure(String cancelMessage, String failureMessage) {
+        return xmodem.wasCancelSignalled()
+                ? new TransferCancelledException(cancelMessage)
+                : new IOException(failureMessage);
+    }
+
+    /**
+     * Wrap a terminal send failure: when the peer aborted the transfer with a CAN signal, surface
+     * it as {@link TransferCancelledException} so a peer-initiated cancel does not tear the
+     * connection down; otherwise the original failure propagates unchanged.
+     */
+    private IOException maybePeerCancelled(IOException failure, String cancelMessage) {
+        return xmodem.wasCancelSignalled()
+                ? new TransferCancelledException(cancelMessage)
+                : failure;
+    }
+
+    /**
+     * Notify the receiver that a send failed so it exits any XMODEM receive loop still pending from
+     * a command-phase failure (an XMODEM-phase failure already sent a cancel). Skipped when the
+     * failure was a local cancel-driven interrupt (the user's cancelSync already sent CAN +
+     * CMD_CANCEL to the peer, and an extra CMD_ERROR would surface as a spurious "Remote error"
+     * there) or when the peer itself cancelled the transfer (it already knows).
+     */
+    private void notifyPeerOfSendFailure(String message) {
+        if (Thread.currentThread().isInterrupted() || xmodem.wasCancelSignalled()) {
+            return;
+        }
+        try {
+            sendError(message);
+        } catch (IOException ignored) {
+            // Best-effort; if this also fails, receiver will eventually timeout
+        }
+    }
+
+    /** Drain any buffered serial input; used to resync the stream after an aborted transfer. */
+    public void clearInputBuffer() throws IOException {
+        serialPort.clearInputBuffer();
     }
 
     /** Notify peer that a sync was cancelled. */
@@ -1637,7 +1847,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException("Failed to receive shared text (" + detail + ")");
+                throw xmodemReceiveFailure(
+                        "Shared text transfer cancelled by sender",
+                        "Failed to receive shared text (" + detail + ")");
             }
             byte[] decoded = CompressionUtil.decompressIfNeeded(payload, wasCompressed);
             return new String(decoded, StandardCharsets.UTF_8);
@@ -1681,7 +1893,9 @@ public class SyncProtocol {
                 if (detail == null || detail.isEmpty()) {
                     detail = "unknown XMODEM error";
                 }
-                throw new IOException("Failed to send shared text (" + detail + ")");
+                throw maybePeerCancelled(
+                        new IOException("Failed to send shared text (" + detail + ")"),
+                        "Shared text transfer cancelled by receiver");
             }
         } finally {
             xmodemInProgress.set(false);

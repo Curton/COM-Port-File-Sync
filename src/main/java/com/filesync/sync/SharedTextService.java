@@ -1,6 +1,7 @@
 package com.filesync.sync;
 
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
@@ -87,6 +88,10 @@ public class SharedTextService {
                 if (pendingSharedText.compareAndSet(textToSend, null)) {
                     return;
                 }
+            } catch (TransferCancelledException e) {
+                // A peer cancel is expected; log it benignly instead of raising an error.
+                eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+                return;
             } catch (IOException e) {
                 eventBus.post(
                         new SyncEvent.ErrorEvent("Failed to send shared text: " + e.getMessage()));
@@ -131,6 +136,9 @@ public class SharedTextService {
                 eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
+        } catch (TransferCancelledException e) {
+            // A peer cancel is expected; log it benignly instead of raising an error.
+            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));

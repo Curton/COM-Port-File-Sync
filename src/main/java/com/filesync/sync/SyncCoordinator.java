@@ -1314,6 +1314,59 @@ public class SyncCoordinator {
 
                 for (FileChangeDetector.FileInfo fileInfo : batchFiles) {
                     File file = new File(syncFolder, fileInfo.getPath());
+
+                    // A large file must not ride the batch envelope: the receiver's batch decode
+                    // rejects oversized payloads, and a batch buffers the whole payload in memory
+                    // on both sides. Sent individually instead, the receiver streams the transfer
+                    // to disk and keeps a resumable prefix if the link drops mid-transfer.
+                    if (file.length() > SyncProtocol.PARTIAL_DISK_WRITE_THRESHOLD_BYTES) {
+                        exitSyncIfCancelled();
+                        operationIndex++;
+                        savedOpIndex++;
+                        long t0 = System.currentTimeMillis();
+                        boolean sentOk = false;
+                        try {
+                            sentOk = protocol.sendFile(syncFolder, fileInfo.getPath());
+                        } catch (IOException | IllegalStateException e) {
+                            if (cancelRequested.get()) {
+                                break;
+                            }
+                            eventBus.post(
+                                    new SyncEvent.ErrorEvent(
+                                            "Failed to send large file "
+                                                    + fileInfo.getPath()
+                                                    + ": "
+                                                    + e.getMessage()));
+                        }
+                        long ms = System.currentTimeMillis() - t0;
+                        if (sentOk) {
+                            touchHeartbeat();
+                            eventBus.post(
+                                    new SyncEvent.LogEvent(
+                                            "Syncing ["
+                                                    + savedOpIndex
+                                                    + "/"
+                                                    + totalOperationsRef[0]
+                                                    + "]: "
+                                                    + fileInfo.getPath()
+                                                    + String.format(" [%dms]", ms)));
+                        }
+                        eventBus.post(
+                                new SyncEvent.FileProgressEvent(
+                                        savedOpIndex, totalOperationsRef[0], fileInfo.getPath()));
+                        if (!sentOk) {
+                            try {
+                                protocol.sendTransferCancel();
+                            } catch (IOException ignored) {
+                                // The link is already gone; the local error is reported above.
+                            }
+                            throw new IOException(
+                                    "Failed to transfer large file " + fileInfo.getPath());
+                        }
+                        flushSharedTextBetweenOperations();
+                        continue;
+                    }
+
                     batch.add(new Object[] {file, fileInfo.getPath()});
 
                     if (batch.size() >= 256 || estimateBatchSize(batch) >= BATCH_BYTE_TARGET) {
@@ -1344,11 +1397,15 @@ public class SyncCoordinator {
                                         batch, BATCH_BYTE_TARGET, batchCallback, syncFolder);
                         long batchMs = System.currentTimeMillis() - batchStart;
                         if (!ok) {
-                            eventBus.post(
-                                    new SyncEvent.ErrorEvent(
-                                            "Batch transfer failed for "
-                                                    + inBatch
-                                                    + " file(s); falling back to per-file"));
+                            // A cancel-driven batch failure is expected, not an error; the
+                            // fallback loop below stops on the same flag.
+                            if (!cancelRequested.get()) {
+                                eventBus.post(
+                                        new SyncEvent.ErrorEvent(
+                                                "Batch transfer failed for "
+                                                        + inBatch
+                                                        + " file(s); falling back to per-file"));
+                            }
                             boolean anyFileFailed = false;
                             for (int i = 0; i < batch.size(); i++) {
                                 if (cancelRequested.get()) {

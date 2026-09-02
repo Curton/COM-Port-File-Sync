@@ -9,6 +9,7 @@ import com.filesync.delta.DeltaEncoder;
 import com.filesync.delta.HashUtil;
 import com.filesync.delta.SignatureUtil;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.XModemTransfer;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -251,13 +252,33 @@ class DeltaProtocolTest {
     }
 
     @Test
-    void receiveFileDelta_xmodemReceiveFailureThrows() throws IOException {
+    void receiveFileDelta_senderCancelThrowsCancelled() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        // Feed CAN so xmodem.receive aborts and returns null immediately.
+        // Feed CAN so xmodem.receive aborts as a deliberate sender cancel.
         serial.feedBytes(
                 new byte[] {
                     XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
                 });
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        TransferCancelledException thrown =
+                assertThrows(
+                        TransferCancelledException.class,
+                        () ->
+                                protocol.receiveFileDelta(
+                                        tempDir.toFile(), "big.bin", 50, false, 0L, 100, "abc"));
+        assertTrue(
+                thrown.getMessage().contains("cancelled by sender"),
+                "cancel must be reported as such: " + thrown.getMessage());
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void receiveFileDelta_xmodemReceiveFailureThrows() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        // Feed EOT with no data blocks: the receive completes short, which is a genuine failure
+        // (not a cancel) and must stay a plain IOException.
+        serial.feedBytes(new byte[] {XModemTransfer.EOT});
         SyncProtocol protocol = new SyncProtocol(serial);
 
         IOException thrown =
@@ -266,6 +287,9 @@ class DeltaProtocolTest {
                         () ->
                                 protocol.receiveFileDelta(
                                         tempDir.toFile(), "big.bin", 50, false, 0L, 100, "abc"));
+        assertFalse(
+                thrown instanceof TransferCancelledException,
+                "a short transfer is not a cancel: " + thrown.getMessage());
         assertTrue(
                 thrown.getMessage().contains("Failed to receive file delta"),
                 "error must mention receive failure: " + thrown.getMessage());
