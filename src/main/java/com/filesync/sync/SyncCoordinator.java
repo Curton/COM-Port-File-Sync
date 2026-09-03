@@ -90,12 +90,16 @@ public class SyncCoordinator {
     static final long MIN_DELTA_SIZE = 8 * 1024L;
 
     /**
-     * Minimum wire-byte saving for a delta to justify its own XMODEM session. Every per-file
-     * session pays several hundred milliseconds of handshaking — roughly this many wire bytes at
-     * the default baud rate — so a smaller saving makes the batch path, which amortizes one session
-     * across many files, the faster choice.
+     * Minimum wire-byte saving for a delta to justify its own XMODEM session. Measured, not
+     * estimated: {@code DeltaThresholdBenchmark} runs the real protocol stack over a wire paced at
+     * the true 115200-baud byte time and shows a per-file session costs ~80-100 ms even for a
+     * near-empty payload (command round trip, handshake, per-block ACKs, EOT) — roughly 1 KB of
+     * wire bytes — while a batch entry rides a session that is already happening. The value keeps
+     * ~2x margin over that measured floor for USB-serial round-trip latency and scheduler variance;
+     * the old 8 KB guess was ~9x the floor and pushed files saving 1.5-7 KB into a full-content
+     * batch session that measured ~300 ms slower end to end.
      */
-    static final long MIN_DELTA_SAVINGS_BYTES = 8 * 1024L;
+    static final long MIN_DELTA_SAVINGS_BYTES = 2 * 1024L;
 
     public SyncCoordinator(
             SyncProtocol protocol,
@@ -1269,9 +1273,9 @@ public class SyncCoordinator {
                             // A local cancel interrupted the exchange; exit as cancelled.
                             exitSyncIfCancelled();
                         }
-                        // The peer may not support delta sync (older version) or the exchange
-                        // failed. Cached signatures (if any) are still usable; every candidate
-                        // without one falls back to full transfer via the per-file null check.
+                        // The exchange failed (timeout, IO error, session torn down). Cached
+                        // signatures (if any) are still usable; every candidate without one
+                        // falls back to full transfer via the per-file null check.
                         eventBus.post(
                                 new SyncEvent.LogEvent(
                                         "Signature exchange failed ("
