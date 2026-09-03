@@ -33,6 +33,7 @@ Thumbs.db
 
 # Claude
 .claude/
+AGENTS.md
 
 # ZCode
 .zcode/
