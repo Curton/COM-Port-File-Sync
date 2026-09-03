@@ -494,7 +494,8 @@ class DeltaSyncCoordinatorTest {
         byte[] data = randomBytes(10 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
-        // Simulate an older peer that does not answer the signature request (timeout/IO error).
+        // Simulate a signature exchange that never completes: the peer does not answer the
+        // request (timeout/IO error), so every candidate falls back to a full batch transfer.
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList()))
                 .thenThrow(new IOException("timed out waiting for DELTA_SIG_DATA"));

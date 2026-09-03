@@ -48,6 +48,22 @@ class ReconnectRecoveryTest {
     private final PendingFileWriteService pendingWriteService =
             new PendingFileWriteService(new SimpleSyncEventBus());
 
+    /**
+     * Shut a coordinator executor down and wait for its workers to actually exit. {@link
+     * ScheduledExecutorService#shutdownNow} returns immediately, and a worker still flushing a
+     * cache when the {@code @TempDir} extension cleans up makes that deletion fail on Windows
+     * ("Failed to close extension context") — the intermittent error this class used to throw.
+     */
+    private static void shutdownExecutor(ScheduledExecutorService executor) {
+        executor.shutdownNow();
+        try {
+            // Best effort: the blocked waits are interruptible latches, so workers exit promptly.
+            executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @Test
     void connectionServiceTransitionsCallbacksOnlyOncePerStateChange() {
         AtomicBoolean running = new AtomicBoolean(true);
@@ -199,7 +215,7 @@ class ReconnectRecoveryTest {
                     errors.stream().noneMatch(msg -> msg.contains("Sync already in progress")),
                     "Second sync should not be rejected as already in progress");
         } finally {
-            executor.shutdownNow();
+            shutdownExecutor(executor);
         }
     }
 
@@ -255,7 +271,7 @@ class ReconnectRecoveryTest {
                     errors.stream().noneMatch(msg -> msg.contains("Sync failed")),
                     "Cancel should not emit an error event");
         } finally {
-            executor.shutdownNow();
+            shutdownExecutor(executor);
         }
     }
 
@@ -434,7 +450,7 @@ class ReconnectRecoveryTest {
                     "Cancellation should be logged exactly once");
             assertFalse(syncing.get(), "Syncing flag should be cleared after cancel");
         } finally {
-            executor.shutdownNow();
+            shutdownExecutor(executor);
         }
     }
 
