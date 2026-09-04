@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.protocol.SyncProtocol.PendingText;
+import com.filesync.protocol.TransferCancelledException;
 import com.filesync.serial.SerialPortManager;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -242,6 +243,87 @@ class SharedTextServiceTest {
                 errors.stream()
                         .anyMatch(message -> message.contains("Failed to receive shared text")),
                 "Expected receive error to be posted");
+    }
+
+    @Test
+    void handleIncomingSharedTextDataPostsSyncControlRefreshOnSuccess() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        protocol.setReceivedSharedText("large shared text");
+
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<SyncEvent> events = new ArrayList<>();
+        eventBus.register(events::add);
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedTextData(123L, true, 17);
+
+        assertTrue(
+                events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                "A SyncControlRefreshEvent must follow the XMODEM shared-text receive, or the"
+                        + " sync controls stay disabled after the transfer");
+    }
+
+    @Test
+    void handleIncomingSharedTextDataPostsSyncControlRefreshWhenPeerCancels() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        protocol.setReceiveFailure(
+                new TransferCancelledException("Shared text transfer cancelled by sender"));
+
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<SyncEvent> events = new ArrayList<>();
+        eventBus.register(events::add);
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedTextData(123L, false, 0);
+
+        assertTrue(
+                events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                "A peer-cancelled XMODEM shared-text receive must still post a"
+                        + " SyncControlRefreshEvent, or the sync controls stay disabled");
+    }
+
+    @Test
+    void queueSharedTextPostsSyncControlRefreshAfterSend() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<SyncEvent> events = new ArrayList<>();
+        eventBus.register(events::add);
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.queueSharedText("hello");
+
+        assertEquals(List.of("hello"), protocol.getSentTexts());
+        assertTrue(
+                events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                "A SyncControlRefreshEvent must follow the shared-text send, or the sync"
+                        + " controls stay disabled after an XMODEM-sized payload");
     }
 
     @Test

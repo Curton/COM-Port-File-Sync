@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -480,6 +481,108 @@ class FileSyncManagerTest {
                     events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                     "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
                             + " completes");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void incomingSharedTextData_xmodemReceive_postsSyncControlRefresh() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+
+            // Scripted peer: announce a large shared text, then play the XMODEM sender role —
+            // a single SOH block carrying the payload, followed by EOT.
+            byte[] payload = "shared text body".getBytes(StandardCharsets.UTF_8);
+            serial.feedLine("[[SYNC:SHARED_TEXT_DATA:12345:false:" + payload.length + "]]");
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
+
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e
+                                                                    instanceof
+                                                                    SyncEvent
+                                                                                    .SharedTextReceivedEvent
+                                                                            ste
+                                                            && ste.getText()
+                                                                    .equals("shared text body")),
+                    Duration.ofSeconds(10));
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    Duration.ofSeconds(10));
+
+            assertTrue(
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "A SyncControlRefreshEvent must be posted after the XMODEM shared-text"
+                            + " transfer completes");
+            assertFalse(
+                    fsm.isTransferBusy(),
+                    "isTransferBusy must be false after the shared-text transfer settles");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void fetchRemoteLogText_peerCancelledXmodem_postsSyncControlRefresh() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // Scripted peer: ACK the TIME-SYNC marker request, announce a LOG_XFER transfer
+            // once this side asks for the log, then abort it with CAN before any block.
+            Thread feeder =
+                    new Thread(
+                            () -> {
+                                serial.feedLine("[[SYNC:ACK]]");
+                                waitUntil(
+                                        () ->
+                                                serial.getWrittenLines().stream()
+                                                        .anyMatch(
+                                                                l -> l.equals("[[SYNC:LOG_REQ]]")),
+                                        Duration.ofSeconds(5));
+                                serial.feedLine("[[SYNC:LOG_XFER:2048]]");
+                                serial.feedBytes(
+                                        new byte[] {XModemTransfer.CAN, XModemTransfer.CAN});
+                            },
+                            "fsm-test-feeder-log-cancel");
+            feeder.start();
+
+            String remoteLog = fsm.fetchRemoteLogText();
+            feeder.join(5_000);
+
+            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
+            assertNull(remoteLog, "A peer-cancelled log transfer must return null");
+            assertTrue(
+                    events.stream()
+                            .anyMatch(
+                                    e ->
+                                            e instanceof SyncEvent.LogEvent le
+                                                    && le.getMessage()
+                                                            .contains("cancelled by sender")),
+                    "The peer cancel should be logged benignly, got: " + events);
+            assertTrue(
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "A peer-cancelled XMODEM log transfer must still post a"
+                            + " SyncControlRefreshEvent, or the sync controls stay disabled");
+            assertFalse(
+                    fsm.isTransferBusy(),
+                    "isTransferBusy must be false after the cancelled transfer settles");
         } finally {
             stopQuietly(fsm);
         }

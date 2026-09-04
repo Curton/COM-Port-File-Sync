@@ -554,6 +554,9 @@ public class FileSyncManager {
             }
         } catch (IOException e) {
             eventBus.post(new SyncEvent.LogEvent("Failed to send log: " + e.getMessage()));
+            // A failed XMODEM log send disabled the sync controls via its progress events;
+            // this handler only posts a LogEvent, so refresh the controls here.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         }
     }
 
@@ -682,6 +685,9 @@ public class FileSyncManager {
         } catch (TransferCancelledException e) {
             // A peer cancel is an expected outcome; log it benignly instead of raising an error.
             eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+            // The cancelled XMODEM content transfer already disabled the sync controls via its
+            // progress events; nothing else in this path refreshes them, so do it here.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent(
@@ -796,6 +802,9 @@ public class FileSyncManager {
         } catch (TransferCancelledException e) {
             // A peer cancel is an expected outcome; log it benignly instead of raising an error.
             eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+            // The cancelled XMODEM log transfer already disabled the sync controls via its
+            // progress events; nothing else in this path refreshes them, so do it here.
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
@@ -994,6 +1003,10 @@ public class FileSyncManager {
                             eventBus.post(
                                     new SyncEvent.LogEvent(
                                             "Failed to send file content: " + e.getMessage()));
+                            // A failed XMODEM content send disabled the sync controls via its
+                            // progress events; this handler only posts a LogEvent, so refresh
+                            // the controls here.
+                            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
                         }
                     }
                 }

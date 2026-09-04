@@ -95,6 +95,10 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                 eventBus.post(
                         new SyncEvent.ErrorEvent("Failed to send shared text: " + e.getMessage()));
                 return;
+            } finally {
+                // Oversized payloads go out via XMODEM, whose progress events disable the sync
+                // controls; refresh once the send settles so the buttons do not stay gray.
+                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             }
         }
     }
@@ -141,6 +145,11 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));
+        } finally {
+            // The payload arrived via XMODEM, whose progress events disable the sync controls;
+            // neither success nor a peer cancel posts any other event the UI reacts to, so
+            // refresh here or the buttons stay gray after "Shared text received".
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         }
     }
 
