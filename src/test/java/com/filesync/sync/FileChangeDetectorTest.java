@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -143,6 +144,75 @@ class FileChangeDetectorTest {
         assertTrue(
                 hashingThreads.stream().anyMatch(name -> name.contains("pool")),
                 "Hashing should occur on worker threads");
+    }
+
+    @Test
+    void hashFailureDegradesToMetadataOnlyInsteadOfFailing() throws IOException {
+        Files.writeString(tempDir.resolve("readable.txt"), "readable");
+        Files.writeString(tempDir.resolve("locked.bin"), "locked");
+
+        FileChangeDetector.FileHasher failingHasher =
+                file -> {
+                    if (file.getName().equals("locked.bin")) {
+                        throw new IOException("file locked by another process");
+                    }
+                    return FileChangeDetector.calculateMD5(file);
+                };
+        List<String> warnings = new ArrayList<>();
+        FileChangeDetector.ManifestProgressCallback callback =
+                new FileChangeDetector.ManifestProgressCallback() {
+                    @Override
+                    public void onWarning(String message) {
+                        warnings.add(message);
+                    }
+                };
+
+        FileChangeDetector.FileManifest manifest =
+                FileChangeDetector.generateManifest(
+                        tempDir.toFile(),
+                        FileChangeDetector.ManifestGenerationOptions.builder()
+                                .withUseQuickHash(false)
+                                .withHasher(failingHasher)
+                                .withProgressCallback(callback)
+                                .build());
+
+        FileChangeDetector.FileInfo locked = manifest.getFiles().get("locked.bin");
+        assertNotNull(locked, "An unreadable file must stay in the manifest");
+        assertNull(locked.getMd5(), "An unreadable file must carry no checksum");
+        assertNotNull(
+                manifest.getFiles().get("readable.txt").getMd5(),
+                "Other files must still be hashed");
+        assertEquals(1, warnings.size(), "A summary warning should be reported once");
+        assertTrue(warnings.get(0).contains("locked.bin"), "Warning should name the file");
+        assertTrue(
+                warnings.get(0).contains("file locked by another process"),
+                "Warning should include the read-error reason");
+    }
+
+    @Test
+    void nonIoHashFailureStillFailsGeneration() throws IOException {
+        Files.writeString(tempDir.resolve("a.txt"), "a");
+        FileChangeDetector.FileHasher brokenHasher =
+                file -> {
+                    throw new IllegalStateException("hasher bug");
+                };
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                FileChangeDetector.generateManifest(
+                                        tempDir.toFile(),
+                                        FileChangeDetector.ManifestGenerationOptions.builder()
+                                                .withUseQuickHash(false)
+                                                .withHasher(brokenHasher)
+                                                .build()));
+        assertTrue(
+                thrown.getMessage().contains("Failed to compute file hash"),
+                "Non-IO hash failures stay fatal");
+        assertTrue(
+                thrown.getMessage().contains("hasher bug"),
+                "The underlying cause must not be swallowed");
     }
 
     private static final class CountingHasher implements FileChangeDetector.FileHasher {

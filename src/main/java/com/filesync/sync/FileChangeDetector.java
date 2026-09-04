@@ -22,6 +22,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +67,12 @@ public class FileChangeDetector {
         }
 
         default void onComplete(FileManifest manifest) {}
+
+        /**
+         * Invoked once after generation when some files could not be read for hashing. The manifest
+         * still contains those files (metadata-only), so this is a warning, not a failure.
+         */
+        default void onWarning(String message) {}
     }
 
     /** Strategy for computing file hashes. Allows tests to inject counters or mocks. */
@@ -333,6 +340,9 @@ public class FileChangeDetector {
         ExecutorService hashExecutor =
                 Executors.newFixedThreadPool(resolvedOptions.getHashThreadPoolSize());
         List<Future<?>> hashTasks = new ArrayList<>();
+        // Files whose hash could not be computed (locked by another process, permission denied,
+        // ...). Recorded by the hash tasks, reported once after the walk completes.
+        List<String> hashFailures = Collections.synchronizedList(new ArrayList<>());
 
         Files.walkFileTree(
                 basePath,
@@ -424,28 +434,44 @@ public class FileChangeDetector {
                             Future<?> future =
                                     hashExecutor.submit(
                                             () -> {
+                                                String hash;
                                                 try {
-                                                    String hash =
+                                                    hash =
                                                             computeHash(
                                                                     resolvedOptions.getHasher(),
                                                                     fileObj);
-                                                    files.put(
-                                                            relativePath,
-                                                            new FileInfo(
-                                                                    relativePath,
-                                                                    size,
-                                                                    lastModified,
-                                                                    hash));
-                                                    markParentHasChild(
-                                                            relativePath, dirHasChildren);
-                                                    reportProgress(
-                                                            relativePath,
-                                                            processedFiles,
-                                                            totalFiles,
-                                                            progressCallback);
                                                 } catch (IOException e) {
-                                                    throw new RuntimeException(e);
+                                                    // One unreadable file (locked, permission
+                                                    // denied, deleted mid-walk, ...) must not
+                                                    // abort the whole manifest. Fall back to a
+                                                    // metadata-only entry, exactly like a
+                                                    // quick-mode binary: the file stays in the
+                                                    // manifest (so strict sync never deletes it
+                                                    // for being "missing") and a later sync
+                                                    // re-attempts the hash because
+                                                    // canReuseHash requires a cached checksum.
+                                                    hashFailures.add(
+                                                            relativePath
+                                                                    + " ("
+                                                                    + (e.getMessage() != null
+                                                                            ? e.getMessage()
+                                                                            : e.toString())
+                                                                    + ")");
+                                                    hash = null;
                                                 }
+                                                files.put(
+                                                        relativePath,
+                                                        new FileInfo(
+                                                                relativePath,
+                                                                size,
+                                                                lastModified,
+                                                                hash));
+                                                markParentHasChild(relativePath, dirHasChildren);
+                                                reportProgress(
+                                                        relativePath,
+                                                        processedFiles,
+                                                        totalFiles,
+                                                        progressCallback);
                                             });
                             hashTasks.add(future);
                         } else {
@@ -468,6 +494,10 @@ public class FileChangeDetector {
         waitForHashes(hashTasks);
         if (hashExecutor != null) {
             hashExecutor.shutdown();
+        }
+
+        if (!hashFailures.isEmpty() && progressCallback != null) {
+            progressCallback.onWarning(buildHashFailureWarning(hashFailures));
         }
 
         for (String dir : directories) {
@@ -514,12 +544,28 @@ public class FileChangeDetector {
     static FileManifest generateManifestWithCache(
             File directory, boolean respectGitignore, boolean useQuickHash, File cacheFile)
             throws IOException {
+        return generateManifestWithCache(
+                directory, respectGitignore, useQuickHash, cacheFile, null);
+    }
+
+    /**
+     * Variant of {@link #generateManifestWithCache(File, boolean, boolean)} backed by the given
+     * cache file, forwarding progress and warning events (e.g. unreadable files) to the callback.
+     */
+    static FileManifest generateManifestWithCache(
+            File directory,
+            boolean respectGitignore,
+            boolean useQuickHash,
+            File cacheFile,
+            ManifestProgressCallback progressCallback)
+            throws IOException {
         return generateManifest(
                 directory,
                 ManifestGenerationOptions.builder()
                         .withRespectGitignore(respectGitignore)
                         .withUseQuickHash(useQuickHash)
                         .withPersistedManifestFile(cacheFile)
+                        .withProgressCallback(progressCallback)
                         .build());
     }
 
@@ -1083,9 +1129,34 @@ public class FileChangeDetector {
                 if (cause instanceof IOException ioException) {
                     throw ioException;
                 }
-                throw new IOException("Failed to compute file hash", cause);
+                throw new IOException("Failed to compute file hash: " + cause, cause);
             }
         }
+    }
+
+    /**
+     * Summary of files whose hash failed, for the {@code onWarning} callback. Lists the first
+     * entries with their read-error reason; the rest are counted so one large report stays
+     * readable.
+     */
+    private static String buildHashFailureWarning(List<String> hashFailures) {
+        int detailed = Math.min(hashFailures.size(), 5);
+        StringBuilder message =
+                new StringBuilder(
+                        "Could not read "
+                                + hashFailures.size()
+                                + " file(s) for hashing; they will be compared by size and"
+                                + " timestamp only: ");
+        for (int i = 0; i < detailed; i++) {
+            if (i > 0) {
+                message.append("; ");
+            }
+            message.append(hashFailures.get(i));
+        }
+        if (hashFailures.size() > detailed) {
+            message.append("; ... and ").append(hashFailures.size() - detailed).append(" more");
+        }
+        return message.toString();
     }
 
     /** File manifest containing all file information for a directory */

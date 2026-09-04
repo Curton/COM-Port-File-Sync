@@ -225,7 +225,18 @@ public class SyncCoordinator {
 
         FileChangeDetector.FileManifest localManifest =
                 FileChangeDetector.generateManifestWithCache(
-                        syncFolder, respectGitignore, fastMode);
+                        syncFolder,
+                        respectGitignore,
+                        fastMode,
+                        FileChangeDetector.persistedManifestFileFor(syncFolder),
+                        // Files that cannot be read for hashing no longer abort the preview;
+                        // surface them so the user knows which paths compare by metadata only.
+                        new FileChangeDetector.ManifestProgressCallback() {
+                            @Override
+                            public void onWarning(String message) {
+                                eventBus.post(new SyncEvent.LogEvent(message));
+                            }
+                        });
 
         eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
         // Send our settings to the receiver so it generates manifest with the same options
@@ -554,7 +565,18 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
             FileChangeDetector.FileManifest manifest =
                     FileChangeDetector.generateManifestWithCache(
-                            syncFolder, respectGitignore, fastMode);
+                            syncFolder,
+                            respectGitignore,
+                            fastMode,
+                            FileChangeDetector.persistedManifestFileFor(syncFolder),
+                            // Same as the sender side: unreadable files degrade to metadata-only
+                            // entries instead of failing the whole manifest exchange.
+                            new FileChangeDetector.ManifestProgressCallback() {
+                                @Override
+                                public void onWarning(String message) {
+                                    eventBus.post(new SyncEvent.LogEvent(message));
+                                }
+                            });
             protocol.sendManifest(manifest);
             String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
             if (manifest.getEmptyDirectoryCount() > 0) {
