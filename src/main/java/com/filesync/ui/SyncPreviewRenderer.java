@@ -81,12 +81,14 @@ public class SyncPreviewRenderer {
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
 
         JLabel selectionSummary = new JLabel();
-        JPanel previewPanel = createPreviewPanel(previewModel, rows, syncFolder, selectionSummary);
+        TableRowSorter<DefaultTableModel> previewSorter = createPreviewSorter(previewModel);
+        JPanel previewPanel =
+                createPreviewPanel(previewModel, rows, syncFolder, selectionSummary, previewSorter);
 
         // Auto-default: launch the git-based selection off the EDT right before showing the modal
         // dialog. The SwingWorker's done() is dispatched by the modal dialog's nested event pump,
         // flipping checkboxes to git's changed set (or leaving them unchecked on failure/timeout).
-        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary);
+        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary, previewSorter);
 
         int response = showPreviewOptionDialog(previewPanel);
 
@@ -101,13 +103,15 @@ public class SyncPreviewRenderer {
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             File syncFolder,
-            JLabel selectionSummary) {
-        JTable previewTable = createPreviewTable(previewModel, rows);
+            JLabel selectionSummary,
+            TableRowSorter<DefaultTableModel> previewSorter) {
+        JTable previewTable = createPreviewTable(previewModel, rows, previewSorter);
         updateSyncPreviewSummary(selectionSummary, previewModel, rows);
         previewModel.addTableModelListener(
                 event -> updateSyncPreviewSummary(selectionSummary, previewModel, rows));
 
-        JPanel controlPanel = createControlPanel(previewModel, selectionSummary, rows, syncFolder);
+        JPanel controlPanel =
+                createControlPanel(previewModel, selectionSummary, rows, syncFolder, previewSorter);
         JScrollPane previewScroll = new JScrollPane(previewTable);
         previewScroll.setPreferredSize(new Dimension(720, 480));
 
@@ -117,13 +121,17 @@ public class SyncPreviewRenderer {
         return previewPanel;
     }
 
-    private JTable createPreviewTable(DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
+    private JTable createPreviewTable(
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            TableRowSorter<DefaultTableModel> previewSorter) {
         JTable previewTable = new JTable(previewModel);
         previewTable.setFillsViewportHeight(true);
         previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
-        // Clicking Sync/Type/Size/Path headers sorts the table; default sort is by Sync with
-        // selected rows on top.
-        previewTable.setRowSorter(createPreviewSorter(previewModel));
+        // Clicking Sync/Type/Size/Path headers sorts the table; the default sort key is Sync so
+        // batch selections can put checked rows on top. Individual checkbox toggles never
+        // re-sort (the sorter ignores model updates).
+        previewTable.setRowSorter(previewSorter);
         previewTable.getColumnModel().getColumn(0).setPreferredWidth(25);
         previewTable.getColumnModel().getColumn(1).setPreferredWidth(80);
         previewTable.getColumnModel().getColumn(2).setPreferredWidth(50);
@@ -160,19 +168,23 @@ public class SyncPreviewRenderer {
             DefaultTableModel previewModel,
             JLabel selectionSummary,
             List<SyncPreviewRow> rows,
-            File syncFolder) {
+            File syncFolder,
+            TableRowSorter<DefaultTableModel> previewSorter) {
         javax.swing.JButton selectAllButton = new javax.swing.JButton("Select All");
-        selectAllButton.addActionListener(event -> setPreviewSelection(previewModel, true));
+        selectAllButton.addActionListener(
+                event -> setPreviewSelection(previewModel, true, previewSorter));
 
         javax.swing.JButton selectGitButton = new javax.swing.JButton("Select Changes (git)");
         selectGitButton.setToolTipText(
                 "Select only files reported by 'git status --short' in the sync folder");
         selectGitButton.addActionListener(
                 event ->
-                        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary));
+                        triggerGitBasedSelection(
+                                previewModel, rows, syncFolder, selectionSummary, previewSorter));
 
         javax.swing.JButton deselectAllButton = new javax.swing.JButton("Deselect All");
-        deselectAllButton.addActionListener(event -> setPreviewSelection(previewModel, false));
+        deselectAllButton.addActionListener(
+                event -> setPreviewSelection(previewModel, false, previewSorter));
 
         JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         controlPanel.add(selectAllButton);
@@ -193,7 +205,8 @@ public class SyncPreviewRenderer {
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             File syncFolder,
-            JLabel summaryLabel) {
+            JLabel summaryLabel,
+            TableRowSorter<DefaultTableModel> previewSorter) {
         if (syncFolder == null) {
             summaryLabel.setText("git: sync folder unknown");
             return;
@@ -210,7 +223,8 @@ public class SyncPreviewRenderer {
                     protected void done() {
                         try {
                             Set<String> changed = get();
-                            int matches = applyGitSelection(previewModel, rows, changed);
+                            int matches =
+                                    applyGitSelection(previewModel, rows, changed, previewSorter);
                             summaryLabel.setText(
                                     "git: matched "
                                             + matches
@@ -232,10 +246,14 @@ public class SyncPreviewRenderer {
 
     /**
      * Set each row's checkbox to true iff its path appears in {@code changedPaths}; all other rows
-     * are unchecked. Returns the number of rows that matched.
+     * are unchecked. Returns the number of rows that matched. Once the batch is applied, the
+     * Sync-column sort is re-applied so checked rows move to the top.
      */
-    private int applyGitSelection(
-            DefaultTableModel previewModel, List<SyncPreviewRow> rows, Set<String> changedPaths) {
+    int applyGitSelection(
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            Set<String> changedPaths,
+            TableRowSorter<DefaultTableModel> previewSorter) {
         Set<String> effective = changedPaths != null ? changedPaths : Set.of();
         int matches = 0;
         for (int i = 0; i < previewModel.getRowCount(); i++) {
@@ -246,6 +264,7 @@ public class SyncPreviewRenderer {
             }
             previewModel.setValueAt(selected, i, 0);
         }
+        resortIfSyncSorted(previewSorter);
         return matches;
     }
 
@@ -294,43 +313,34 @@ public class SyncPreviewRenderer {
     }
 
     /**
-     * Build the preview table's row sorter. All four columns (Sync, Type, Size, Path) are sortable;
-     * Path compares in directory order, Type case-insensitively. The default sort is the Sync
-     * column descending, so checked rows stay on top — including after the git-based auto-selection
-     * or a manual checkbox toggle, because updates re-sort (stable, so rows with equal sort keys
-     * keep model order).
+     * Build the preview table's row sorter. All four columns (Sync, Type, Size, Path) are sortable
+     * by clicking their headers; Path compares in directory order, Type case-insensitively. The
+     * default sort key is the Sync column descending, so a re-sort puts checked rows on top. Model
+     * updates never re-sort — the Sync sort is re-applied only after a batch selection change (see
+     * {@link #resortIfSyncSorted}) or a header click, so rows don't move under the cursor while
+     * checkboxes are toggled individually.
      */
     static TableRowSorter<DefaultTableModel> createPreviewSorter(DefaultTableModel previewModel) {
-        TableRowSorter<DefaultTableModel> sorter = new StableResortRowSorter(previewModel);
+        TableRowSorter<DefaultTableModel> sorter = new TableRowSorter<>(previewModel);
         sorter.setComparator(1, TYPE_LABEL_COMPARATOR);
         sorter.setComparator(3, PATH_DIRECTORY_ORDER_COMPARATOR);
-        sorter.setSortsOnUpdates(true);
         // Boolean descending puts checked (TRUE) rows first.
         sorter.setSortKeys(List.of(new RowSorter.SortKey(0, SortOrder.DESCENDING)));
         return sorter;
     }
 
     /**
-     * Sorter that re-sorts fully after each model update. The default optimized update path inserts
-     * the changed row via binary search, which is not stable among equal sort keys — batch checkbox
-     * changes (git selection, Select All) would end up in reverse order inside the checked group. A
-     * full stable re-sort keeps that order deterministic instead.
+     * Re-apply the Sync-column sort once after a batch selection change (git selection, Select All,
+     * Deselect All), so checked rows move to the top. Skipped when the user has sorted by another
+     * column; individual checkbox toggles never trigger this.
      */
-    private static final class StableResortRowSorter extends TableRowSorter<DefaultTableModel> {
-        StableResortRowSorter(DefaultTableModel model) {
-            super(model);
+    static void resortIfSyncSorted(TableRowSorter<DefaultTableModel> previewSorter) {
+        if (previewSorter == null) {
+            return;
         }
-
-        @Override
-        public void rowsUpdated(int firstRow, int endRow) {
-            if (getSortsOnUpdates()) {
-                // Replace the optimized (unstable) update path with a full stable re-sort;
-                // calling super first would insert the changed row via binary search and the
-                // stable re-sort would then preserve that scrambled order.
-                sort();
-            } else {
-                super.rowsUpdated(firstRow, endRow);
-            }
+        List<? extends RowSorter.SortKey> keys = previewSorter.getSortKeys();
+        if (!keys.isEmpty() && keys.get(0).getColumn() == 0) {
+            previewSorter.sort();
         }
     }
 
@@ -532,10 +542,15 @@ public class SyncPreviewRenderer {
         return rows;
     }
 
-    private void setPreviewSelection(DefaultTableModel previewModel, boolean selected) {
+    /** Check or uncheck every row, then re-apply the Sync-column sort once for the batch. */
+    void setPreviewSelection(
+            DefaultTableModel previewModel,
+            boolean selected,
+            TableRowSorter<DefaultTableModel> previewSorter) {
         for (int i = 0; i < previewModel.getRowCount(); i++) {
             previewModel.setValueAt(selected, i, 0);
         }
+        resortIfSyncSorted(previewSorter);
     }
 
     private void updateSyncPreviewSummary(

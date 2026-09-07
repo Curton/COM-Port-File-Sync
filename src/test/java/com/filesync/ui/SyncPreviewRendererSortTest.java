@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Set;
+import javax.swing.JTable;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.table.DefaultTableModel;
@@ -60,43 +62,85 @@ class SyncPreviewRendererSortTest {
     }
 
     @Test
-    void defaultSortPutsSelectedRowsOnTop() {
-        // Model rows stay fixed; only the view ordering changes. A JTable is required here:
-        // model events reach the sorter through JTable.tableChanged(), a bare sorter does not
-        // listen to the model.
+    void defaultSortKeyIsSyncDescending() {
+        List<SyncPreviewRow> rows = List.of(row("a.txt", 100L));
+        DefaultTableModel model = new SyncPreviewRenderer(null).createSyncPreviewTableModel(rows);
+        TableRowSorter<DefaultTableModel> sorter = SyncPreviewRenderer.createPreviewSorter(model);
+        List<? extends RowSorter.SortKey> keys = sorter.getSortKeys();
+        assertEquals(1, keys.size());
+        assertEquals(0, keys.get(0).getColumn());
+        assertEquals(SortOrder.DESCENDING, keys.get(0).getSortOrder());
+    }
+
+    @Test
+    void manualCheckboxToggleDoesNotResort() {
+        // A JTable is required: model events reach the sorter through JTable.tableChanged().
         List<SyncPreviewRow> rows =
                 List.of(row("a.txt", 100L), row("b.txt", 200L), row("c.txt", 300L));
         DefaultTableModel model = new SyncPreviewRenderer(null).createSyncPreviewTableModel(rows);
         TableRowSorter<DefaultTableModel> sorter = SyncPreviewRenderer.createPreviewSorter(model);
-        assertEquals(0, sorter.getSortKeys().get(0).getColumn());
-        assertEquals(SortOrder.DESCENDING, sorter.getSortKeys().get(0).getSortOrder());
-
-        javax.swing.JTable table = new javax.swing.JTable(model);
+        JTable table = new JTable(model);
         table.setRowSorter(sorter);
 
-        // With all rows unchecked the stable sort keeps the original order.
+        // Toggling individual checkboxes must not move any row, even mid-list.
+        model.setValueAt(Boolean.TRUE, 2, 0);
+        model.setValueAt(Boolean.TRUE, 1, 0);
         assertEquals(0, table.convertRowIndexToView(0));
         assertEquals(1, table.convertRowIndexToView(1));
         assertEquals(2, table.convertRowIndexToView(2));
 
-        // Checking a row re-sorts automatically and lifts it to the top.
-        model.setValueAt(Boolean.TRUE, 2, 0);
-        assertEquals(0, table.convertRowIndexToView(2));
-        assertEquals(1, table.convertRowIndexToView(0));
-        assertEquals(2, table.convertRowIndexToView(1));
-
-        // A second checked row joins the checked group; among equal keys rows keep model order
-        // (the sorter rebuilds the view from model order, so ordering stays deterministic).
-        model.setValueAt(Boolean.TRUE, 1, 0);
-        assertEquals(0, table.convertRowIndexToView(1));
-        assertEquals(1, table.convertRowIndexToView(2));
-        assertEquals(2, table.convertRowIndexToView(0));
-
-        // Unchecking drops the row back into the unchecked group, in model order.
+        // Unchecking also leaves the order untouched.
         model.setValueAt(Boolean.FALSE, 1, 0);
-        assertEquals(0, table.convertRowIndexToView(2));
-        assertEquals(1, table.convertRowIndexToView(0));
-        assertEquals(2, table.convertRowIndexToView(1));
+        assertEquals(0, table.convertRowIndexToView(0));
+        assertEquals(1, table.convertRowIndexToView(1));
+        assertEquals(2, table.convertRowIndexToView(2));
+    }
+
+    @Test
+    void gitSelectionResortsCheckedRowsToTop() {
+        List<SyncPreviewRow> rows =
+                List.of(row("a.txt", 100L), row("b.txt", 200L), row("c.txt", 300L));
+        DefaultTableModel model = new SyncPreviewRenderer(null).createSyncPreviewTableModel(rows);
+        TableRowSorter<DefaultTableModel> sorter = SyncPreviewRenderer.createPreviewSorter(model);
+
+        int matches =
+                new SyncPreviewRenderer(null)
+                        .applyGitSelection(model, rows, Set.of("c.txt", "b.txt"), sorter);
+        assertEquals(2, matches);
+        // Checked rows rise to the top, keeping model order within the group.
+        assertEquals(0, sorter.convertRowIndexToView(1));
+        assertEquals(1, sorter.convertRowIndexToView(2));
+        assertEquals(2, sorter.convertRowIndexToView(0));
+        assertEquals(Boolean.TRUE, model.getValueAt(1, 0));
+        assertEquals(Boolean.TRUE, model.getValueAt(2, 0));
+        assertEquals(Boolean.FALSE, model.getValueAt(0, 0));
+    }
+
+    @Test
+    void batchSelectionResortsOnlyUnderSyncSort() {
+        List<SyncPreviewRow> rows =
+                List.of(row("c.txt", 300L), row("a.txt", 100L), row("b.txt", 200L));
+        DefaultTableModel model = new SyncPreviewRenderer(null).createSyncPreviewTableModel(rows);
+        TableRowSorter<DefaultTableModel> sorter = SyncPreviewRenderer.createPreviewSorter(model);
+        SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
+
+        // Select All re-applies the Sync sort: all rows equal, so the view resets to model order.
+        renderer.setPreviewSelection(model, true, sorter);
+        assertEquals(0, sorter.convertRowIndexToView(0));
+        assertEquals(1, sorter.convertRowIndexToView(1));
+        assertEquals(2, sorter.convertRowIndexToView(2));
+
+        // With the user sorted by Path, a git batch does not yank the order back.
+        sorter.setSortKeys(List.of(new RowSorter.SortKey(3, SortOrder.ASCENDING)));
+        sorter.sort();
+        assertEquals(0, sorter.convertRowIndexToView(1)); // a.txt
+        assertEquals(1, sorter.convertRowIndexToView(2)); // b.txt
+        assertEquals(2, sorter.convertRowIndexToView(0)); // c.txt
+        renderer.applyGitSelection(model, rows, Set.of("c.txt"), sorter);
+        assertEquals(0, sorter.convertRowIndexToView(1));
+        assertEquals(1, sorter.convertRowIndexToView(2));
+        assertEquals(2, sorter.convertRowIndexToView(0));
+        assertEquals(Boolean.TRUE, model.getValueAt(0, 0)); // c.txt checked, still last
     }
 
     @Test
