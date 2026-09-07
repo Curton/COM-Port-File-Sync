@@ -13,6 +13,7 @@ import java.awt.FontMetrics;
 import java.awt.event.MouseEvent;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -23,12 +24,15 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.ListSelectionModel;
+import javax.swing.RowSorter;
+import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
 import javax.swing.event.MouseInputAdapter;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
+import javax.swing.table.TableRowSorter;
 
 /** Build and render sync preview text/table UIs. */
 public class SyncPreviewRenderer {
@@ -117,11 +121,15 @@ public class SyncPreviewRenderer {
         JTable previewTable = new JTable(previewModel);
         previewTable.setFillsViewportHeight(true);
         previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
+        // Clicking Sync/Type/Size/Path headers sorts the table; default sort is by Sync with
+        // selected rows on top.
+        previewTable.setRowSorter(createPreviewSorter(previewModel));
         previewTable.getColumnModel().getColumn(0).setPreferredWidth(25);
         previewTable.getColumnModel().getColumn(1).setPreferredWidth(80);
         previewTable.getColumnModel().getColumn(2).setPreferredWidth(50);
         previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
         previewTable.getColumnModel().getColumn(1).setCellRenderer(createTypeCellRenderer(rows));
+        previewTable.getColumnModel().getColumn(2).setCellRenderer(createSizeCellRenderer(rows));
         previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         previewTable.addMouseListener(
@@ -131,10 +139,12 @@ public class SyncPreviewRenderer {
                         if (e.getClickCount() != 2) {
                             return;
                         }
-                        int row = previewTable.rowAtPoint(e.getPoint());
-                        if (row < 0) {
+                        int viewRow = previewTable.rowAtPoint(e.getPoint());
+                        if (viewRow < 0) {
                             return;
                         }
+                        // Sorting may permute the view, so resolve the model row before editing.
+                        int row = previewTable.convertRowIndexToModel(viewRow);
                         // Commit any in-progress checkbox edit so we read the latest value.
                         if (previewTable.isEditing()) {
                             previewTable.getCellEditor().stopCellEditing();
@@ -256,7 +266,13 @@ public class SyncPreviewRenderer {
                 new DefaultTableModel(new String[] {"Sync", "Type", "Size", "Path"}, 0) {
                     @Override
                     public Class<?> getColumnClass(int columnIndex) {
-                        return columnIndex == 0 ? Boolean.class : String.class;
+                        if (columnIndex == 0) {
+                            return Boolean.class;
+                        }
+                        if (columnIndex == 2) {
+                            return Long.class;
+                        }
+                        return String.class;
                     }
 
                     @Override
@@ -266,13 +282,93 @@ public class SyncPreviewRenderer {
                 };
         // All rows start unchecked; the git-based auto-default (and the "Select Changes (git)"
         // button) flips checkboxes after the dialog opens. No size-based pre-selection heuristic.
+        // The Size column holds raw byte counts (Long) so sorting is numeric; the cell renderer
+        // displays the formatted sizeText instead.
         for (SyncPreviewRow row : rows) {
             model.addRow(
                     new Object[] {
-                        Boolean.FALSE, row.getTypeLabel(), row.getSizeText(), row.getPath()
+                        Boolean.FALSE, row.getTypeLabel(), row.getSizeBytes(), row.getPath()
                     });
         }
         return model;
+    }
+
+    /**
+     * Build the preview table's row sorter. All four columns (Sync, Type, Size, Path) are sortable;
+     * Path compares in directory order, Type case-insensitively. The default sort is the Sync
+     * column descending, so checked rows stay on top — including after the git-based auto-selection
+     * or a manual checkbox toggle, because updates re-sort (stable, so rows with equal sort keys
+     * keep model order).
+     */
+    static TableRowSorter<DefaultTableModel> createPreviewSorter(DefaultTableModel previewModel) {
+        TableRowSorter<DefaultTableModel> sorter = new StableResortRowSorter(previewModel);
+        sorter.setComparator(1, TYPE_LABEL_COMPARATOR);
+        sorter.setComparator(3, PATH_DIRECTORY_ORDER_COMPARATOR);
+        sorter.setSortsOnUpdates(true);
+        // Boolean descending puts checked (TRUE) rows first.
+        sorter.setSortKeys(List.of(new RowSorter.SortKey(0, SortOrder.DESCENDING)));
+        return sorter;
+    }
+
+    /**
+     * Sorter that re-sorts fully after each model update. The default optimized update path inserts
+     * the changed row via binary search, which is not stable among equal sort keys — batch checkbox
+     * changes (git selection, Select All) would end up in reverse order inside the checked group. A
+     * full stable re-sort keeps that order deterministic instead.
+     */
+    private static final class StableResortRowSorter extends TableRowSorter<DefaultTableModel> {
+        StableResortRowSorter(DefaultTableModel model) {
+            super(model);
+        }
+
+        @Override
+        public void rowsUpdated(int firstRow, int endRow) {
+            if (getSortsOnUpdates()) {
+                // Replace the optimized (unstable) update path with a full stable re-sort;
+                // calling super first would insert the changed row via binary search and the
+                // stable re-sort would then preserve that scrambled order.
+                sort();
+            } else {
+                super.rowsUpdated(firstRow, endRow);
+            }
+        }
+    }
+
+    private static final Comparator<String> TYPE_LABEL_COMPARATOR =
+            (a, b) -> {
+                int cmp = a.compareToIgnoreCase(b);
+                return cmp != 0 ? cmp : a.compareTo(b);
+            };
+
+    /**
+     * Compare paths in directory order: segment by segment, so "a/b.txt" sorts before "a.txt" and
+     * "a/b" before "a-x/c" (raw string order would compare the separator characters themselves).
+     * Comparison ignores case first, then falls back to case-sensitive.
+     */
+    static int comparePathsDirectoryOrder(String a, String b) {
+        String[] as = splitPathSegments(a);
+        String[] bs = splitPathSegments(b);
+        int common = Math.min(as.length, bs.length);
+        for (int i = 0; i < common; i++) {
+            int cmp = as[i].compareToIgnoreCase(bs[i]);
+            if (cmp == 0) {
+                cmp = as[i].compareTo(bs[i]);
+            }
+            if (cmp != 0) {
+                return cmp;
+            }
+        }
+        return Integer.compare(as.length, bs.length);
+    }
+
+    private static final Comparator<String> PATH_DIRECTORY_ORDER_COMPARATOR =
+            SyncPreviewRenderer::comparePathsDirectoryOrder;
+
+    private static String[] splitPathSegments(String path) {
+        if (path == null || path.isEmpty()) {
+            return new String[0];
+        }
+        return path.split("[/\\\\]+");
     }
 
     /**
@@ -323,6 +419,29 @@ public class SyncPreviewRenderer {
                     case APPEND -> new Color(0, 128, 128);
                     default -> null;
                 };
+            }
+        };
+    }
+
+    private TableCellRenderer createSizeCellRenderer(List<SyncPreviewRow> rows) {
+        return new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(
+                    JTable table,
+                    Object value,
+                    boolean isSelected,
+                    boolean hasFocus,
+                    int row,
+                    int column) {
+                // The model stores raw byte counts (Long) so the column sorts numerically; the
+                // display text comes from the row, keeping the "-" placeholder for directory
+                // and delete operations.
+                int modelRow = table.convertRowIndexToModel(row);
+                SyncPreviewRow previewRow =
+                        modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+                String text = previewRow != null ? previewRow.getSizeText() : "";
+                super.getTableCellRendererComponent(table, text, isSelected, hasFocus, row, column);
+                return this;
             }
         };
     }
