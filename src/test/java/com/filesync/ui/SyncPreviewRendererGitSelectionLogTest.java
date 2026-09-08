@@ -22,11 +22,34 @@ class SyncPreviewRendererGitSelectionLogTest {
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, logs::add);
 
         renderer.logGitSelectionOutcome(
-                new LinkedHashSet<>(List.of("a.txt")), 1, List.of(row("a.txt"), row("b.txt")));
+                new LinkedHashSet<>(List.of("a.txt")),
+                1,
+                List.of(row("a.txt"), row("b.txt")),
+                "git");
 
         assertEquals(1, logs.size());
         assertEquals(
-                "git: matched 1 of 2 preview row(s); git reported 1 changed path(s)", logs.get(0));
+                "git: matched 1 of 2 preview row(s); git reported 1 changed path(s) via git",
+                logs.get(0));
+    }
+
+    @Test
+    void outcomeLogsWhichGitExecutableWasUsed() {
+        List<String> logs = new ArrayList<>();
+        SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, logs::add);
+
+        // Install-location fallback: the resolved path must appear in the log.
+        renderer.logGitSelectionOutcome(
+                new LinkedHashSet<>(List.of("a.txt")),
+                1,
+                List.of(row("a.txt")),
+                "D:\\appl\\git\\cmd\\git.exe");
+
+        assertEquals(1, logs.size());
+        assertEquals(
+                "git: matched 1 of 1 preview row(s); git reported 1 changed path(s) via "
+                        + "D:\\appl\\git\\cmd\\git.exe",
+                logs.get(0));
     }
 
     @Test
@@ -36,7 +59,7 @@ class SyncPreviewRendererGitSelectionLogTest {
         LinkedHashSet<String> changed =
                 new LinkedHashSet<>(List.of("x.txt", "y.txt", "z.txt", "p.txt", "q.txt", "r.txt"));
 
-        renderer.logGitSelectionOutcome(changed, 0, List.of(row("a.txt"), row("b.txt")));
+        renderer.logGitSelectionOutcome(changed, 0, List.of(row("a.txt"), row("b.txt")), "git");
 
         assertEquals(2, logs.size());
         String diagnostic = logs.get(1);
@@ -53,11 +76,12 @@ class SyncPreviewRendererGitSelectionLogTest {
         List<String> logs = new ArrayList<>();
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, logs::add);
 
-        renderer.logGitSelectionOutcome(new LinkedHashSet<>(), 0, List.of());
+        renderer.logGitSelectionOutcome(new LinkedHashSet<>(), 0, List.of(), "git");
 
         assertEquals(1, logs.size());
         assertEquals(
-                "git: matched 0 of 0 preview row(s); git reported 0 changed path(s)", logs.get(0));
+                "git: matched 0 of 0 preview row(s); git reported 0 changed path(s) via git",
+                logs.get(0));
     }
 
     @Test
@@ -65,6 +89,6 @@ class SyncPreviewRendererGitSelectionLogTest {
         // The legacy constructors must keep working without a sink.
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null);
         renderer.logGitSelectionOutcome(
-                new LinkedHashSet<>(List.of("a.txt")), 0, List.of(row("b.txt")));
+                new LinkedHashSet<>(List.of("a.txt")), 0, List.of(row("b.txt")), "git");
     }
 }

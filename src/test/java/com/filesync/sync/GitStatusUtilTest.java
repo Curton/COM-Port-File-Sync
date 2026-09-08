@@ -3,7 +3,7 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.Iterator;
 import java.util.List;
@@ -158,34 +159,44 @@ class GitStatusUtilTest {
                 Set.of(), GitStatusUtil.relativizeToWorkingDir(Set.of("a.txt"), tempDir, other));
     }
 
-    // ---- git executable fallback: probed when plain "git" is not on PATH ----
+    // ---- git executable fallback: probed when plain "git" cannot be launched ----
 
     @Test
-    void isProgramNotFoundDetectsExecutableMissing() {
+    void isProgramUnavailableDetectsMissingDeniedAndPolicyBlocked() {
         assertTrue(
-                GitStatusUtil.isProgramNotFound(
+                GitStatusUtil.isProgramUnavailable(
                         new IOException(
                                 "Cannot run program \"git\": CreateProcess error=2, "
                                         + "系统找不到指定的文件。")));
         assertTrue(
-                GitStatusUtil.isProgramNotFound(
+                GitStatusUtil.isProgramUnavailable(
                         new IOException(
                                 "Cannot run program \"git\": error=2, No such file or directory")));
+        // Corporate machines block the PATH-resolved git.exe via group policy (seen in the field).
+        assertTrue(
+                GitStatusUtil.isProgramUnavailable(
+                        new IOException(
+                                "Cannot run program \"git\" (in directory \"D:\\x\"): "
+                                        + "CreateProcess error=1260, 组策略阻止了这个程序。")));
+        assertTrue(
+                GitStatusUtil.isProgramUnavailable(
+                        new IOException(
+                                "Cannot run program \"git\": CreateProcess error=5, 拒绝访问。")));
     }
 
     @Test
-    void isProgramNotFoundRejectsOtherFailures() {
-        // git ran but failed on its own, or another OS error - must not be rewritten as
-        // "executable not found".
+    void isProgramUnavailableRejectsOtherFailures() {
+        // git ran but failed on its own, or an error unrelated to the executable itself - the
+        // message must pass through untouched and no fallback probing may run.
         assertFalse(
-                GitStatusUtil.isProgramNotFound(
+                GitStatusUtil.isProgramUnavailable(
                         new IOException(
                                 "fatal: not a git repository (or any of the parent directories): .git")));
         assertFalse(
-                GitStatusUtil.isProgramNotFound(
+                GitStatusUtil.isProgramUnavailable(
                         new IOException(
-                                "Cannot run program \"git\": CreateProcess error=5, 拒绝访问。")));
-        assertFalse(GitStatusUtil.isProgramNotFound(new IOException((String) null)));
+                                "Cannot run program \"git\": CreateProcess error=267, 目录名称无效。")));
+        assertFalse(GitStatusUtil.isProgramUnavailable(new IOException((String) null)));
     }
 
     @Test
@@ -197,38 +208,85 @@ class GitStatusUtilTest {
                     candidates.contains(programFiles + "\\Git\\cmd\\git.exe"),
                     "expected machine-wide Git for Windows location in: " + candidates);
         }
-        // The remote machine's custom install root (git not on PATH there).
+        // The remote machine's custom install root: git-bash.exe works there while the
+        // PATH-resolved git.exe is blocked, so cmd/bin/mingw64/usr layouts are all probed.
         assertTrue(candidates.contains("D:\\appl\\git\\cmd\\git.exe"));
         assertTrue(candidates.contains("D:\\appl\\git\\bin\\git.exe"));
+        assertTrue(candidates.contains("D:\\appl\\git\\mingw64\\bin\\git.exe"));
+        assertTrue(candidates.contains("D:\\appl\\git\\usr\\bin\\git.exe"));
         assertTrue(candidates.contains("/usr/bin/git"));
     }
 
     @Test
-    void findGitExecutableReturnsFirstExistingCandidate(@TempDir Path tempDir) throws Exception {
-        Path cmd = tempDir.resolve("Git").resolve("cmd");
-        Files.createDirectories(cmd);
-        Path fakeGit = cmd.resolve("git.exe");
-        Files.writeString(fakeGit, "stub");
-        makeExecutable(fakeGit);
+    void startFromCandidatesFallsBackThroughCandidates(@TempDir Path tempDir) throws Exception {
+        // A directory named git.exe must be skipped, an existing but non-launchable file must
+        // fail the attempt and let the loop continue, and the first launchable candidate wins.
+        // Called directly (bypassing the plain-"git" attempt) so the probe is deterministic.
+        Path dirNamedGitExe = tempDir.resolve("Git\\cmd\\git.exe");
+        Files.createDirectories(dirNamedGitExe);
+        Path badExe = tempDir.resolve("Broken\\cmd\\git.exe");
+        Files.createDirectories(badExe.getParent());
+        Files.writeString(badExe, "not a real executable");
+        makeExecutable(badExe);
+        String exeName =
+                System.getProperty("os.name", "").toLowerCase().contains("win")
+                        ? "java.exe"
+                        : "java";
+        Path javaBin = Paths.get(System.getProperty("java.home"), "bin", exeName);
+        assumeTrue(Files.isRegularFile(javaBin), "java executable not found");
 
-        String found =
-                GitStatusUtil.findGitExecutable(
-                        List.of(
-                                tempDir.resolve("nope\\cmd\\git.exe").toString(),
-                                fakeGit.toString()));
-        assertEquals(fakeGit.toString(), found);
+        Process process =
+                GitStatusUtil.startFromCandidates(
+                        List.of("-version"),
+                        tempDir.toFile(),
+                        List.of(dirNamedGitExe.toString(), badExe.toString(), javaBin.toString()));
+        try {
+            assertNotNull(process);
+            assertEquals(javaBin.toString(), GitStatusUtil.lastUsedExecutable());
+        } finally {
+            process.destroy();
+        }
     }
 
     @Test
-    void findGitExecutableSkipsDirectoriesAndReturnsNullWhenNothingExists(@TempDir Path tempDir)
+    void startFromCandidatesThrowsFriendlyErrorWhenNoCandidateIsLaunchable(@TempDir Path tempDir)
             throws Exception {
-        // A directory named git.exe must not be mistaken for the executable.
-        Files.createDirectories(tempDir.resolve("Git\\cmd\\git.exe"));
-        assertNull(
-                GitStatusUtil.findGitExecutable(
-                        List.of(
-                                tempDir.resolve("Git\\cmd\\git.exe").toString(),
-                                tempDir.resolve("absent\\cmd\\git.exe").toString())));
+        // Only a directory (skipped, never attempted) and a missing path: no candidate is even
+        // tried, so the plain "not found" message is thrown.
+        Path dirNamedGitExe = tempDir.resolve("Git\\cmd\\git.exe");
+        Files.createDirectories(dirNamedGitExe);
+        IOException ex =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                GitStatusUtil.startFromCandidates(
+                                        List.of("--version"),
+                                        tempDir.toFile(),
+                                        List.of(
+                                                dirNamedGitExe.toString(),
+                                                tempDir.resolve("nope\\cmd\\git.exe").toString())));
+        assertTrue(ex.getMessage().contains("executable not found"), ex.getMessage());
+    }
+
+    @Test
+    void startFromCandidatesReportsLastErrorWhenCandidatesExistButFailToStart(@TempDir Path tempDir)
+            throws Exception {
+        // A candidate that exists but cannot launch (corrupt/unsupported binary) is attempted,
+        // recorded as the last error, and reported with the OS error text for escalation.
+        Path badExe = tempDir.resolve("Broken\\cmd\\git.exe");
+        Files.createDirectories(badExe.getParent());
+        Files.writeString(badExe, "not a real executable");
+        makeExecutable(badExe);
+        IOException ex =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                GitStatusUtil.startFromCandidates(
+                                        List.of("--version"),
+                                        tempDir.toFile(),
+                                        List.of(badExe.toString())));
+        assertTrue(ex.getMessage().contains("any known install location"), ex.getMessage());
+        assertNotNull(ex.getCause());
     }
 
     /** Make a file executable on POSIX filesystems; Windows needs no chmod for isExecutable. */

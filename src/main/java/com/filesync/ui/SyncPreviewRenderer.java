@@ -249,7 +249,8 @@ public class SyncPreviewRenderer {
                                             + " of "
                                             + changed.size()
                                             + " changed file(s)");
-                            logGitSelectionOutcome(changed, matches, rows);
+                            logGitSelectionOutcome(
+                                    changed, matches, rows, GitStatusUtil.lastUsedExecutable());
                         } catch (Exception e) {
                             Throwable cause = e.getCause() != null ? e.getCause() : e;
                             String msg = cause.getMessage();
@@ -268,8 +269,14 @@ public class SyncPreviewRenderer {
      * Write the git selection outcome to the log. A zero-match result is the classic "button did
      * nothing, no error" symptom (sync folder not matching the git repository, ignored paths,
      * encoding), so it is logged with sample paths from both sides to make the mismatch visible.
+     * The git executable actually used is included, so an install-location fallback (PATH missing
+     * or blocked) is visible in the log.
      */
-    void logGitSelectionOutcome(Set<String> changedPaths, int matches, List<SyncPreviewRow> rows) {
+    void logGitSelectionOutcome(
+            Set<String> changedPaths,
+            int matches,
+            List<SyncPreviewRow> rows,
+            String gitExecutable) {
         logSink.accept(
                 "git: matched "
                         + matches
@@ -277,7 +284,8 @@ public class SyncPreviewRenderer {
                         + rows.size()
                         + " preview row(s); git reported "
                         + changedPaths.size()
-                        + " changed path(s)");
+                        + " changed path(s) via "
+                        + gitExecutable);
         if (matches == 0 && !changedPaths.isEmpty() && !rows.isEmpty()) {
             logSink.accept(
                     "git: no preview row matched a git path; git paths: "

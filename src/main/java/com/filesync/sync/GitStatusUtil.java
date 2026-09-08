@@ -41,6 +41,17 @@ public final class GitStatusUtil {
     /** Default deadline (ms) for a {@code git status} run; matches the folder-context timeout. */
     static final long DEFAULT_TIMEOUT_MS = 5000L;
 
+    /** The git executable the most recent invocation actually used ("git" when from PATH). */
+    private static volatile String lastUsedExecutable = "git";
+
+    /**
+     * Diagnostic for the log: which git executable the last run launched — plain {@code git} when
+     * PATH worked, or the full path of the install-location fallback that was probed.
+     */
+    public static String lastUsedExecutable() {
+        return lastUsedExecutable;
+    }
+
     /**
      * Run {@code git -C <workingDir> rev-parse --show-toplevel} and {@code git -C <workingDir>
      * status --short --porcelain --untracked-files=all}, returning the set of changed paths
@@ -154,10 +165,18 @@ public final class GitStatusUtil {
 
     /**
      * Start {@code git <args>} in {@code dir}. When plain {@code git} cannot be started because the
-     * executable does not exist (installed without "add to PATH"), common Git for Windows install
-     * locations are probed and the first existing {@code git.exe} is retried before giving up.
+     * executable is missing or unavailable (not on PATH, or blocked by corporate policy such as
+     * CreateProcess error=1260), the known install locations are probed in order and the first one
+     * that actually launches is used; candidates that exist but fail to start are skipped and the
+     * probe continues. Which executable was used is recorded in {@link #lastUsedExecutable()}.
      */
     private static Process startGitProcess(List<String> args, File dir) throws IOException {
+        return startGitProcess(args, dir, gitExecutableCandidates());
+    }
+
+    /** See the candidate-list overload; probes the default install locations. */
+    static Process startGitProcess(List<String> args, File dir, List<String> candidates)
+            throws IOException {
         List<String> command = new ArrayList<>();
         command.add("git");
         command.add("-C");
@@ -166,56 +185,83 @@ public final class GitStatusUtil {
         ProcessBuilder pb = new ProcessBuilder(command).redirectErrorStream(true);
         pb.directory(dir);
         try {
-            return pb.start();
+            Process process = pb.start();
+            lastUsedExecutable = "git";
+            return process;
         } catch (IOException startError) {
-            if (!isProgramNotFound(startError)) {
+            if (!isProgramUnavailable(startError)) {
                 throw startError;
             }
         }
-        String resolved = findGitExecutable();
-        if (resolved == null) {
-            // Human-readable instead of the OS-localized "CreateProcess error=2, ...".
-            throw new IOException("executable not found - install Git or add it to PATH");
-        }
-        command.set(0, resolved);
-        pb = new ProcessBuilder(command).redirectErrorStream(true);
-        pb.directory(dir);
-        return pb.start();
+        return startFromCandidates(args, dir, candidates);
     }
 
     /**
-     * Whether an {@link IOException} from {@link ProcessBuilder#start()} means the executable
-     * itself was not found (Windows ERROR_FILE_NOT_FOUND / POSIX ENOENT) as opposed to git running
-     * and failing on its own (e.g. "fatal: not a git repository").
+     * Launch {@code git <args>} from the first known install location that actually starts. Each
+     * existing candidate is really attempted - one that exists but is blocked or corrupt is
+     * recorded as the last error and the probe continues.
      */
-    static boolean isProgramNotFound(IOException e) {
-        String msg = e.getMessage();
-        return msg != null && msg.startsWith("Cannot run program") && msg.contains("error=2");
-    }
-
-    /** Probe the default candidate list for a usable git executable. */
-    static String findGitExecutable() {
-        return findGitExecutable(gitExecutableCandidates());
-    }
-
-    /**
-     * Return the first candidate that is an existing executable file, or null when none applies.
-     * Only consulted when {@code git} is not on PATH, so wrong-platform entries are simply skipped.
-     */
-    static String findGitExecutable(List<String> candidates) {
+    static Process startFromCandidates(List<String> args, File dir, List<String> candidates)
+            throws IOException {
+        IOException lastStartError = null;
         for (String candidate : candidates) {
             Path path = Paths.get(candidate);
-            if (Files.isRegularFile(path) && Files.isExecutable(path)) {
-                return path.toString();
+            if (!Files.isRegularFile(path) || !Files.isExecutable(path)) {
+                continue;
+            }
+            List<String> command = new ArrayList<>();
+            command.add(candidate);
+            command.add("-C");
+            command.add(dir.getAbsolutePath());
+            command.addAll(args);
+            ProcessBuilder pb = new ProcessBuilder(command).redirectErrorStream(true);
+            pb.directory(dir);
+            try {
+                Process process = pb.start();
+                lastUsedExecutable = candidate;
+                return process;
+            } catch (IOException startError) {
+                lastStartError = startError;
             }
         }
-        return null;
+        if (lastStartError != null) {
+            // Keep the OS error (e.g. "CreateProcess error=1260, 组策略阻止了这个程序。") - it
+            // names the blocked location and is what the user needs to escalate to IT.
+            throw new IOException(
+                    "git could not be started from any known install location - last attempt: "
+                            + lastStartError.getMessage(),
+                    lastStartError);
+        }
+        // Human-readable instead of the OS-localized "CreateProcess error=2, ...".
+        throw new IOException("executable not found - install Git or add it to PATH");
     }
 
     /**
-     * Known git.exe locations probed when {@code git} is not on PATH, in priority order: Git for
-     * Windows install roots (machine-wide, 32-bit, per-user, and the remote machine's custom root),
-     * scoop shims, then POSIX defaults.
+     * Whether an {@link IOException} from {@link ProcessBuilder#start()} means this executable
+     * could not be launched and a different one might work: file not found (error=2), access denied
+     * (error=5), or blocked by group policy (error=1260). Git running and failing on its own (e.g.
+     * "fatal: not a git repository") is not affected. The error code is parsed exactly - a
+     * substring match would confuse error=2 with error=267 (invalid directory).
+     */
+    static boolean isProgramUnavailable(IOException e) {
+        String msg = e.getMessage();
+        if (msg == null || !msg.startsWith("Cannot run program")) {
+            return false;
+        }
+        java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("error=(\\d+)").matcher(msg);
+        if (!matcher.find()) {
+            return false;
+        }
+        int code = Integer.parseInt(matcher.group(1));
+        return code == 2 || code == 5 || code == 1260;
+    }
+
+    /**
+     * Known git.exe locations probed when {@code git} on PATH cannot be launched, in priority
+     * order: Git for Windows install roots (machine-wide, 32-bit, per-user, and the remote
+     * machine's custom root — each root's {@code cmd}, {@code bin}, {@code mingw64\bin} and {@code
+     * usr\bin} layouts), scoop shims, then POSIX defaults.
      */
     static List<String> gitExecutableCandidates() {
         List<String> out = new ArrayList<>();
@@ -237,13 +283,15 @@ public final class GitStatusUtil {
         return out;
     }
 
-    /** Add a Git for Windows install root's two known git.exe locations. */
+    /** Add a Git for Windows install root's known git.exe layouts (cmd, bin, mingw64, usr). */
     private static void addInstallRoot(List<String> out, String root) {
         if (root == null || root.isBlank()) {
             return;
         }
         out.add(root + "\\cmd\\git.exe");
         out.add(root + "\\bin\\git.exe");
+        out.add(root + "\\mingw64\\bin\\git.exe");
+        out.add(root + "\\usr\\bin\\git.exe");
     }
 
     /**
