@@ -53,7 +53,10 @@ public class MainFrame extends JFrame {
 
         syncController =
                 new SyncController(this, components, syncManager, state, settings, logController);
-        SyncPreviewRenderer syncPreviewRenderer = new SyncPreviewRenderer(this, syncController);
+        // Route git-selection outcomes into the main log: the preview dialog only surfaces them
+        // in a small inline label, and failures must not be silent.
+        SyncPreviewRenderer syncPreviewRenderer =
+                new SyncPreviewRenderer(this, syncController, logController::log);
         syncController.setPreviewRenderer(syncPreviewRenderer);
         connectionController =
                 new ConnectionController(

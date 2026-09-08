@@ -3,6 +3,7 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -11,7 +12,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -131,6 +134,114 @@ class GitStatusUtilTest {
         assertEquals("a\tb.txt", GitStatusUtil.dequoteGitPath("\"a\\tb.txt\""));
     }
 
+    // ---- relativizeToWorkingDir: repo-root -> working-dir path conversion ----
+
+    @Test
+    void relativizeReturnsInputWhenWorkingDirIsRepoRoot(@TempDir Path tempDir) {
+        Set<String> in = Set.of("a.txt", "dir/b.txt");
+        assertEquals(in, GitStatusUtil.relativizeToWorkingDir(in, tempDir, tempDir));
+    }
+
+    @Test
+    void relativizeStripsSubdirectoryPrefixAndDropsOutsidePaths(@TempDir Path tempDir) {
+        Path sub = tempDir.resolve("sub");
+        Set<String> in = Set.of("sub/inside.txt", "root.txt", "sub", "other/sub2.txt");
+        // Only files under "sub" belong to the sync folder; a path equal to the folder itself
+        // ("sub") is dropped too.
+        assertEquals(Set.of("inside.txt"), GitStatusUtil.relativizeToWorkingDir(in, tempDir, sub));
+    }
+
+    @Test
+    void relativizeReturnsEmptyWhenWorkingDirOutsideRepoRoot(@TempDir Path tempDir) {
+        Path other = tempDir.resolve("other");
+        assertEquals(
+                Set.of(), GitStatusUtil.relativizeToWorkingDir(Set.of("a.txt"), tempDir, other));
+    }
+
+    // ---- git executable fallback: probed when plain "git" is not on PATH ----
+
+    @Test
+    void isProgramNotFoundDetectsExecutableMissing() {
+        assertTrue(
+                GitStatusUtil.isProgramNotFound(
+                        new IOException(
+                                "Cannot run program \"git\": CreateProcess error=2, "
+                                        + "系统找不到指定的文件。")));
+        assertTrue(
+                GitStatusUtil.isProgramNotFound(
+                        new IOException(
+                                "Cannot run program \"git\": error=2, No such file or directory")));
+    }
+
+    @Test
+    void isProgramNotFoundRejectsOtherFailures() {
+        // git ran but failed on its own, or another OS error - must not be rewritten as
+        // "executable not found".
+        assertFalse(
+                GitStatusUtil.isProgramNotFound(
+                        new IOException(
+                                "fatal: not a git repository (or any of the parent directories): .git")));
+        assertFalse(
+                GitStatusUtil.isProgramNotFound(
+                        new IOException(
+                                "Cannot run program \"git\": CreateProcess error=5, 拒绝访问。")));
+        assertFalse(GitStatusUtil.isProgramNotFound(new IOException((String) null)));
+    }
+
+    @Test
+    void candidatesIncludeStandardRootsAndRemoteMachineRoot() {
+        List<String> candidates = GitStatusUtil.gitExecutableCandidates();
+        String programFiles = System.getenv("ProgramFiles");
+        if (programFiles != null) {
+            assertTrue(
+                    candidates.contains(programFiles + "\\Git\\cmd\\git.exe"),
+                    "expected machine-wide Git for Windows location in: " + candidates);
+        }
+        // The remote machine's custom install root (git not on PATH there).
+        assertTrue(candidates.contains("D:\\appl\\git\\cmd\\git.exe"));
+        assertTrue(candidates.contains("D:\\appl\\git\\bin\\git.exe"));
+        assertTrue(candidates.contains("/usr/bin/git"));
+    }
+
+    @Test
+    void findGitExecutableReturnsFirstExistingCandidate(@TempDir Path tempDir) throws Exception {
+        Path cmd = tempDir.resolve("Git").resolve("cmd");
+        Files.createDirectories(cmd);
+        Path fakeGit = cmd.resolve("git.exe");
+        Files.writeString(fakeGit, "stub");
+        makeExecutable(fakeGit);
+
+        String found =
+                GitStatusUtil.findGitExecutable(
+                        List.of(
+                                tempDir.resolve("nope\\cmd\\git.exe").toString(),
+                                fakeGit.toString()));
+        assertEquals(fakeGit.toString(), found);
+    }
+
+    @Test
+    void findGitExecutableSkipsDirectoriesAndReturnsNullWhenNothingExists(@TempDir Path tempDir)
+            throws Exception {
+        // A directory named git.exe must not be mistaken for the executable.
+        Files.createDirectories(tempDir.resolve("Git\\cmd\\git.exe"));
+        assertNull(
+                GitStatusUtil.findGitExecutable(
+                        List.of(
+                                tempDir.resolve("Git\\cmd\\git.exe").toString(),
+                                tempDir.resolve("absent\\cmd\\git.exe").toString())));
+    }
+
+    /** Make a file executable on POSIX filesystems; Windows needs no chmod for isExecutable. */
+    private static void makeExecutable(Path file) throws IOException {
+        try {
+            Set<PosixFilePermission> perms = Files.getPosixFilePermissions(file);
+            perms.add(PosixFilePermission.OWNER_EXECUTE);
+            Files.setPosixFilePermissions(file, perms);
+        } catch (UnsupportedOperationException ignored) {
+            // Windows filesystem: Files.isExecutable accepts any accessible regular file.
+        }
+    }
+
     // ---- getChangedFiles: integration test guarded by git availability ----
 
     @Test
@@ -156,6 +267,43 @@ class GitStatusUtilTest {
         assertFalse(changed.isEmpty());
         assertTrue(changed.contains("committed.txt"), "expected modified file in: " + changed);
         assertTrue(changed.contains("untracked.txt"), "expected untracked file in: " + changed);
+    }
+
+    @Test
+    void getChangedFilesRelativizesToSubDirectoryAndExpandsUntrackedDirs(@TempDir Path tempDir)
+            throws Exception {
+        assumeTrue(isGitAvailable(), "git is not installed; skipping integration test");
+
+        Path repoDir = tempDir.toRealPath();
+        File repo = repoDir.toFile();
+        runGit(repo, "init");
+        runGit(repo, "config", "user.email", "test@example.com");
+        runGit(repo, "config", "user.name", "Test User");
+        Path rootFile = repoDir.resolve("root.txt");
+        Path sub = repoDir.resolve("sub");
+        Files.createDirectories(sub);
+        Path subFile = sub.resolve("sub.txt");
+        Files.writeString(rootFile, "v1\n", StandardCharsets.UTF_8);
+        Files.writeString(subFile, "v1\n", StandardCharsets.UTF_8);
+        runGit(repo, "add", ".");
+        runGit(repo, "commit", "-m", "baseline");
+
+        // Modify both tracked files and add a file inside a NEW (wholly untracked) directory.
+        Files.writeString(rootFile, "v2\n", StandardCharsets.UTF_8);
+        Files.writeString(subFile, "v2\n", StandardCharsets.UTF_8);
+        Path newDir = sub.resolve("newdir");
+        Files.createDirectories(newDir);
+        Files.writeString(newDir.resolve("newfile.txt"), "new\n", StandardCharsets.UTF_8);
+
+        // Sync folder is a subdirectory of the repo: paths must be relative to it, the modified
+        // root-level file is outside and dropped, and the untracked directory is expanded
+        // file-by-file (git collapses it to "?? newdir/" without --untracked-files=all).
+        Set<String> changed = GitStatusUtil.getChangedFiles(sub.toFile());
+        assertEquals(Set.of("sub.txt", "newdir/newfile.txt"), changed);
+
+        // From the repo root the same changes report repo-root-relative paths.
+        Set<String> fromRoot = GitStatusUtil.getChangedFiles(repo);
+        assertEquals(Set.of("root.txt", "sub/sub.txt", "sub/newdir/newfile.txt"), fromRoot);
     }
 
     @Test

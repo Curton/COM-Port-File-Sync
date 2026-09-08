@@ -66,13 +66,29 @@ public class SyncPreviewRenderer {
     private final JFrame owner;
     private final ConflictResolver conflictResolver;
 
+    /** Receives git-selection log lines; must be thread-safe (LogController.log is). */
+    private final java.util.function.Consumer<String> logSink;
+
     public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
-        this.owner = owner;
-        this.conflictResolver = conflictResolver;
+        this(owner, conflictResolver, msg -> {});
     }
 
     public SyncPreviewRenderer(JFrame owner) {
         this(owner, null);
+    }
+
+    /**
+     * @param logSink sink for git-selection outcomes (success counts, zero-match diagnostics,
+     *     failures) so results are visible in the main window's log even when the preview dialog's
+     *     inline summary label is missed; may be a no-op in tests
+     */
+    public SyncPreviewRenderer(
+            JFrame owner,
+            ConflictResolver conflictResolver,
+            java.util.function.Consumer<String> logSink) {
+        this.owner = owner;
+        this.conflictResolver = conflictResolver;
+        this.logSink = logSink != null ? logSink : msg -> {};
     }
 
     public SyncPreviewResult showSyncPreviewDialogWithResult(
@@ -198,8 +214,9 @@ public class SyncPreviewRenderer {
      * Run {@code git status --short} in {@code syncFolder} off the EDT, then set the preview
      * checkboxes to exactly the reported paths (matching rows are checked, all others unchecked).
      * Errors (git not installed / not a repository / timeout) are reported inline via {@code
-     * summaryLabel} so the modal dialog is not disrupted. Used both by the "Select Changes (git)"
-     * button and as the dialog's auto-default selection.
+     * summaryLabel} so the modal dialog is not disrupted, and every outcome is additionally written
+     * to {@code logSink} — the git selection must never fail silently. Used both by the "Select
+     * Changes (git)" button and as the dialog's auto-default selection.
      */
     private void triggerGitBasedSelection(
             DefaultTableModel previewModel,
@@ -209,6 +226,7 @@ public class SyncPreviewRenderer {
             TableRowSorter<DefaultTableModel> previewSorter) {
         if (syncFolder == null) {
             summaryLabel.setText("git: sync folder unknown");
+            logSink.accept("git: selection skipped - sync folder unknown");
             return;
         }
         summaryLabel.setText("git: checking...");
@@ -231,6 +249,7 @@ public class SyncPreviewRenderer {
                                             + " of "
                                             + changed.size()
                                             + " changed file(s)");
+                            logGitSelectionOutcome(changed, matches, rows);
                         } catch (Exception e) {
                             Throwable cause = e.getCause() != null ? e.getCause() : e;
                             String msg = cause.getMessage();
@@ -238,10 +257,45 @@ public class SyncPreviewRenderer {
                                 msg = cause.getClass().getSimpleName();
                             }
                             summaryLabel.setText("git: " + msg);
+                            logSink.accept("git: selection failed - " + msg);
                         }
                     }
                 };
         worker.execute();
+    }
+
+    /**
+     * Write the git selection outcome to the log. A zero-match result is the classic "button did
+     * nothing, no error" symptom (sync folder not matching the git repository, ignored paths,
+     * encoding), so it is logged with sample paths from both sides to make the mismatch visible.
+     */
+    void logGitSelectionOutcome(Set<String> changedPaths, int matches, List<SyncPreviewRow> rows) {
+        logSink.accept(
+                "git: matched "
+                        + matches
+                        + " of "
+                        + rows.size()
+                        + " preview row(s); git reported "
+                        + changedPaths.size()
+                        + " changed path(s)");
+        if (matches == 0 && !changedPaths.isEmpty() && !rows.isEmpty()) {
+            logSink.accept(
+                    "git: no preview row matched a git path; git paths: "
+                            + samplePaths(changedPaths)
+                            + "; preview paths: "
+                            + samplePaths(rows.stream().map(SyncPreviewRow::getPath).toList()));
+        }
+    }
+
+    /** First few entries of a path set, for diagnostic log lines. */
+    private static String samplePaths(Set<String> paths) {
+        return samplePaths(paths.stream().toList());
+    }
+
+    private static String samplePaths(List<String> paths) {
+        int limit = 5;
+        String joined = String.join(", ", paths.subList(0, Math.min(limit, paths.size())));
+        return paths.size() > limit ? joined + ", ... (" + paths.size() + " total)" : joined;
     }
 
     /**
