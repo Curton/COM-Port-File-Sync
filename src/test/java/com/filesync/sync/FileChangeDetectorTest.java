@@ -405,6 +405,52 @@ class FileChangeDetectorTest {
     }
 
     @Test
+    void getEmptyDirectoriesToDelete_skipsDirThatHoldsFilesOnSource() {
+        // Receiver still has an empty foo/ while the sender has put bar.txt inside its foo/. The
+        // preview must never pair "transfer foo/bar.txt" with "delete foo/": rmdir is recursive
+        // and would wipe the file right after it landed.
+        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
+        sourceFiles.put("foo/bar.txt", new FileChangeDetector.FileInfo("foo/bar.txt", 5, 0, "h"));
+        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
+        FileChangeDetector.FileManifest target =
+                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
+
+        assertTrue(
+                FileChangeDetector.getEmptyDirectoriesToDelete(source, target).isEmpty(),
+                "A directory the sender still populates must not be deleted on the receiver");
+    }
+
+    @Test
+    void getEmptyDirectoriesToDelete_skipsDirThatHoldsEmptySubdirOnSource() {
+        FileChangeDetector.FileManifest source =
+                new FileChangeDetector.FileManifest(
+                        new HashMap<>(), new HashSet<>(List.of("foo/inner")));
+        FileChangeDetector.FileManifest target =
+                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
+
+        assertTrue(
+                FileChangeDetector.getEmptyDirectoriesToDelete(source, target).isEmpty(),
+                "A directory containing an empty subdirectory on the sender still exists there");
+    }
+
+    @Test
+    void getEmptyDirectoriesToCreate_skipsDirThatHoldsFilesOnTarget() {
+        // Mirror image of the delete case: the sender's foo/ is empty while the receiver's foo/
+        // holds files, so the directory already exists there and no CREATE_DIR row belongs in
+        // the preview.
+        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
+        targetFiles.put(
+                "foo/existing.txt", new FileChangeDetector.FileInfo("foo/existing.txt", 7, 0, "h"));
+        FileChangeDetector.FileManifest source =
+                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
+        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+
+        assertTrue(
+                FileChangeDetector.getEmptyDirectoriesToCreate(source, target).isEmpty(),
+                "A directory that exists on the receiver must not be planned for creation");
+    }
+
+    @Test
     void fileManifest_noArgConstructorCreatesEmptyManifest() {
         FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest();
         assertTrue(manifest.getFiles().isEmpty());

@@ -650,7 +650,10 @@ public class FileChangeDetector {
         List<String> dirsToCreate = new ArrayList<>();
 
         for (String dir : source.getEmptyDirectories()) {
-            if (!target.getEmptyDirectories().contains(dir)) {
+            // A directory that merely holds files is absent from the target's emptyDirectories
+            // set yet still exists there, so existence must be checked against the file entries
+            // too; otherwise the preview plans CREATE_DIR rows for directories already present.
+            if (!directoryExistsInManifest(dir, target)) {
                 dirsToCreate.add(dir);
             }
         }
@@ -667,7 +670,13 @@ public class FileChangeDetector {
         List<String> dirsToDelete = new ArrayList<>();
 
         for (String dir : target.getEmptyDirectories()) {
-            if (!source.getEmptyDirectories().contains(dir)) {
+            // A source directory that gained files since the last sync leaves the source's
+            // emptyDirectories set without being gone. Comparing the empty sets alone would
+            // schedule its deletion on the receiver even though this very sync transfers files
+            // into it — and rmdir is recursive, so it would wipe the fresh files right after
+            // they landed. Only a directory absent from the source's file entries and
+            // empty-directory entries alike is really gone.
+            if (!directoryExistsInManifest(dir, source)) {
                 // Directory exists in target but not in source - should be deleted
                 dirsToDelete.add(dir);
             }
@@ -1035,6 +1044,27 @@ public class FileChangeDetector {
         int lastSeparator = relativePath.lastIndexOf('/');
         String parent = lastSeparator == -1 ? "" : relativePath.substring(0, lastSeparator);
         dirHasChildren.put(parent, true);
+    }
+
+    /**
+     * Whether a directory exists anywhere in a manifest: recorded as an empty directory itself, or
+     * (transitively) containing any file or empty-directory entry. Manifests persist only empty
+     * directories explicitly — a directory that currently holds files exists solely through its
+     * file entries — so both must be consulted before treating a directory as absent.
+     */
+    private static boolean directoryExistsInManifest(String dir, FileManifest manifest) {
+        String childPrefix = dir + "/";
+        for (String path : manifest.getFiles().keySet()) {
+            if (path.startsWith(childPrefix)) {
+                return true;
+            }
+        }
+        for (String path : manifest.getEmptyDirectories()) {
+            if (path.equals(dir) || path.startsWith(childPrefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean canReuseHash(FileInfo cachedInfo, long size, long lastModified) {

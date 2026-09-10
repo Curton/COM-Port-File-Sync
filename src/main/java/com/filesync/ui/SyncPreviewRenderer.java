@@ -31,7 +31,9 @@ import javax.swing.SwingWorker;
 import javax.swing.event.MouseInputAdapter;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableCellEditor;
 import javax.swing.table.TableCellRenderer;
+import javax.swing.table.TableColumn;
 import javax.swing.table.TableRowSorter;
 
 /** Build and render sync preview text/table UIs. */
@@ -69,6 +71,18 @@ public class SyncPreviewRenderer {
     /** Receives git-selection log lines; must be thread-safe (LogController.log is). */
     private final java.util.function.Consumer<String> logSink;
 
+    /** Sync folder a preview's local files are resolved against; set when the dialog is shown. */
+    private File previewSyncFolder;
+
+    /** Largest file that will be read for a text preview, on either side. */
+    static final int MAX_PREVIEW_BYTES = 512 * 1024;
+
+    /** Maximum lines rendered per pane; beyond this the preview is marked truncated. */
+    private static final int MAX_PREVIEW_LINES = 4000;
+
+    /** Column index of the "Preview" button column. */
+    static final int PREVIEW_COLUMN = 4;
+
     public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
         this(owner, conflictResolver, msg -> {});
     }
@@ -95,6 +109,7 @@ public class SyncPreviewRenderer {
             SyncPreviewPlan syncPreview, File syncFolder) {
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
+        this.previewSyncFolder = syncFolder;
 
         JLabel selectionSummary = new JLabel();
         TableRowSorter<DefaultTableModel> previewSorter = createPreviewSorter(previewModel);
@@ -115,7 +130,7 @@ public class SyncPreviewRenderer {
         return new SyncPreviewResult(plan, previewModel, rows);
     }
 
-    private JPanel createPreviewPanel(
+    JPanel createPreviewPanel(
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             File syncFolder,
@@ -137,13 +152,16 @@ public class SyncPreviewRenderer {
         return previewPanel;
     }
 
-    private JTable createPreviewTable(
+    JTable createPreviewTable(
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             TableRowSorter<DefaultTableModel> previewSorter) {
         JTable previewTable = new JTable(previewModel);
         previewTable.setFillsViewportHeight(true);
-        previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
+        // Only the Path column absorbs extra width when the dialog is resized. With _LAST_COLUMN
+        // the pinned one-off Preview column would be the one stretched, leaving its button
+        // floating in slack; _SUBSEQUENT spreads the surplus over Path instead.
+        previewTable.setAutoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS);
         // Clicking Sync/Type/Size/Path headers sorts the table; the default sort key is Sync so
         // batch selections can put checked rows on top. Individual checkbox toggles never
         // re-sort (the sorter ignores model updates).
@@ -155,6 +173,7 @@ public class SyncPreviewRenderer {
         previewTable.getColumnModel().getColumn(1).setCellRenderer(createTypeCellRenderer(rows));
         previewTable.getColumnModel().getColumn(2).setCellRenderer(createSizeCellRenderer(rows));
         previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
+        configurePreviewColumn(previewTable, rows);
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         previewTable.addMouseListener(
                 new MouseInputAdapter() {
@@ -169,6 +188,13 @@ public class SyncPreviewRenderer {
                         }
                         // Sorting may permute the view, so resolve the model row before editing.
                         int row = previewTable.convertRowIndexToModel(viewRow);
+                        int column = previewTable.columnAtPoint(e.getPoint());
+                        // Double-clicking the Preview column opens the diff instead of toggling
+                        // the checkbox, matching what the button under the cursor implies.
+                        if (previewTable.convertColumnIndexToModel(column) == PREVIEW_COLUMN) {
+                            openChangePreview(rows.get(row));
+                            return;
+                        }
                         // Commit any in-progress checkbox edit so we read the latest value.
                         if (previewTable.isEditing()) {
                             previewTable.getCellEditor().stopCellEditing();
@@ -178,6 +204,69 @@ public class SyncPreviewRenderer {
                     }
                 });
         return previewTable;
+    }
+
+    /**
+     * Turn the Preview column into a button column. The cell renders as a clickable button and, on
+     * click, opens the change preview for that row — the same code path as double-clicking the
+     * column, so both entry points behave identically.
+     */
+    private void configurePreviewColumn(JTable previewTable, List<SyncPreviewRow> rows) {
+        if (previewTable.getColumnModel().getColumnCount() <= PREVIEW_COLUMN) {
+            return;
+        }
+        TableColumn previewColumn = previewTable.getColumnModel().getColumn(PREVIEW_COLUMN);
+        // The column is pinned to one exact width: preferred == min == max. An AUTO_RESIZE_LAST
+        // table would otherwise stretch the last column, leaving the button floating in slack.
+        int buttonWidth = previewButtonWidth(previewTable);
+        previewColumn.setPreferredWidth(buttonWidth);
+        previewColumn.setMinWidth(buttonWidth);
+        previewColumn.setMaxWidth(buttonWidth);
+        // Centre the header over the centred button so the column reads as one aligned unit.
+        previewColumn.setHeaderRenderer(createPreviewHeaderRenderer());
+
+        TableCellRenderer buttonRenderer = new PreviewButtonRenderer(rows);
+        previewColumn.setCellRenderer(buttonRenderer);
+        previewColumn.setCellEditor(
+                new PreviewButtonEditor(previewTable, rows, this::openChangePreview));
+    }
+
+    /** Header renderer that centres the "Pre" label to match the centred cell buttons. */
+    private TableCellRenderer createPreviewHeaderRenderer() {
+        DefaultTableCellRenderer renderer = new DefaultTableCellRenderer();
+        renderer.setHorizontalAlignment(SwingConstants.CENTER);
+        return renderer;
+    }
+
+    /**
+     * Column width that exactly fits the Preview button: the label's rendered width plus the LAF's
+     * horizontal button insets, with only a few pixels of slack. Deriving it from the font (rather
+     * than hard-coding a number) keeps the button snug under different look-and-feels and font
+     * sizes while staying wide enough that the label is never truncated.
+     */
+    static int previewButtonWidth(JTable table) {
+        javax.swing.JButton probe = new javax.swing.JButton(previewButtonLabel());
+        probe.setFont(table != null && table.getFont() != null ? table.getFont() : probe.getFont());
+        // The Windows LAF gives a button ~10px of horizontal margin on each side, which for a
+        // three-letter label means most of the button is empty chrome. Cells use the same tight
+        // margin (see PREVIEW_BUTTON_MARGIN), so the column is measured against that, not the
+        // default. getPreferredSize() accounts for the LAF border and insets as well.
+        probe.setMargin(PREVIEW_BUTTON_MARGIN);
+        int width = probe.getPreferredSize().width + previewButtonExtraPadding();
+        return Math.max(width, previewButtonMinWidth());
+    }
+
+    /** Tight horizontal margin shared by the measured, rendered and editable Preview buttons. */
+    static final java.awt.Insets PREVIEW_BUTTON_MARGIN = new java.awt.Insets(1, 6, 1, 6);
+
+    /** Slack added to the measured button width so the text is never clipped. */
+    private static int previewButtonExtraPadding() {
+        return 2;
+    }
+
+    /** Floor for the column so an unusually small font cannot collapse the button entirely. */
+    private static int previewButtonMinWidth() {
+        return 34;
     }
 
     private JPanel createControlPanel(
@@ -344,7 +433,8 @@ public class SyncPreviewRenderer {
 
     public DefaultTableModel createSyncPreviewTableModel(List<SyncPreviewRow> rows) {
         DefaultTableModel model =
-                new DefaultTableModel(new String[] {"Sync", "Type", "Size", "Path"}, 0) {
+                new DefaultTableModel(
+                        new String[] {"Sync", "Type", "Size", "Path", previewColumnHeader()}, 0) {
                     @Override
                     public Class<?> getColumnClass(int columnIndex) {
                         if (columnIndex == 0) {
@@ -358,7 +448,9 @@ public class SyncPreviewRenderer {
 
                     @Override
                     public boolean isCellEditable(int row, int column) {
-                        return column == 0;
+                        // The Preview column is a button: it is "edited" only to trigger the click
+                        // handler, which immediately cancels the edit.
+                        return column == 0 || column == PREVIEW_COLUMN;
                     }
                 };
         // All rows start unchecked; the git-based auto-default (and the "Select Changes (git)"
@@ -368,10 +460,31 @@ public class SyncPreviewRenderer {
         for (SyncPreviewRow row : rows) {
             model.addRow(
                     new Object[] {
-                        Boolean.FALSE, row.getTypeLabel(), row.getSizeBytes(), row.getPath()
+                        Boolean.FALSE,
+                        row.getTypeLabel(),
+                        row.getSizeBytes(),
+                        row.getPath(),
+                        previewButtonLabel()
                     });
         }
         return model;
+    }
+
+    /**
+     * Header for the preview column, kept consistent with the short {@link #previewButtonLabel()}
+     * so the header and its buttons read as the same thing rather than appearing ellipsized.
+     */
+    static String previewColumnHeader() {
+        return "Pre";
+    }
+
+    /**
+     * Label shown on every Preview cell. Kept to the short form "Pre" (rather than "Preview") so
+     * the button fits its column without the LAF ellipsizing it to "Pre..."; the tooltip spells the
+     * action out in full.
+     */
+    static String previewButtonLabel() {
+        return previewColumnHeader();
     }
 
     /**
@@ -551,6 +664,199 @@ public class SyncPreviewRenderer {
                 return this;
             }
         };
+    }
+
+    /**
+     * Open the change preview for a row: fetch the peer's version of the file if it is not already
+     * cached (off the EDT, since the fetch runs a serial round-trip), then show the modal diff
+     * dialog. Directory and delete operations have no content to preview, so they are reported
+     * inline instead of opening an empty window.
+     */
+    void openChangePreview(SyncPreviewRow row) {
+        if (row == null) {
+            return;
+        }
+        if (row.getOperationType() == SyncPreviewOperationType.CREATE_DIR
+                || row.getOperationType() == SyncPreviewOperationType.DELETE_DIR) {
+            showPreviewMessage(
+                    "Directory operation",
+                    "\""
+                            + row.getPath()
+                            + "\" is a directory operation, so there is no file"
+                            + " content to preview.");
+            return;
+        }
+
+        boolean needsFetch = row.hasBaseVersion() && !row.isBaseFetched();
+        if (needsFetch) {
+            fetchBaseContentThenShowPreview(row);
+            return;
+        }
+        showPreviewForRow(row, null);
+    }
+
+    /** Fetch the row's previous (peer) version, then show the preview on the EDT. */
+    private void fetchBaseContentThenShowPreview(SyncPreviewRow row) {
+        logSink.accept("preview: fetching previous version of " + row.getPath() + " from peer...");
+        SwingWorker<byte[], Void> worker =
+                new SwingWorker<>() {
+                    @Override
+                    protected byte[] doInBackground() {
+                        return fetchBaseContent(row);
+                    }
+
+                    @Override
+                    protected void done() {
+                        byte[] base = null;
+                        String failure = null;
+                        try {
+                            base = get();
+                        } catch (Exception e) {
+                            Throwable cause = e.getCause() != null ? e.getCause() : e;
+                            failure =
+                                    cause.getMessage() != null
+                                            ? cause.getMessage()
+                                            : cause.getClass().getSimpleName();
+                        }
+                        // Only a successful fetch is cached; a failure stays unfetched so the user
+                        // can retry after reconnecting instead of being stuck with "unavailable".
+                        if (failure == null && base != null) {
+                            row.setBaseContent(base);
+                            row.setBaseFetched(true);
+                            logSink.accept(
+                                    "preview: previous version of "
+                                            + row.getPath()
+                                            + " received ("
+                                            + UiFormatting.formatBytes(base.length)
+                                            + ")");
+                        } else if (failure != null) {
+                            logSink.accept(
+                                    "preview: failed to fetch previous version of "
+                                            + row.getPath()
+                                            + " - "
+                                            + failure);
+                        } else {
+                            logSink.accept("preview: peer has no content for " + row.getPath());
+                        }
+                        showPreviewForRow(row, failure);
+                    }
+                };
+        worker.execute();
+    }
+
+    /**
+     * Retrieve the peer's copy of {@code row}'s file. Returns null when the peer has nothing to
+     * give (a file the receiver does not hold, or an unreachable peer); the row keeps its "not
+     * fetched" state in that case so the preview explains the absence itself.
+     */
+    byte[] fetchBaseContent(SyncPreviewRow row) {
+        if (conflictResolver == null) {
+            return null;
+        }
+        return conflictResolver.fetchRemoteContent(row.getPath());
+    }
+
+    /** Assemble the preview model for a row and show it. */
+    void showPreviewForRow(SyncPreviewRow row, String fetchFailure) {
+        FileDiffPreviewModel model = buildPreviewModel(row, fetchFailure);
+        logSink.accept(
+                "preview: "
+                        + row.getPath()
+                        + " - "
+                        + (model.isText() ? "text" : "binary")
+                        + ", "
+                        + model.describeSummary());
+        FileDiffPreviewPanel.showDialog(owner, model);
+    }
+
+    /** Build the two-sided preview model, reading the local file as the new version. */
+    FileDiffPreviewModel buildPreviewModel(SyncPreviewRow row, String fetchFailure) {
+        byte[] source = readLocalPreviewContent(row.getPath());
+        String sourceReason =
+                source == null
+                        ? "The local file could not be read for preview (missing, locked, or larger"
+                                + " than "
+                                + UiFormatting.formatBytes(MAX_PREVIEW_BYTES)
+                                + ")."
+                        : null;
+
+        byte[] base = row.getBaseContent();
+        boolean baseAvailable = row.hasBaseVersion();
+        String baseReason = null;
+        if (fetchFailure != null) {
+            baseReason = "Could not retrieve the peer's version: " + fetchFailure;
+        } else if (baseAvailable && base == null && row.isBaseFetched()) {
+            baseReason = "The peer reports no readable content for this file.";
+        } else if (baseAvailable && base == null && !row.isBaseFetched()) {
+            baseReason = "The peer's version has not been retrieved yet.";
+        }
+
+        boolean truncated =
+                isTruncated(source, row)
+                        || isTruncated(base, row)
+                        || exceedsLineBudget(source)
+                        || exceedsLineBudget(base);
+        return FileDiffPreviewModel.of(
+                row.getPath(),
+                row.getOperationType(),
+                source,
+                sourceReason,
+                base,
+                baseAvailable,
+                baseReason,
+                truncated);
+    }
+
+    /** Read the local file for preview, or null when unreadable or over the preview size cap. */
+    byte[] readLocalPreviewContent(String relativePath) {
+        if (previewSyncFolder == null || relativePath == null) {
+            return null;
+        }
+        File file = new File(previewSyncFolder, relativePath);
+        if (!file.isFile()) {
+            return null;
+        }
+        long length = file.length();
+        if (length <= 0 || length > MAX_PREVIEW_BYTES) {
+            // An empty file is legitimate; treat it as empty content rather than unreadable.
+            return length == 0 ? new byte[0] : null;
+        }
+        try {
+            return java.nio.file.Files.readAllBytes(file.toPath());
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    /** True when this side's size exceeds the preview cap, so the shown text is incomplete. */
+    private boolean isTruncated(byte[] content, SyncPreviewRow row) {
+        if (content == null) {
+            return false;
+        }
+        return row.getSizeBytes() > MAX_PREVIEW_BYTES && content.length >= MAX_PREVIEW_BYTES;
+    }
+
+    private boolean exceedsLineBudget(byte[] content) {
+        if (content == null || content.length == 0) {
+            return false;
+        }
+        String text = FileDiffPreviewModel.decodeText(content);
+        if (text == null) {
+            return false;
+        }
+        int lines = 1;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n' && ++lines > MAX_PREVIEW_LINES) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Simple informational dialog for rows with no previewable content. */
+    private void showPreviewMessage(String title, String message) {
+        javax.swing.JOptionPane.showMessageDialog(
+                owner, message, title, javax.swing.JOptionPane.INFORMATION_MESSAGE);
     }
 
     private List<SyncPreviewRow> buildSyncPreviewRows(SyncPreviewPlan syncPreview) {
@@ -775,5 +1081,104 @@ public class SyncPreviewRenderer {
          * @return the file content, or null if unavailable
          */
         byte[] fetchRemoteContent(String path);
+    }
+
+    /**
+     * Renders the Preview column as a button, dimming it for operations that have no file content
+     * (directory create/delete) so the affordance reflects what a click can actually do.
+     */
+    private static final class PreviewButtonRenderer extends javax.swing.JButton
+            implements TableCellRenderer {
+
+        private final List<SyncPreviewRow> rows;
+        private final javax.swing.JLabel fallbackLabel = new javax.swing.JLabel();
+
+        PreviewButtonRenderer(List<SyncPreviewRow> rows) {
+            this.rows = rows;
+            setOpaque(true);
+            setFocusPainted(false);
+            setMargin(PREVIEW_BUTTON_MARGIN);
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(
+                JTable table,
+                Object value,
+                boolean isSelected,
+                boolean hasFocus,
+                int row,
+                int column) {
+            int modelRow = table.convertRowIndexToModel(row);
+            SyncPreviewRow previewRow =
+                    modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+            if (previewRow != null && !hasPreviewableContent(previewRow)) {
+                fallbackLabel.setText("\u2014");
+                fallbackLabel.setHorizontalAlignment(SwingConstants.CENTER);
+                fallbackLabel.setForeground(new Color(140, 140, 140));
+                return fallbackLabel;
+            }
+            setText(previewButtonLabel());
+            setToolTipText(
+                    previewRow != null
+                            ? "Preview the changes to " + previewRow.getPath()
+                            : "Preview changes");
+            setHorizontalAlignment(SwingConstants.CENTER);
+            return this;
+        }
+
+        private static boolean hasPreviewableContent(SyncPreviewRow row) {
+            return row.getOperationType() != SyncPreviewOperationType.CREATE_DIR
+                    && row.getOperationType() != SyncPreviewOperationType.DELETE_DIR;
+        }
+    }
+
+    /**
+     * Turns a Preview-column click into a callback. The cell edit is cancelled immediately so the
+     * table never enters a real editing state; the button only exists to capture the click.
+     */
+    private static final class PreviewButtonEditor extends javax.swing.AbstractCellEditor
+            implements TableCellEditor {
+
+        private final JTable table;
+        private final List<SyncPreviewRow> rows;
+        private final java.util.function.Consumer<SyncPreviewRow> onPreview;
+        private final javax.swing.JButton button = new javax.swing.JButton(previewButtonLabel());
+
+        PreviewButtonEditor(
+                JTable table,
+                List<SyncPreviewRow> rows,
+                java.util.function.Consumer<SyncPreviewRow> onPreview) {
+            this.table = table;
+            this.rows = rows;
+            this.onPreview = onPreview;
+            button.setFocusPainted(false);
+            button.setMargin(PREVIEW_BUTTON_MARGIN);
+            button.addActionListener(
+                    e -> {
+                        int modelRow = table.convertRowIndexToModel(table.getEditingRow());
+                        cancelCellEditing();
+                        if (modelRow >= 0 && modelRow < rows.size()) {
+                            onPreview.accept(rows.get(modelRow));
+                        }
+                    });
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(
+                JTable table, Object value, boolean isSelected, int row, int column) {
+            int modelRow = table.convertRowIndexToModel(row);
+            SyncPreviewRow previewRow =
+                    modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+            button.setToolTipText(
+                    previewRow != null
+                            ? "Preview the changes to " + previewRow.getPath()
+                            : "Preview changes");
+            return button;
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            return previewButtonLabel();
+        }
     }
 }
