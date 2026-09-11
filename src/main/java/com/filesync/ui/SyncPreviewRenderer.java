@@ -23,11 +23,15 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
+import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
+import javax.swing.Timer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.event.MouseInputAdapter;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
@@ -92,6 +96,35 @@ public class SyncPreviewRenderer {
     /** Column index of the "Preview" button column. */
     static final int PREVIEW_COLUMN = 4;
 
+    /** Column index of the Path column, which carries both the sort and the search highlight. */
+    static final int PATH_COLUMN = 3;
+
+    /** Row bucket for a path whose extension matches the query; sorts ahead of everything else. */
+    static final int SEARCH_MATCH_EXTENSION = 0;
+
+    /** Row bucket for a path whose file name (not extension) contains the query. */
+    static final int SEARCH_MATCH_NAME = 1;
+
+    /** Row bucket for a path that does not match the query at all; sorts last. */
+    static final int SEARCH_MATCH_NONE = 2;
+
+    /** Highlight colour applied to matched text in the Path column. */
+    static final Color SEARCH_HIGHLIGHT_COLOR = new Color(255, 235, 59);
+
+    /** Debounce before a keystroke re-sorts the table, so typing does not re-sort per character. */
+    private static final int SEARCH_DEBOUNCE_MS = 120;
+
+    /** Placeholder shown in the empty search field. */
+    static final String SEARCH_FIELD_PLACEHOLDER =
+            "Search: extension or file name (e.g. java, txt)";
+
+    /**
+     * Current search query, already trimmed. Empty means "no search": rows keep their natural order
+     * and nothing is highlighted. Lives on the renderer because a preview dialog is modal and there
+     * is only ever one open at a time.
+     */
+    private String previewSearchQuery = "";
+
     public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
         this(owner, conflictResolver, msg -> {});
     }
@@ -119,11 +152,21 @@ public class SyncPreviewRenderer {
         List<SyncPreviewRow> rows = buildSyncPreviewRows(syncPreview);
         DefaultTableModel previewModel = createSyncPreviewTableModel(rows);
         this.previewSyncFolder = syncFolder;
+        // Every preview starts from the natural order; a stale query from a previous dialog must
+        // not leak into this one.
+        this.previewSearchQuery = "";
 
         JLabel selectionSummary = new JLabel();
         TableRowSorter<DefaultTableModel> previewSorter = createPreviewSorter(previewModel);
+        JTextField searchField = createSearchField(previewSorter);
         JPanel previewPanel =
-                createPreviewPanel(previewModel, rows, syncFolder, selectionSummary, previewSorter);
+                createPreviewPanel(
+                        previewModel,
+                        rows,
+                        syncFolder,
+                        selectionSummary,
+                        previewSorter,
+                        searchField);
 
         // Auto-default: launch the git-based selection off the EDT right before showing the modal
         // dialog. The SwingWorker's done() is dispatched by the modal dialog's nested event pump,
@@ -139,12 +182,24 @@ public class SyncPreviewRenderer {
         return new SyncPreviewResult(plan, previewModel, rows);
     }
 
+    /** Build a preview panel without a search field; used by tests that only exercise the table. */
     JPanel createPreviewPanel(
             DefaultTableModel previewModel,
             List<SyncPreviewRow> rows,
             File syncFolder,
             JLabel selectionSummary,
             TableRowSorter<DefaultTableModel> previewSorter) {
+        return createPreviewPanel(
+                previewModel, rows, syncFolder, selectionSummary, previewSorter, null);
+    }
+
+    JPanel createPreviewPanel(
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            File syncFolder,
+            JLabel selectionSummary,
+            TableRowSorter<DefaultTableModel> previewSorter,
+            JTextField searchField) {
         JTable previewTable = createPreviewTable(previewModel, rows, previewSorter);
         updateSyncPreviewSummary(selectionSummary, previewModel, rows);
         previewModel.addTableModelListener(
@@ -152,13 +207,77 @@ public class SyncPreviewRenderer {
 
         JPanel controlPanel =
                 createControlPanel(previewModel, selectionSummary, rows, syncFolder, previewSorter);
+        // Search bar sits *below* the Select All / Select Changes / Deselect All row, directly
+        // above the table it filters.
+        JPanel headerPanel = new JPanel(new java.awt.BorderLayout(0, 6));
+        headerPanel.add(controlPanel, java.awt.BorderLayout.NORTH);
+        headerPanel.add(
+                searchField != null ? searchField : createSearchField(previewSorter),
+                java.awt.BorderLayout.SOUTH);
+
         JScrollPane previewScroll = new JScrollPane(previewTable);
         previewScroll.setPreferredSize(new Dimension(720, 480));
 
         JPanel previewPanel = new JPanel(new java.awt.BorderLayout(0, 8));
-        previewPanel.add(controlPanel, java.awt.BorderLayout.NORTH);
+        previewPanel.add(headerPanel, java.awt.BorderLayout.NORTH);
         previewPanel.add(previewScroll, java.awt.BorderLayout.CENTER);
         return previewPanel;
+    }
+
+    /**
+     * Build the search field that re-sorts (and highlights) the preview rows as the user types.
+     *
+     * <p>Typing is debounced: the field's document events restart a short {@link Timer}, and only
+     * when it fires does the query reach the sorter's comparator. That keeps a burst of keystrokes
+     * to a single re-sort instead of one per character.
+     */
+    JTextField createSearchField(TableRowSorter<DefaultTableModel> previewSorter) {
+        JTextField field = new JTextField();
+        field.setToolTipText(
+                "Type an extension (java, txt) or any part of a file name. Rows whose extension"
+                        + " matches move to the top, then rows whose name contains the text; the"
+                        + " rest follow in their normal order. Matches are highlighted.");
+        field.putClientProperty("JTextField.placeholderText", SEARCH_FIELD_PLACEHOLDER);
+        Timer debounce =
+                new Timer(
+                        SEARCH_DEBOUNCE_MS,
+                        event -> applySearchQuery(previewSorter, field.getText()));
+        debounce.setRepeats(false);
+        field.getDocument()
+                .addDocumentListener(
+                        new DocumentListener() {
+                            @Override
+                            public void insertUpdate(DocumentEvent e) {
+                                debounce.restart();
+                            }
+
+                            @Override
+                            public void removeUpdate(DocumentEvent e) {
+                                debounce.restart();
+                            }
+
+                            @Override
+                            public void changedUpdate(DocumentEvent e) {
+                                debounce.restart();
+                            }
+                        });
+        return field;
+    }
+
+    /**
+     * Publish {@code rawQuery} to the table and re-sort. Exposed separately from the field so the
+     * search behaviour (comparator + highlight) can be driven directly in tests without a document
+     * event.
+     */
+    void applySearchQuery(TableRowSorter<DefaultTableModel> previewSorter, String rawQuery) {
+        previewSearchQuery = rawQuery == null ? "" : rawQuery.trim();
+        // Sorting the table repaints it, which is what refreshes the highlight.
+        applySearch(previewSorter, previewSearchQuery);
+    }
+
+    /** The active, trimmed search query; empty when no search is in effect. */
+    String getPreviewSearchQuery() {
+        return previewSearchQuery;
     }
 
     JTable createPreviewTable(
@@ -181,7 +300,10 @@ public class SyncPreviewRenderer {
         previewTable.getColumnModel().getColumn(3).setPreferredWidth(500);
         previewTable.getColumnModel().getColumn(1).setCellRenderer(createTypeCellRenderer(rows));
         previewTable.getColumnModel().getColumn(2).setCellRenderer(createSizeCellRenderer(rows));
-        previewTable.getColumnModel().getColumn(3).setCellRenderer(createPathTailRenderer());
+        previewTable
+                .getColumnModel()
+                .getColumn(PATH_COLUMN)
+                .setCellRenderer(createPathTailRenderer());
         configurePreviewColumn(previewTable, rows);
         previewTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         previewTable.addMouseListener(
@@ -505,12 +627,45 @@ public class SyncPreviewRenderer {
      * checkboxes are toggled individually.
      */
     static TableRowSorter<DefaultTableModel> createPreviewSorter(DefaultTableModel previewModel) {
-        TableRowSorter<DefaultTableModel> sorter = new TableRowSorter<>(previewModel);
+        PreviewSorter sorter = new PreviewSorter(previewModel);
         sorter.setComparator(1, TYPE_LABEL_COMPARATOR);
-        sorter.setComparator(3, PATH_DIRECTORY_ORDER_COMPARATOR);
         // Boolean descending puts checked (TRUE) rows first.
         sorter.setSortKeys(List.of(new RowSorter.SortKey(0, SortOrder.DESCENDING)));
         return sorter;
+    }
+
+    /**
+     * A path sorter that is search-aware. The comparator installed on the Path column combines the
+     * active search's relevance ranking with the usual directory ordering, so sorting the Path
+     * column ASCENDING (see {@link #applySearch}) puts the best matches on top while each relevance
+     * group keeps its normal order. A path that does not match at all is pushed to the bottom.
+     */
+    private static final class PreviewSorter extends TableRowSorter<DefaultTableModel> {
+
+        private String query = "";
+
+        PreviewSorter(DefaultTableModel model) {
+            super(model);
+            // RowSorter's comparator API is typed on Object while the Path column holds Strings.
+            // The cast goes through the raw type because Java forbids Comparator<String> ->
+            // Comparator<Object> directly; the comparator is only ever handed Path strings.
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Comparator<Object> pathComparator =
+                    (Comparator) (Comparator<String>) this::comparePathsBySearch;
+            setComparator(PATH_COLUMN, pathComparator);
+        }
+
+        void setSearchQuery(String query) {
+            this.query = query == null ? "" : query;
+        }
+
+        private int comparePathsBySearch(String a, String b) {
+            int bySearch = Integer.compare(searchRank(a, query), searchRank(b, query));
+            if (bySearch != 0) {
+                return bySearch;
+            }
+            return comparePathsDirectoryOrder(a, b);
+        }
     }
 
     /**
@@ -526,6 +681,31 @@ public class SyncPreviewRenderer {
         if (!keys.isEmpty() && keys.get(0).getColumn() == 0) {
             previewSorter.sort();
         }
+    }
+
+    /**
+     * Apply the active search to the preview: with a query present, the Path column is sorted
+     * ascending so the best matches rise to the top (extension matches first, then name matches,
+     * then everything else); with an empty query the previous sort key is restored. The table is
+     * repainted afterwards so the highlight refreshes.
+     */
+    static void applySearch(TableRowSorter<DefaultTableModel> previewSorter, String query) {
+        if (previewSorter == null) {
+            return;
+        }
+        String trimmed = query == null ? "" : query.trim();
+        if (previewSorter instanceof PreviewSorter sorter) {
+            sorter.setSearchQuery(trimmed);
+        }
+        if (trimmed.isEmpty()) {
+            // Clearing the query restores the Sync-descending default, so the table's natural
+            // checked-first view comes back.
+            previewSorter.setSortKeys(List.of(new RowSorter.SortKey(0, SortOrder.DESCENDING)));
+        } else {
+            previewSorter.setSortKeys(
+                    List.of(new RowSorter.SortKey(PATH_COLUMN, SortOrder.ASCENDING)));
+        }
+        previewSorter.sort();
     }
 
     private static final Comparator<String> TYPE_LABEL_COMPARATOR =
@@ -565,8 +745,114 @@ public class SyncPreviewRenderer {
         return path.split("[/\\\\]+");
     }
 
+    // --- Search ------------------------------------------------------------------------------
+
     /**
-     * Refresh the type label column in the table model for rows that have conflict info. Call this
+     * Relevance bucket for {@code path} under {@code query}, used both for the comparator and for
+     * deciding what to highlight.
+     *
+     * <ul>
+     *   <li>{@link #SEARCH_MATCH_EXTENSION} — the file name's extension contains the query, so
+     *       searching "java" or "txt" floats those file types to the top.
+     *   <li>{@link #SEARCH_MATCH_NAME} — otherwise, the file name's stem contains the query.
+     *   <li>{@link #SEARCH_MATCH_NONE} — no match; sorted last.
+     * </ul>
+     *
+     * Matching is case-insensitive. An empty query ranks every path the same, which leaves the
+     * directory ordering untouched.
+     */
+    static int searchRank(String path, String query) {
+        String trimmed = query == null ? "" : query.trim();
+        if (trimmed.isEmpty() || path == null || path.isEmpty()) {
+            return SEARCH_MATCH_NONE;
+        }
+        String lowerQuery = trimmed.toLowerCase(java.util.Locale.ROOT);
+        String fileName = lastPathSegment(path).toLowerCase(java.util.Locale.ROOT);
+        String extension = fileExtension(fileName);
+        if (!extension.isEmpty() && extension.contains(lowerQuery)) {
+            return SEARCH_MATCH_EXTENSION;
+        }
+        String stem =
+                fileName.substring(0, Math.max(0, fileName.length() - extensionLength(fileName)));
+        if (stem.contains(lowerQuery)) {
+            return SEARCH_MATCH_NAME;
+        }
+        // A directory row (or a path whose stem doesn't match) can still match elsewhere in its
+        // path; treat that as a name-level match so such rows are not buried below non-matches.
+        return path.toLowerCase(java.util.Locale.ROOT).contains(lowerQuery)
+                ? SEARCH_MATCH_NAME
+                : SEARCH_MATCH_NONE;
+    }
+
+    /** True when {@code path} matches {@code query} at all (extension or name level). */
+    static boolean matchesSearch(String path, String query) {
+        return searchRank(path, query) != SEARCH_MATCH_NONE;
+    }
+
+    /** The last {@code /}- or {@code \}-separated segment of a path; the whole path if none. */
+    private static String lastPathSegment(String path) {
+        int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        return slash >= 0 ? path.substring(slash + 1) : path;
+    }
+
+    /** Extension of a file name (the text after the final dot), lower-cased; empty if none. */
+    private static String fileExtension(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        // A leading dot means a hidden file with no extension (".gitignore"), not an extension.
+        if (dot <= 0 || dot == fileName.length() - 1) {
+            return "";
+        }
+        return fileName.substring(dot + 1);
+    }
+
+    private static int extensionLength(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        if (dot <= 0 || dot == fileName.length() - 1) {
+            return 0;
+        }
+        return fileName.length() - dot - 1;
+    }
+
+    /**
+     * Character range of the matched text within {@code path} that should be highlighted, or {@code
+     * null} when there is nothing to mark.
+     *
+     * <p>The extension is preferred over the name: a search for "txt" highlights the ".txt" of a
+     * file whose stem also happens to contain "txt" — that is the part the user typed to filter
+     * file types. Ranges are in the path's own coordinates, since the rendered cell text is a
+     * truncated tail of the same string.
+     */
+    static int[] searchHighlightRange(String path, String query) {
+        String trimmed = query == null ? "" : query.trim();
+        if (trimmed.isEmpty() || path == null || path.isEmpty()) {
+            return null;
+        }
+        String lowerQuery = trimmed.toLowerCase(java.util.Locale.ROOT);
+        String lowerPath = path.toLowerCase(java.util.Locale.ROOT);
+
+        int segmentStart = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1;
+        int dot = path.lastIndexOf('.');
+        // Extension range: only when the dot is past the last separator (a real file extension)
+        // and the extension actually contains the query.
+        if (dot > segmentStart && dot < path.length() - 1) {
+            int index = lowerPath.indexOf(lowerQuery, dot + 1);
+            if (index >= dot + 1) {
+                return new int[] {index, index + lowerQuery.length()};
+            }
+        }
+        int dotInName = path.lastIndexOf('.', path.length() - 1);
+        int stemEnd = dotInName > segmentStart ? dotInName : path.length();
+        int index = lowerPath.lastIndexOf(lowerQuery, Math.max(stemEnd - 1, 0));
+        if (index >= 0 && index + lowerQuery.length() <= stemEnd) {
+            return new int[] {index, index + lowerQuery.length()};
+        }
+        // Fall back to any occurrence in the path (e.g. a directory segment matched the query).
+        int anywhere = lowerPath.indexOf(lowerQuery);
+        return anywhere >= 0 ? new int[] {anywhere, anywhere + lowerQuery.length()} : null;
+    }
+
+    /**
+     * Refresh the type label column in the table model for rows that have conflict info. Call thiss
      * after conflict resolution to update the display.
      *
      * @param model the table model to update
@@ -655,24 +941,67 @@ public class SyncPreviewRenderer {
                 setHorizontalAlignment(SwingConstants.TRAILING);
                 String path = value != null ? value.toString() : "";
                 setToolTipText(path.isEmpty() ? null : path);
-                int cellWidth = table.getColumnModel().getColumn(column).getWidth();
-                int avail = Math.max(cellWidth - 8, 50);
-                FontMetrics fm = getFontMetrics(getFont());
-                String display = path;
-                if (path.length() > 0 && fm.stringWidth(path) > avail) {
-                    String ellipsis = "...";
-                    for (int i = 0; i < path.length(); i++) {
-                        String tail = path.substring(i);
-                        if (fm.stringWidth(ellipsis + tail) <= avail) {
-                            display = ellipsis + tail;
-                            break;
-                        }
-                    }
+                String display = truncatePathTail(table, column, path);
+                // Highlight the match as it appears in the *displayed* text. The cell renders a
+                // truncated tail, so a match that lived in a dropped leading segment is simply
+                // absent from `display` and gets no highlight — which is the correct outcome,
+                // since there is nothing on screen to mark.
+                int[] displayRange = searchHighlightRange(display, previewSearchQuery);
+                if (displayRange == null) {
+                    setText(display);
+                } else {
+                    setText(highlightHtml(display, displayRange));
                 }
-                setText(display);
                 return this;
             }
         };
+    }
+
+    /**
+     * Render {@code display} as HTML with the matched range wrapped in a yellow span. HTML is used
+     * rather than a {@link javax.swing.text.Highlighter} because the path cell is a {@code JLabel},
+     * and the explicit colour keeps the highlight legible when the row is selected or focused.
+     */
+    static String highlightHtml(String display, int[] range) {
+        String prefix = display.substring(0, range[0]);
+        String match = display.substring(range[0], range[1]);
+        String suffix = display.substring(range[1]);
+        return "<html>"
+                + escapeHtml(prefix)
+                + "<span style='background:#FFEB3B;color:#000000;'>"
+                + escapeHtml(match)
+                + "</span>"
+                + escapeHtml(suffix)
+                + "</html>";
+    }
+
+    /** Escape text for the small HTML fragment emitted by the highlight renderer. */
+    private static String escapeHtml(String text) {
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace(" ", "&#32;");
+    }
+
+    /**
+     * Truncate a path to its tail so the file name (and thus the highlighted match) stays visible,
+     * prefixing an ellipsis when characters were dropped.
+     */
+    private static String truncatePathTail(JTable table, int column, String path) {
+        int cellWidth = table.getColumnModel().getColumn(column).getWidth();
+        int avail = Math.max(cellWidth - 8, 50);
+        FontMetrics fm = table.getFontMetrics(table.getFont());
+        if (path.isEmpty() || fm.stringWidth(path) <= avail) {
+            return path;
+        }
+        String ellipsis = "...";
+        for (int i = 0; i < path.length(); i++) {
+            String tail = path.substring(i);
+            if (fm.stringWidth(ellipsis + tail) <= avail) {
+                return ellipsis + tail;
+            }
+        }
+        return ellipsis;
     }
 
     /**
