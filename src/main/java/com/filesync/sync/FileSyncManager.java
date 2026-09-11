@@ -689,9 +689,14 @@ public class FileSyncManager {
             // progress events; nothing else in this path refreshes them, so do it here.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
+            // A failed preview fetch is not a fatal error: the preview dialog still opens and
+            // explains that the peer's version is unavailable, and the user can retry after
+            // reconnecting. Log it like the peer-cancel case above rather than raising an ERROR
+            // that would also paint the progress bar red.
             eventBus.post(
-                    new SyncEvent.ErrorEvent(
-                            "Failed to fetch remote file content: " + e.getMessage()));
+                    new SyncEvent.LogEvent(
+                            "preview: peer did not answer the file content request - "
+                                    + e.getMessage()));
         } finally {
             senderBlockingProtocolExchange.set(false);
             protocol.setAwaitingCommand(false);
@@ -934,10 +939,27 @@ public class FileSyncManager {
                 }
             } catch (IOException e) {
                 if (running.get()) {
-                    eventBus.post(
-                            new SyncEvent.ErrorEvent("Communication error: " + e.getMessage()));
-                    connectionService.reportCommunicationFailure(
-                            "Connection lost - communication error: " + e.getMessage());
+                    if (SyncCoordinator.isReadTimeout(e)) {
+                        // A read timeout here is not a dead link: the port was still open and
+                        // silent, which is what a peer that stopped mid-frame (or one whose
+                        // abandoned XMODEM payload kept streaming after our own fetch gave up)
+                        // looks like. Treat it as stray data — drain it and keep the session
+                        // instead of tearing the connection down. Genuine link loss is detected
+                        // by the heartbeat, and a closed port fails differently.
+                        eventBus.post(
+                                new SyncEvent.LogEvent(
+                                        "Ignoring stray data on the line: " + e.getMessage()));
+                        try {
+                            protocol.clearInputBuffer();
+                        } catch (IOException ignored) {
+                            // The link is gone for another reason; liveness detection handles it.
+                        }
+                    } else {
+                        eventBus.post(
+                                new SyncEvent.ErrorEvent("Communication error: " + e.getMessage()));
+                        connectionService.reportCommunicationFailure(
+                                "Connection lost - communication error: " + e.getMessage());
+                    }
                 }
             }
         }

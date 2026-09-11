@@ -102,6 +102,45 @@ class XModemTransferTest {
     }
 
     @Test
+    @Timeout(20)
+    void receiveFailureResendsCancelSoOneLostCanDoesNotOrphanTheSender() {
+        // The block data read hitting end-of-stream escapes receiveInto as an IOException.
+        // That exit must tell the sender to stop with several spaced-out abort signals: a
+        // single lost CAN would leave the sender streaming into a session the command
+        // listener has already taken back.
+        byte[] partial = {XModemTransfer.SOH, 1, (byte) 254, 'a', 'b', 'c'};
+        RecordingTestSerialPortManager serialPort = new RecordingTestSerialPortManager(partial);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        assertThrows(IOException.class, () -> transfer.receiveInto(128, sink));
+
+        assertEquals(
+                6,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.CAN}),
+                "sendCancel writes 2 CAN bytes per call; the finally must run it 3 times");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveCompletionSendsNoCancelSignal() throws IOException {
+        // The cancel safety net in the finally must not fire after a clean EOT: extra CAN
+        // bytes on a healthy session would appear as stray data to the command listener.
+        byte[] payload = {'A'};
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(buildSohFrame(payload));
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] result = transfer.receive(payload.length);
+
+        assertArrayEquals(payload, result);
+        assertEquals(
+                0,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.CAN}),
+                "a clean EOT must not be followed by any CAN byte");
+    }
+
+    @Test
     void receiveReturnsNullWhenCleanTransferIsShorterThanExpected() throws IOException {
         byte[] payload = {'A'};
         TestSerialPortManager serialPort = new TestSerialPortManager(buildSohFrame(payload));

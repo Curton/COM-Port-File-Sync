@@ -43,6 +43,10 @@ public class XModemTransfer {
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
     private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
     private static final long RECEIVE_HANDSHAKE_WINDOW_MS = (long) MAX_RETRIES * 1000;
+    // A receiver aborting mid-block re-sends CAN a few times, spaced out, because one lost CAN
+    // makes the sender keep streaming into a session that has already given up.
+    private static final int CAN_RESEND_ATTEMPTS = 3;
+    private static final int CAN_RESEND_INTERVAL_MS = 50;
 
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
@@ -242,116 +246,168 @@ public class XModemTransfer {
         int expectedBlockNumber = 1;
         int retryCount = 0;
         long written = 0;
+        boolean transferCompleted = false;
 
-        while (true) {
-            int header = readByteWithTimeout(TIMEOUT_MS);
+        try {
+            while (true) {
+                int header = readByteWithTimeout(TIMEOUT_MS);
 
-            if (header == EOT) {
-                // End of transmission
-                serialPort.write(ACK);
-                break;
-            }
-
-            if (header == CAN) {
-                // The sender aborted deliberately: an expected outcome, not a link failure.
-                cancelSignalled = true;
-                reportCancelled("Transfer cancelled by sender");
-                return -1;
-            }
-
-            if (header == FRAME_START_BYTE) {
-                // A framed control line (e.g. shared text) interleaved by the sender in the
-                // gap between two data blocks: consume it, hand it to the handler, ACK it,
-                // and keep waiting for the next block header without burning a retry.
-                if (consumeInterleavedFrame()) {
+                if (header == EOT) {
+                    // End of transmission
                     serialPort.write(ACK);
+                    transferCompleted = true;
+                    break;
                 }
-                continue;
-            }
 
-            // Determine block size based on header
-            int blockSize;
-            switch (header) {
-                case STX4K -> blockSize = BLOCK_SIZE_4K;
-                case STX -> blockSize = BLOCK_SIZE_1K;
-                case SOH -> blockSize = BLOCK_SIZE_128;
-                default -> {
+                if (header == CAN) {
+                    // The sender aborted deliberately: an expected outcome, not a link failure.
+                    cancelSignalled = true;
+                    reportCancelled("Transfer cancelled by sender");
+                    return -1;
+                }
+
+                if (header == FRAME_START_BYTE) {
+                    // A framed control line (e.g. shared text) interleaved by the sender in the
+                    // gap between two data blocks: consume it, hand it to the handler, ACK it,
+                    // and keep waiting for the next block header without burning a retry.
+                    if (consumeInterleavedFrame()) {
+                        serialPort.write(ACK);
+                    }
+                    continue;
+                }
+
+                // Determine block size based on header
+                int blockSize;
+                switch (header) {
+                    case STX4K -> blockSize = BLOCK_SIZE_4K;
+                    case STX -> blockSize = BLOCK_SIZE_1K;
+                    case SOH -> blockSize = BLOCK_SIZE_128;
+                    default -> {
+                        retryCount++;
+                        if (retryCount > MAX_RETRIES) {
+                            reportError("Too many errors, aborting transfer");
+                            sendCancel();
+                            return -1;
+                        }
+                        serialPort.write(NAK);
+                        continue;
+                    }
+                }
+
+                // Read block number and its complement
+                int blockNum = readByteWithTimeout(TIMEOUT_MS);
+                int blockNumComplement = readByteWithTimeout(TIMEOUT_MS);
+
+                // Verify block number
+                if (blockNum + blockNumComplement != 255) {
+                    // Drain stale data block + CRC from the current (failed) block so
+                    // they are not misread as block headers on subsequent loop iterations.
+                    // Each misread would consume retries and eventually abort the transfer.
+                    try {
+                        for (int i = 0; i < blockSize + 2 && serialPort.available() > 0; i++) {
+                            serialPort.read();
+                        }
+                    } catch (IOException ignored) {
+                    }
+                    serialPort.write(NAK);
+                    continue;
+                }
+
+                // Read data block
+                byte[] block = serialPort.readExact(blockSize, TIMEOUT_MS);
+
+                // Read CRC (2 bytes, high byte first)
+                int crcHigh = readByteWithTimeout(TIMEOUT_MS);
+                int crcLow = readByteWithTimeout(TIMEOUT_MS);
+                int receivedCrc = ((crcHigh & 0xFF) << 8) | (crcLow & 0xFF);
+
+                // Verify CRC
+                int calculatedCrc = calculateCRC16(block);
+                if (receivedCrc != calculatedCrc) {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
-                        reportError("Too many errors, aborting transfer");
+                        reportError("Too many CRC errors, aborting transfer");
                         sendCancel();
                         return -1;
                     }
                     serialPort.write(NAK);
                     continue;
                 }
-            }
 
-            // Read block number and its complement
-            int blockNum = readByteWithTimeout(TIMEOUT_MS);
-            int blockNumComplement = readByteWithTimeout(TIMEOUT_MS);
-
-            // Verify block number
-            if (blockNum + blockNumComplement != 255) {
-                // Drain stale data block + CRC from the current (failed) block so
-                // they are not misread as block headers on subsequent loop iterations.
-                // Each misread would consume retries and eventually abort the transfer.
-                try {
-                    for (int i = 0; i < blockSize + 2 && serialPort.available() > 0; i++) {
-                        serialPort.read();
+                // Check block number
+                if (blockNum == (expectedBlockNumber & 0xFF)) {
+                    int toWrite = blockSize;
+                    if (expectedDataLength >= 0 && written + toWrite > expectedDataLength) {
+                        toWrite = (int) (expectedDataLength - written);
                     }
-                } catch (IOException ignored) {
+                    if (toWrite > 0) {
+                        sink.write(block, 0, toWrite);
+                        written += toWrite;
+                    }
+                    expectedBlockNumber++;
+                    retryCount = 0;
+                    serialPort.write(ACK);
+                    totalBytesTransferred += blockSize;
+                    reportProgress(
+                            expectedBlockNumber - 1, expectedTotalBlocks, totalBytesTransferred);
+                } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
+                    // Duplicate block, ACK but don't save
+                    serialPort.write(ACK);
+                } else {
+                    // Out of sequence
+                    serialPort.write(NAK);
                 }
-                serialPort.write(NAK);
-                continue;
             }
 
-            // Read data block
-            byte[] block = serialPort.readExact(blockSize, TIMEOUT_MS);
-
-            // Read CRC (2 bytes, high byte first)
-            int crcHigh = readByteWithTimeout(TIMEOUT_MS);
-            int crcLow = readByteWithTimeout(TIMEOUT_MS);
-            int receivedCrc = ((crcHigh & 0xFF) << 8) | (crcLow & 0xFF);
-
-            // Verify CRC
-            int calculatedCrc = calculateCRC16(block);
-            if (receivedCrc != calculatedCrc) {
-                retryCount++;
-                if (retryCount > MAX_RETRIES) {
-                    reportError("Too many CRC errors, aborting transfer");
-                    sendCancel();
-                    return -1;
-                }
-                serialPort.write(NAK);
-                continue;
-            }
-
-            // Check block number
-            if (blockNum == (expectedBlockNumber & 0xFF)) {
-                int toWrite = blockSize;
-                if (expectedDataLength >= 0 && written + toWrite > expectedDataLength) {
-                    toWrite = (int) (expectedDataLength - written);
-                }
-                if (toWrite > 0) {
-                    sink.write(block, 0, toWrite);
-                    written += toWrite;
-                }
-                expectedBlockNumber++;
-                retryCount = 0;
-                serialPort.write(ACK);
-                totalBytesTransferred += blockSize;
-                reportProgress(expectedBlockNumber - 1, expectedTotalBlocks, totalBytesTransferred);
-            } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
-                // Duplicate block, ACK but don't save
-                serialPort.write(ACK);
-            } else {
-                // Out of sequence
-                serialPort.write(NAK);
+            return written;
+        } finally {
+            if (!transferCompleted && !cancelSignalled) {
+                // Every exit that is not a clean EOT must leave the sender told to stop. The
+                // retry-exhaustion exits above already sent CAN on their way out and firing
+                // again here is deliberate: CANs are idempotent, and a few spaced re-sends are
+                // what keep a single lost CAN from being fatal anyway. The exit this finally
+                // actually covers is an IOException escaping the block read (typically a read
+                // timeout when the sender stalled mid-block), which otherwise sends nothing.
+                // Without it the sender keeps streaming the rest of the file into a receiver
+                // that has given up, and those orphaned bytes are later misread by the command
+                // listener.
+                sendCancelWithRetry();
             }
         }
+    }
 
-        return written;
+    /**
+     * Re-send the CAN abort signal a few times, spaced out. A receiver that is about to hand the
+     * line back to the command listener cannot afford a single lost CAN: if the sender misses it,
+     * its remaining blocks become stray data on an otherwise idle session. Costs nothing on a
+     * healthy link because the writer flushes immediately.
+     *
+     * <p>Stops early on interrupt (checked at the head of each round, not only when a sleep throws)
+     * so a cancel-driven shutdown does not have to wait out the retries, and skips the trailing
+     * pause so nothing is slept after the final attempt.
+     */
+    private void sendCancelWithRetry() {
+        for (int attempt = 0; attempt < CAN_RESEND_ATTEMPTS; attempt++) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            try {
+                sendCancel();
+            } catch (IOException e) {
+                // The port is already unusable; abandoning further sends loses nothing.
+                return;
+            }
+            boolean lastAttempt = attempt == CAN_RESEND_ATTEMPTS - 1;
+            if (lastAttempt) {
+                break;
+            }
+            try {
+                Thread.sleep(CAN_RESEND_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private boolean waitForHandshake() throws IOException {

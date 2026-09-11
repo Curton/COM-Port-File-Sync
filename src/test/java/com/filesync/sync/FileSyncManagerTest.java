@@ -988,6 +988,57 @@ class FileSyncManagerTest {
         }
     }
 
+    /**
+     * Regression: a bare "Read timeout" reaching the listen loop is not a dead link. It is what a
+     * peer that stopped mid-frame looks like — e.g. an abandoned XMODEM payload still trickling in
+     * after this side's own preview fetch gave up. The loop must log it as stray data and keep the
+     * session up, instead of raising a communication error and tearing the link down.
+     */
+    @Test
+    void readTimeoutInListenLoop_keepsConnectionUp() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            // With no synchronous exchange owning the stream, the loop reads the port itself; make
+            // that read report the same timeout a stalled peer produces.
+            serial.causeReadTimeout();
+
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.LogEvent le
+                                                            && le.getMessage()
+                                                                    .contains("stray data")),
+                    Duration.ofSeconds(10));
+
+            // The timeout is reported as a plain log line, never an ERROR...
+            assertTrue(
+                    events.stream()
+                            .noneMatch(
+                                    e ->
+                                            e instanceof SyncEvent.ErrorEvent ee
+                                                    && ee.getMessage()
+                                                            .contains("Communication error")),
+                    "A read timeout must not surface as a communication ERROR: " + events);
+
+            // ...and the link is left alone for the heartbeat to judge.
+            assertTrue(fsm.isRunning(), "Listen loop must keep running after a read timeout");
+            assertTrue(
+                    fsm.isConnectionAlive(),
+                    "Connection must stay alive after a read timeout with the port still open");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
     /** Build a single-frame batch from (relativePath, content) pairs, keeping the pair order. */
     private static byte[] buildBatch(String[] paths, String[] contents) throws Exception {
         List<Object[]> files = new ArrayList<>();
