@@ -156,7 +156,7 @@ class DeltaSyncCoordinatorTest {
         when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncProtocol.Message manifestMsg = mock(SyncProtocol.Message.class);
         when(manifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString())).thenReturn(manifestMsg);
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(manifestMsg);
         // Remote knows big.bin, big.txt, small.bin (all "changed"), but not new.bin.
         when(mockProtocol.receiveManifest(anyInt()))
                 .thenReturn(remoteManifest("big.bin", "big.txt", "small.bin"));
@@ -176,7 +176,7 @@ class DeltaSyncCoordinatorTest {
         when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncProtocol.Message manifestMsg = mock(SyncProtocol.Message.class);
         when(manifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString())).thenReturn(manifestMsg);
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(manifestMsg);
         // Remote has nothing -> big.bin is new -> no delta candidate.
         when(mockProtocol.receiveManifest(anyInt()))
                 .thenReturn(

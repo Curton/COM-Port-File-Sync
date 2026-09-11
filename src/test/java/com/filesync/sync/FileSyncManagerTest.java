@@ -839,76 +839,97 @@ class FileSyncManagerTest {
 
     /**
      * Regression test for the preview read-timeout deadlock: when the peer stops answering the
-     * manifest round-trip, {@code previewSync} must surface the read timeout and report it as a
-     * link failure immediately, so reconnect recovery starts instead of idling until the next
-     * heartbeat check notices the silence.
+     * manifest round-trip, {@code previewSync} must surface the timeout and report it as a link
+     * failure without waiting for the heartbeat scheduler, so reconnect recovery starts. The wait
+     * is idle-bounded (the receiver keeps sending heartbeats while it generates, so silence means a
+     * dead peer): the test shrinks the grace window to keep the run fast; production runs the 30 s
+     * default.
      */
     @Test
-    void previewSync_readTimeout_failsConnectionImmediately() throws Exception {
-        File folder = tempDir.resolve("preview-timeout").toFile();
-        folder.mkdirs();
-        Files.writeString(new File(folder, "a.txt").toPath(), "content");
-
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        fsm.setSyncFolder(folder);
-        List<SyncEvent> events = new CopyOnWriteArrayList<>();
-        fsm.getEventBus().register(events::add);
+    void previewSync_readTimeout_failsConnectionWithinIdleBound() throws Exception {
+        long productionIdleMs = SyncCoordinator.MANIFEST_WAIT_IDLE_MS;
+        SyncCoordinator.MANIFEST_WAIT_IDLE_MS = 300;
         try {
-            fsm.startListening("TEST");
+            File folder = tempDir.resolve("preview-timeout").toFile();
+            folder.mkdirs();
+            Files.writeString(new File(folder, "a.txt").toPath(), "content");
 
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
-            // Remote priority 1 is far below this machine's, so negotiation settles us as Sender.
-            serial.feedLine("[[SYNC:ROLE_NEGOTIATE:1:1]]");
-            waitUntil(
-                    () ->
-                            events.stream()
-                                    .anyMatch(
-                                            e ->
-                                                    e instanceof SyncEvent.LogEvent le
-                                                            && le.getMessage()
-                                                                    .startsWith(
-                                                                            "Role negotiated:")),
-                    Duration.ofSeconds(5));
+            ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+            FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+            fsm.setSyncFolder(folder);
+            List<SyncEvent> events = new CopyOnWriteArrayList<>();
+            fsm.getEventBus().register(events::add);
+            try {
+                fsm.startListening("TEST");
 
-            // Once the manifest request goes out, make every read time out like a dead peer.
-            Thread feeder =
-                    new Thread(
-                            () -> {
-                                waitUntil(
-                                        () ->
-                                                serial.getWrittenLines().stream()
-                                                        .anyMatch(l -> l.contains("MANIFEST_REQ")),
-                                        Duration.ofSeconds(5));
-                                serial.causeReadTimeout();
-                            },
-                            "fsm-test-timeout-feeder");
-            feeder.start();
+                serial.feedLine("[[SYNC:HEARTBEAT]]");
+                waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+                // Remote priority 1 is far below this machine's, so negotiation settles us as
+                // Sender.
+                serial.feedLine("[[SYNC:ROLE_NEGOTIATE:1:1]]");
+                waitUntil(
+                        () ->
+                                events.stream()
+                                        .anyMatch(
+                                                e ->
+                                                        e instanceof SyncEvent.LogEvent le
+                                                                && le.getMessage()
+                                                                        .startsWith(
+                                                                                "Role negotiated:")),
+                        Duration.ofSeconds(5));
 
-            RuntimeException thrown = assertThrows(RuntimeException.class, () -> fsm.previewSync());
-            feeder.join(5_000);
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertTrue(
-                    thrown.getMessage().contains("Read timeout"),
-                    "previewSync should surface the read timeout: " + thrown.getMessage());
+                // Once the manifest request goes out, make every read time out like a dead peer.
+                Thread feeder =
+                        new Thread(
+                                () -> {
+                                    waitUntil(
+                                            () ->
+                                                    serial.getWrittenLines().stream()
+                                                            .anyMatch(
+                                                                    l ->
+                                                                            l.contains(
+                                                                                    "MANIFEST_REQ")),
+                                            Duration.ofSeconds(5));
+                                    serial.causeReadTimeout();
+                                },
+                                "fsm-test-timeout-feeder");
+                feeder.start();
 
-            // The read timeout must tear the connection down right away rather than waiting for
-            // the heartbeat scheduler to declare the loss on its next check.
-            waitUntil(() -> !fsm.isConnectionAlive(), Duration.ofSeconds(5));
-            assertTrue(
-                    events.stream()
-                                    .filter(e -> e instanceof SyncEvent.LogEvent le)
-                                    .map(e -> ((SyncEvent.LogEvent) e).getMessage().toLowerCase())
-                                    .anyMatch(m -> m.contains("read timeout"))
-                            || events.stream()
-                                    .anyMatch(
-                                            e ->
-                                                    e instanceof SyncEvent.ConnectionEvent ce
-                                                            && !ce.isConnected()),
-                    "The link loss should be logged or posted: " + events);
+                RuntimeException thrown =
+                        assertThrows(RuntimeException.class, () -> fsm.previewSync());
+                feeder.join(5_000);
+                assertFalse(feeder.isAlive(), "Feeder thread should have completed");
+                assertTrue(
+                        thrown.getMessage().contains("Timeout waiting for command"),
+                        "previewSync should surface the idle-bounded manifest timeout: "
+                                + thrown.getMessage());
+                assertTrue(
+                        thrown.getMessage().contains("peer silent"),
+                        "the timeout names the liveness failure: " + thrown.getMessage());
+
+                // The idle-bounded timeout must tear the connection down without waiting for the
+                // heartbeat scheduler to declare the loss on its next check.
+                waitUntil(() -> !fsm.isConnectionAlive(), Duration.ofSeconds(5));
+                assertTrue(
+                        events.stream()
+                                        .filter(e -> e instanceof SyncEvent.LogEvent le)
+                                        .map(
+                                                e ->
+                                                        ((SyncEvent.LogEvent) e)
+                                                                .getMessage()
+                                                                .toLowerCase())
+                                        .anyMatch(m -> m.contains("timeout"))
+                                || events.stream()
+                                        .anyMatch(
+                                                e ->
+                                                        e instanceof SyncEvent.ConnectionEvent ce
+                                                                && !ce.isConnected()),
+                        "The link loss should be logged or posted: " + events);
+            } finally {
+                stopQuietly(fsm);
+            }
         } finally {
-            stopQuietly(fsm);
+            SyncCoordinator.MANIFEST_WAIT_IDLE_MS = productionIdleMs;
         }
     }
 

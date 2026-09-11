@@ -108,6 +108,13 @@ public class SyncProtocol {
     private static final int MIN_SHARED_TEXT_INLINE_ENCODED_CHARS = 128;
     private static final String SHARED_TEXT_TRANSFER_NAME = "shared-text.txt";
 
+    /**
+     * Pace between silent slices in the idle-bounded wait. Reached only when a slice throws "Read
+     * timeout" well before its deadline: real serial reads block for the whole slice, so this costs
+     * nothing there and only stops a fast-erroring driver from spinning the loop hot.
+     */
+    private static final long SILENT_SLICE_PAUSE_MS = 100;
+
     private final SerialPortManager serialPort;
     private final XModemTransfer xmodem;
     private int timeoutMs;
@@ -215,6 +222,21 @@ public class SyncProtocol {
     public Message receiveCommand() throws IOException {
         String line = serialPort.readLine(timeoutMs);
         return parseMessage(line);
+    }
+
+    /**
+     * Receive and parse a command message with an explicit per-read timeout, leaving {@link
+     * #timeoutMs} untouched for subsequent reads. The native port timeout is narrowed to the slice
+     * and restored afterwards (same dance as {@link #tryReceiveCommand}).
+     */
+    public Message receiveCommand(int readTimeoutMs) throws IOException {
+        serialPort.setReadTimeout(readTimeoutMs);
+        try {
+            String line = serialPort.readLine(readTimeoutMs);
+            return parseMessage(line);
+        } finally {
+            serialPort.setReadTimeout(timeoutMs);
+        }
     }
 
     /** Parse a protocol message */
@@ -2303,40 +2325,123 @@ public class SyncProtocol {
                 if (msg == null) {
                     continue;
                 }
-                String cmd = msg.getCommand();
-                if (cmd.equals(expectedCommand)) {
-                    return msg;
-                }
-                if (CMD_ERROR.equals(cmd)) {
-                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                    throw new IOException("Remote error: " + errMsg);
-                }
-                if (CMD_BASE_STALE.equals(cmd)) {
-                    // The receiver rejected a delta/append against a base that is not its current
-                    // file state. Deliver the notification so the sender can pin the rejection to
-                    // that exact receiver state, then abort the in-flight operation promptly.
-                    if (baseStaleHandler != null) {
-                        baseStaleHandler.accept(msg);
-                    }
-                    String path = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                    throw new IOException(
-                            "Remote rejected the transfer base for "
-                                    + path
-                                    + "; fresh data will be exchanged on the next sync");
-                }
-                if (CMD_HEARTBEAT.equals(cmd)) {
-                    sendHeartbeatAck();
-                    runMessageActivityCallback();
-                } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
-                    runMessageActivityCallback();
-                } else {
-                    stashAsyncMessage(msg);
+                Message matched = dispatchWaitedCommand(expectedCommand, msg);
+                if (matched != null) {
+                    return matched;
                 }
             }
             throw new IOException("Timeout waiting for command: " + expectedCommand);
         } finally {
             awaitingCommand.set(false);
         }
+    }
+
+    /**
+     * Wait for a command with an added liveness bound: throws once no frame of any kind has been
+     * dispatched for {@code maxIdleMs}, in addition to the overall {@link #timeoutMs} deadline.
+     *
+     * <p>Bounds the blind window when the peer is known to keep the link alive while it works: the
+     * receiver sends heartbeats while generating its manifest, so continued silence means the peer
+     * died mid-generation, and the caller learns that within {@code maxIdleMs} instead of after the
+     * full protocol timeout. Each blocking read is sliced to the nearer of the two deadlines so
+     * both are rechecked regularly; a slice that times out on silence just continues the wait.
+     */
+    public Message waitForCommand(String expectedCommand, long maxIdleMs) throws IOException {
+        if (maxIdleMs <= 0) {
+            return waitForCommand(expectedCommand);
+        }
+        awaitingCommand.set(true);
+        try {
+            long startTime = System.currentTimeMillis();
+            long lastActivity = startTime;
+            while (true) {
+                long now = System.currentTimeMillis();
+                long totalElapsed = now - startTime;
+                if (totalElapsed >= timeoutMs) {
+                    throw new IOException("Timeout waiting for command: " + expectedCommand);
+                }
+                long idleMs = now - lastActivity;
+                if (idleMs >= maxIdleMs) {
+                    throw new IOException(
+                            "Timeout waiting for command: "
+                                    + expectedCommand
+                                    + " (peer silent for "
+                                    + idleMs
+                                    + " ms)");
+                }
+                long sliceMs = Math.max(1, Math.min(timeoutMs - totalElapsed, maxIdleMs - idleMs));
+                Message msg;
+                try {
+                    msg = receiveCommand((int) sliceMs);
+                } catch (IOException e) {
+                    if ("Read timeout".equals(e.getMessage())) {
+                        // A silent slice: for a real port the read already blocked for the whole
+                        // slice, so both deadlines have just been recheckable at the loop head.
+                        // The pause below is not for that case — a driver (or test stub) that
+                        // errors immediately instead of blocking would make this loop spin, so
+                        // pace it.
+                        try {
+                            Thread.sleep(SILENT_SLICE_PAUSE_MS);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Read interrupted", ie);
+                        }
+                        continue;
+                    }
+                    throw e;
+                }
+                if (msg == null) {
+                    // Unframed noise is not liveness; keep waiting.
+                    continue;
+                }
+                Message matched = dispatchWaitedCommand(expectedCommand, msg);
+                if (matched != null) {
+                    return matched;
+                }
+                lastActivity = System.currentTimeMillis();
+            }
+        } finally {
+            awaitingCommand.set(false);
+        }
+    }
+
+    /**
+     * Applies the shared waitForCommand semantics to one received frame: returns it when it is the
+     * expected command, throws on CMD_ERROR and CMD_BASE_STALE (after delivering the notification),
+     * answers heartbeats, and stashes anything unrelated. Returns null when the frame was consumed
+     * rather than matched.
+     */
+    private Message dispatchWaitedCommand(String expectedCommand, Message msg) throws IOException {
+        String cmd = msg.getCommand();
+        if (cmd.equals(expectedCommand)) {
+            return msg;
+        }
+        if (CMD_ERROR.equals(cmd)) {
+            String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+            throw new IOException("Remote error: " + errMsg);
+        }
+        if (CMD_BASE_STALE.equals(cmd)) {
+            // The receiver rejected a delta/append against a base that is not its current
+            // file state. Deliver the notification so the sender can pin the rejection to
+            // that exact receiver state, then abort the in-flight operation promptly.
+            if (baseStaleHandler != null) {
+                baseStaleHandler.accept(msg);
+            }
+            String path = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+            throw new IOException(
+                    "Remote rejected the transfer base for "
+                            + path
+                            + "; fresh data will be exchanged on the next sync");
+        }
+        if (CMD_HEARTBEAT.equals(cmd)) {
+            sendHeartbeatAck();
+            runMessageActivityCallback();
+        } else if (CMD_HEARTBEAT_ACK.equals(cmd)) {
+            runMessageActivityCallback();
+        } else {
+            stashAsyncMessage(msg);
+        }
+        return null;
     }
 
     /**

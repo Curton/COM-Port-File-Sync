@@ -874,6 +874,13 @@ class ReconnectRecoveryTest {
         }
 
         @Override
+        public Message waitForCommand(String expectedCommand, long maxIdleMs) throws IOException {
+            // The sender's manifest wait goes through the idle-bounded overload; route it back so
+            // the blocking simulation covers both entry points.
+            return waitForCommand(expectedCommand);
+        }
+
+        @Override
         public void sendAck() {
             // No-op
         }

@@ -8,7 +8,7 @@ class SyncEventTypeTest {
 
     @Test
     void enumContainsAllExpectedValues() {
-        assertEquals(15, SyncEventType.values().length);
+        assertEquals(16, SyncEventType.values().length);
         assertEquals("CONNECTION_STATUS", SyncEventType.CONNECTION_STATUS.name());
         assertEquals("DIRECTION_CHANGED", SyncEventType.DIRECTION_CHANGED.name());
         assertEquals("SYNC_STARTED", SyncEventType.SYNC_STARTED.name());
@@ -17,6 +17,7 @@ class SyncEventTypeTest {
         assertEquals("TRANSFER_COMPLETE", SyncEventType.TRANSFER_COMPLETE.name());
         assertEquals("FILE_PROGRESS", SyncEventType.FILE_PROGRESS.name());
         assertEquals("TRANSFER_PROGRESS", SyncEventType.TRANSFER_PROGRESS.name());
+        assertEquals("MANIFEST_PROGRESS", SyncEventType.MANIFEST_PROGRESS.name());
         assertEquals("SYNC_CONTROL_REFRESH", SyncEventType.SYNC_CONTROL_REFRESH.name());
         assertEquals("LOG", SyncEventType.LOG.name());
         assertEquals("ERROR", SyncEventType.ERROR.name());

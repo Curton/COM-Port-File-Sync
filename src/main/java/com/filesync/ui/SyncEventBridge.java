@@ -39,6 +39,16 @@ public class SyncEventBridge {
                                         fileProgress.getTotalFiles(),
                                         fileProgress.getFileName()));
             }
+            case MANIFEST_PROGRESS -> {
+                SyncEvent.ManifestProgressEvent manifestProgress =
+                        (SyncEvent.ManifestProgressEvent) event;
+                SwingUtilities.invokeLater(
+                        () ->
+                                syncController.onManifestProgress(
+                                        manifestProgress.getProcessed(),
+                                        manifestProgress.getTotal(),
+                                        manifestProgress.getFileName()));
+            }
             case TRANSFER_PROGRESS -> {
                 SyncEvent.TransferProgressEvent transferProgress =
                         (SyncEvent.TransferProgressEvent) event;

@@ -74,6 +74,15 @@ public class SyncPreviewRenderer {
     /** Sync folder a preview's local files are resolved against; set when the dialog is shown. */
     private File previewSyncFolder;
 
+    /**
+     * Point local-preview reads at {@code syncFolder} without showing the modal dialog. Package
+     * private for tests: {@link #showSyncPreviewDialogWithResult} blocks on the option dialog,
+     * which must never open in a test run.
+     */
+    void setPreviewSyncFolder(File syncFolder) {
+        this.previewSyncFolder = syncFolder;
+    }
+
     /** Largest file that will be read for a text preview, on either side. */
     static final int MAX_PREVIEW_BYTES = 512 * 1024;
 

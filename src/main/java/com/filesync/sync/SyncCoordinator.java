@@ -25,7 +25,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -88,6 +91,33 @@ public class SyncCoordinator {
 
     /** Minimum file size for rsync-style delta transfer; below this a full transfer is cheaper. */
     static final long MIN_DELTA_SIZE = 8 * 1024L;
+
+    /**
+     * Minimum interval between manifest progress events. Generation reports every file; without a
+     * throttle a large tree floods the EDT via the event bus, with one it makes an otherwise-silent
+     * phase visibly move.
+     */
+    private static final long MANIFEST_PROGRESS_INTERVAL_MS = 300;
+
+    /**
+     * Hard cap of the sender's wait for the remote manifest: the receiver may legitimately need
+     * many minutes to walk and hash a very large tree, and its generating heartbeats keep this wait
+     * alive (see {@code handleManifestRequest}); this cap only guards against a peer that stays
+     * chatty but never delivers.
+     */
+    static final long MANIFEST_WAIT_TOTAL_MS = 600_000;
+
+    /**
+     * Idle bound for the same wait: the receiver sends heartbeats every {@link
+     * #GENERATING_HEARTBEAT_INTERVAL_MS} while it generates, so this much silence means the peer
+     * died mid-generation and the preview fails within seconds instead of after the full cap.
+     * Package-private and non-final so full-stack tests can shrink the grace window; production
+     * always runs the 30 s default.
+     */
+    static long MANIFEST_WAIT_IDLE_MS = 30_000;
+
+    /** Receiver's heartbeat cadence while generating its manifest (well inside the idle bound). */
+    static final long GENERATING_HEARTBEAT_INTERVAL_MS = 5_000;
 
     /**
      * Minimum wire-byte saving for a delta to justify its own XMODEM session. Measured, not
@@ -212,6 +242,48 @@ public class SyncCoordinator {
         }
     }
 
+    /**
+     * Manifest generation callback that forwards throttled progress to the event bus, so the UI
+     * progress bar moves during the otherwise-silent walk-and-hash phase. Invoked from the walk
+     * thread and the hash pool, so the throttle state must be atomic.
+     */
+    private FileChangeDetector.ManifestProgressCallback manifestProgressCallback() {
+        final AtomicLong lastPostedMs = new AtomicLong(0);
+        return new FileChangeDetector.ManifestProgressCallback() {
+            @Override
+            public void onWarning(String message) {
+                // Files that cannot be read for hashing no longer abort the manifest; surface them
+                // so the user knows which paths compare by metadata only.
+                eventBus.post(new SyncEvent.LogEvent(message));
+            }
+
+            @Override
+            public void onStart(int totalFiles) {
+                // Unthrottled zero-progress event: the UI gets an immediate denominator and its
+                // monotonic percent clamp resets for a new generation.
+                eventBus.post(new SyncEvent.ManifestProgressEvent(0, totalFiles, null));
+            }
+
+            @Override
+            public void onFileProcessed(String fileName, int processed, int total) {
+                long now = System.currentTimeMillis();
+                long last = lastPostedMs.get();
+                if (now - last >= MANIFEST_PROGRESS_INTERVAL_MS
+                        && lastPostedMs.compareAndSet(last, now)) {
+                    eventBus.post(new SyncEvent.ManifestProgressEvent(processed, total, fileName));
+                }
+            }
+
+            @Override
+            public void onComplete(FileChangeDetector.FileManifest manifest) {
+                // Unthrottled final event: the bar must land on 100% with the real file count even
+                // when the denominator was a cache-size estimate.
+                int count = manifest != null ? manifest.getFileCount() : 0;
+                eventBus.post(new SyncEvent.ManifestProgressEvent(count, count, null));
+            }
+        };
+    }
+
     public SyncPreviewPlan createSyncPreviewPlan() throws IOException {
         eventBus.post(new SyncEvent.LogEvent("Generating local manifest..."));
 
@@ -229,23 +301,24 @@ public class SyncCoordinator {
                         respectGitignore,
                         fastMode,
                         FileChangeDetector.persistedManifestFileFor(syncFolder),
-                        // Files that cannot be read for hashing no longer abort the preview;
-                        // surface them so the user knows which paths compare by metadata only.
-                        new FileChangeDetector.ManifestProgressCallback() {
-                            @Override
-                            public void onWarning(String message) {
-                                eventBus.post(new SyncEvent.LogEvent(message));
-                            }
-                        });
+                        manifestProgressCallback());
 
         eventBus.post(new SyncEvent.LogEvent("Requesting remote manifest..."));
+        // Nothing is countable while the receiver walks and hashes its folder; switch the UI
+        // progress bar to an indeterminate "waiting" state so the silence reads as work, not a
+        // hang.
+        eventBus.post(new SyncEvent.ManifestProgressEvent(-1, -1, null));
         // Send our settings to the receiver so it generates manifest with the same options
 
         // Use an extended timeout for the manifest exchange because the receiver may need
-        // significant time to walk and hash its folder (especially for large projects).
+        // significant time to walk and hash its folder (especially for large projects). Heartbeat
+        // timeout checks are suppressed on both sides while syncing, so a generous limit cannot
+        // trip the idle-peer disconnect. The wait is additionally bounded by liveness, not just
+        // time: the receiver keeps sending heartbeats while it generates (handleManifestRequest),
+        // so MANIFEST_WAIT_IDLE_MS of total silence means the peer died mid-generation.
         FileChangeDetector.FileManifest remoteManifest;
         int savedTimeout = protocol.getTimeout();
-        protocol.setTimeout(120_000); // 120 seconds for large manifests
+        protocol.setTimeout((int) MANIFEST_WAIT_TOTAL_MS);
         // The protocol-exchange gate opens only now, after local manifest generation: hashing the
         // local tree touches no serial I/O, and holding the gate open during it silences outbound
         // heartbeats long enough (folder walks can take a minute) for the idle peer to declare
@@ -255,7 +328,7 @@ public class SyncCoordinator {
             protocol.requestManifest(respectGitignore, fastMode);
 
             SyncProtocol.Message manifestMessage =
-                    protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA);
+                    protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA, MANIFEST_WAIT_IDLE_MS);
             protocol.sendAck();
             int expectedManifestSize =
                     manifestMessage != null && manifestMessage.getParams().length > 0
@@ -563,20 +636,43 @@ public class SyncCoordinator {
                     senderFastMode != null ? senderFastMode : fastModeSupplier.getAsBoolean();
 
             eventBus.post(new SyncEvent.LogEvent("Sending manifest..."));
-            FileChangeDetector.FileManifest manifest =
-                    FileChangeDetector.generateManifestWithCache(
-                            syncFolder,
-                            respectGitignore,
-                            fastMode,
-                            FileChangeDetector.persistedManifestFileFor(syncFolder),
-                            // Same as the sender side: unreadable files degrade to metadata-only
-                            // entries instead of failing the whole manifest exchange.
-                            new FileChangeDetector.ManifestProgressCallback() {
-                                @Override
-                                public void onWarning(String message) {
-                                    eventBus.post(new SyncEvent.LogEvent(message));
-                                }
-                            });
+            // Generation runs on the listener thread, so this side can neither read nor answer
+            // the peer's frames until it finishes. Send heartbeats from the scheduler meanwhile:
+            // the sender's idle-bounded manifest wait (waitForCommand(..., MANIFEST_WAIT_IDLE_MS))
+            // then treats continued silence as a dead peer instead of blocking the full cap, and a
+            // large tree that takes minutes no longer looks like a hang on the sender side.
+            ScheduledFuture<?> generatingHeartbeat =
+                    executor != null
+                            ? executor.scheduleWithFixedDelay(
+                                    () -> {
+                                        try {
+                                            protocol.sendHeartbeat();
+                                        } catch (IOException ignored) {
+                                            // Link failures surface through their own channels;
+                                            // keep generating so one missed beat cannot abort the
+                                            // manifest exchange.
+                                        }
+                                    },
+                                    GENERATING_HEARTBEAT_INTERVAL_MS / 2,
+                                    GENERATING_HEARTBEAT_INTERVAL_MS,
+                                    TimeUnit.MILLISECONDS)
+                            : null;
+            FileChangeDetector.FileManifest manifest;
+            try {
+                manifest =
+                        FileChangeDetector.generateManifestWithCache(
+                                syncFolder,
+                                respectGitignore,
+                                fastMode,
+                                FileChangeDetector.persistedManifestFileFor(syncFolder),
+                                manifestProgressCallback());
+            } finally {
+                // Stop before the manifest's own XMODEM session: command frames must never be
+                // interleaved with raw transfer bytes.
+                if (generatingHeartbeat != null) {
+                    generatingHeartbeat.cancel(false);
+                }
+            }
             protocol.sendManifest(manifest);
             String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
             if (manifest.getEmptyDirectoryCount() > 0) {

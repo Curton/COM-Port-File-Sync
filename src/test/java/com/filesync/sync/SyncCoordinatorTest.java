@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -34,6 +35,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -723,6 +726,83 @@ class SyncCoordinatorTest {
     }
 
     @Test
+    void handleManifestRequest_postsManifestProgressEvents() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        for (int i = 0; i < 3; i++) {
+            Files.writeString(tempDir.resolve("rxProgress" + i + ".txt"), "content-" + i);
+        }
+
+        coordinator.handleManifestRequest(true, false);
+
+        // The receiver's own manifest generation is visible on its UI too: the zero-progress
+        // onStart event, throttled progress, and the unthrottled final one — and no waiting
+        // marker (only the sender waits).
+        int generationProgressCount = 0;
+        int firstProcessed = -1;
+        int lastProcessed = -1;
+        int lastTotal = -1;
+        for (SyncEvent event : postedEvents) {
+            if (event instanceof SyncEvent.ManifestProgressEvent progressEvent) {
+                if (progressEvent.getProcessed() < 0) {
+                    throw new AssertionError(
+                            "The receiver must not post the wait-for-remote-manifest marker");
+                }
+                if (firstProcessed < 0) {
+                    firstProcessed = progressEvent.getProcessed();
+                }
+                generationProgressCount++;
+                lastProcessed = progressEvent.getProcessed();
+                lastTotal = progressEvent.getTotal();
+            }
+        }
+        assertEquals(
+                0,
+                firstProcessed,
+                "The generation's first event is the zero-progress onStart event");
+        assertTrue(
+                generationProgressCount >= 2,
+                "Throttled progress events plus the final one expected");
+        assertEquals(3, lastProcessed, "The final event carries the real file count");
+        assertEquals(3, lastTotal, "The final event reports processed/total");
+    }
+
+    @Test
+    void handleManifestRequest_sendsHeartbeatsWhileGenerating_andStopsBeforeSendManifest()
+            throws IOException {
+        // Generation blocks the listener thread, so the receiver cannot answer the sender's
+        // liveness probes while hashing: a scheduler task must keep sending heartbeats so the
+        // sender's idle-bounded manifest wait stays alive. The task must be stopped before the
+        // manifest's XMODEM session (command frames must never interleave with raw transfer
+        // bytes), and heartbeats must not leak past a failed generation either.
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        Files.writeString(tempDir.resolve("keepalive.txt"), "content");
+        ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
+        @SuppressWarnings("unchecked")
+        ScheduledFuture<?> generatingHeartbeat = mock(ScheduledFuture.class);
+        // doReturn dodges the wildcard-capture mismatch between the scheduler's ScheduledFuture<?>
+        // return type and the mock's inferred type.
+        doReturn(generatingHeartbeat)
+                .when(executor)
+                .scheduleWithFixedDelay(any(), anyLong(), anyLong(), any(TimeUnit.class));
+        coordinator.setExecutor(executor);
+
+        coordinator.handleManifestRequest(true, false);
+
+        verify(executor)
+                .scheduleWithFixedDelay(
+                        any(),
+                        eq(SyncCoordinator.GENERATING_HEARTBEAT_INTERVAL_MS / 2),
+                        eq(SyncCoordinator.GENERATING_HEARTBEAT_INTERVAL_MS),
+                        any(TimeUnit.class));
+        org.mockito.InOrder inOrder =
+                org.mockito.Mockito.inOrder(generatingHeartbeat, mockProtocol);
+        inOrder.verify(generatingHeartbeat).cancel(false);
+        inOrder.verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
+    }
+
+    @Test
     void handleManifestRequest_sendsError_whenSyncFolderNull() throws IOException {
         File nullFolder = null;
         SyncCoordinator coordinatorWithNullFolder =
@@ -1129,7 +1209,7 @@ class SyncCoordinatorTest {
         Files.writeString(testFile, "content");
         SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
         when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString())).thenReturn(mockManifestMsg);
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
         when(mockProtocol.receiveManifest(anyInt()))
                 .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
 
@@ -1142,8 +1222,74 @@ class SyncCoordinatorTest {
     }
 
     @Test
+    void createSyncPreviewPlan_postsManifestProgressAndWaitingMarker() throws IOException {
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncCoordinator coordinator =
+                createCoordinator(
+                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
+        for (int i = 0; i < 3; i++) {
+            Files.writeString(tempDir.resolve("progress" + i + ".txt"), "content-" + i);
+        }
+        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
+        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
+        when(mockProtocol.receiveManifest(anyInt()))
+                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+
+        coordinator.createSyncPreviewPlan();
+
+        int waitingMarkerIndex = -1;
+        int firstGenerationProgressIndex = -1;
+        int firstGenerationProcessed = -1;
+        int lastGenerationProgressIndex = -1;
+        int lastGenerationProcessed = -1;
+        int lastGenerationTotal = -1;
+        int requestingLogIndex = -1;
+        for (int i = 0; i < postedEvents.size(); i++) {
+            if (postedEvents.get(i) instanceof SyncEvent.ManifestProgressEvent progressEvent) {
+                if (progressEvent.getProcessed() < 0) {
+                    waitingMarkerIndex = i;
+                } else if (firstGenerationProgressIndex < 0) {
+                    firstGenerationProgressIndex = i;
+                    firstGenerationProcessed = progressEvent.getProcessed();
+                } else {
+                    lastGenerationProgressIndex = i;
+                    lastGenerationProcessed = progressEvent.getProcessed();
+                    lastGenerationTotal = progressEvent.getTotal();
+                }
+            }
+            if (postedEvents.get(i) instanceof SyncEvent.LogEvent logEvent
+                    && logEvent.getMessage().startsWith("Requesting remote manifest")) {
+                requestingLogIndex = i;
+            }
+        }
+        assertEquals(
+                0,
+                firstGenerationProcessed,
+                "The generation's first event is the zero-progress onStart event");
+        assertTrue(
+                firstGenerationProgressIndex >= 0,
+                "At least one throttled generation progress event must be posted");
+        assertEquals(
+                3,
+                lastGenerationProcessed,
+                "The final (unthrottled) generation event carries the real file count");
+        assertEquals(3, lastGenerationTotal, "The final generation event reports processed/total");
+        assertTrue(
+                requestingLogIndex > lastGenerationProgressIndex,
+                "'Requesting remote manifest...' is logged after generation finishes");
+        assertTrue(waitingMarkerIndex >= 0, "The wait-for-remote-manifest marker must be posted");
+        assertTrue(
+                waitingMarkerIndex > requestingLogIndex,
+                "The waiting marker follows the 'Requesting remote manifest...' log");
+        assertTrue(
+                waitingMarkerIndex > lastGenerationProgressIndex,
+                "The waiting marker comes after the generation progress events");
+    }
+
+    @Test
     void createSyncPreviewPlan_extendsTimeoutDuringManifestExchange() throws IOException {
-        // Verify the protocol timeout is temporarily extended to 120s for the manifest
+        // Verify the protocol timeout is temporarily extended to 10 minutes for the manifest
         // exchange and then restored afterwards.
         when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncCoordinator coordinator =
@@ -1153,7 +1299,7 @@ class SyncCoordinatorTest {
         Files.writeString(testFile, "content");
         SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
         when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString())).thenReturn(mockManifestMsg);
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
         when(mockProtocol.receiveManifest(anyInt()))
                 .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
 
@@ -1162,8 +1308,38 @@ class SyncCoordinatorTest {
         // Must have saved the original timeout via getTimeout()
         verify(mockProtocol, atLeastOnce()).getTimeout();
         // Must have set the extended timeout for the manifest exchange
-        verify(mockProtocol).setTimeout(120_000);
+        verify(mockProtocol).setTimeout(600_000);
         // Must have restored the original timeout
+        verify(mockProtocol).setTimeout(30000);
+    }
+
+    @Test
+    void createSyncPreviewPlan_idleWaitTimeout_closesGateAndRestoresTimeout() throws IOException {
+        // The manifest wait is idle-bounded: a receiver that goes silent (died mid-generation,
+        // stopped sending its generating heartbeats) must abort the preview within seconds. The
+        // idle timeout must surface like any other read timeout: gate closed, original protocol
+        // timeout restored.
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncCoordinator coordinator =
+                createCoordinator(
+                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
+        Files.writeString(tempDir.resolve("idleWait.txt"), "content");
+        AtomicBoolean gate = new AtomicBoolean(false);
+        coordinator.setProtocolExchangeGate(gate::set);
+        doThrow(
+                        new IOException(
+                                "Timeout waiting for command: MANIFEST_DATA (peer silent for 30001 ms)"))
+                .when(mockProtocol)
+                .waitForCommand(anyString(), anyLong());
+
+        IOException thrown =
+                assertThrows(IOException.class, () -> coordinator.createSyncPreviewPlan());
+
+        assertTrue(SyncCoordinator.isReadTimeout(thrown), "the idle timeout surfaces as-is");
+        assertTrue(
+                thrown.getMessage().contains("peer silent"),
+                "the idle timeout names the liveness failure: " + thrown.getMessage());
+        assertFalse(gate.get(), "gate must be closed after the exchange fails");
         verify(mockProtocol).setTimeout(30000);
     }
 
@@ -1203,7 +1379,7 @@ class SyncCoordinatorTest {
                         })
                 .when(mockProtocol)
                 .requestManifest(anyBoolean(), anyBoolean());
-        when(mockProtocol.waitForCommand(anyString()))
+        when(mockProtocol.waitForCommand(anyString(), anyLong()))
                 .thenAnswer(
                         invocation -> {
                             assertTrue(gate.get(), "gate must be open while awaiting the manifest");
@@ -1254,7 +1430,7 @@ class SyncCoordinatorTest {
 
         assertFalse(gate.get(), "gate must be closed after the exchange fails");
         assertEquals(Arrays.asList(true, false), gateOperations, "gate must open then close, once");
-        verify(mockProtocol).setTimeout(120_000);
+        verify(mockProtocol).setTimeout(600_000);
         verify(mockProtocol).setTimeout(30000);
     }
 

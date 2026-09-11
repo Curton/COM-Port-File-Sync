@@ -54,6 +54,11 @@ public class FileChangeDetector {
     /**
      * Callback interface for manifest generation progress. Default methods allow callers to
      * override only the hooks they need.
+     *
+     * <p>{@code totalFiles} is an estimate whenever a persisted manifest cache supplied it (the
+     * pre-count walk is skipped there): it starts at the cache's size and grows monotonically as
+     * files the cache does not know about are processed, so it may equal {@code processedFiles}
+     * before the real file count is known. The exact count arrives with {@link #onComplete}.
      */
     public interface ManifestProgressCallback {
         default void onStart(int totalFiles) {}
@@ -291,46 +296,55 @@ public class FileChangeDetector {
                         ? cachedManifest.getFiles()
                         : java.util.Collections.emptyMap();
 
-        // Count total files for progress reporting (only when callback provided)
+        // Progress totals (only when a callback is provided). With a persisted cache the tree is
+        // NOT pre-counted: the cache size is a good-enough estimate and skipping the extra full
+        // walk is the point of the cache (reportProgress grows the total monotonically for files
+        // the cache does not know about). Without a cache — first generation, where hashing
+        // dominates anyway — a full pre-count gives an exact denominator.
         AtomicInteger totalFiles = new AtomicInteger(0);
         AtomicInteger processedFiles = new AtomicInteger(0);
         ManifestProgressCallback progressCallback = resolvedOptions.getProgressCallback();
 
         if (progressCallback != null) {
-            // Files.find hands the walk's already-read attributes to the predicate, so counting
-            // does not re-stat every path.
-            try (Stream<Path> countPaths =
-                    Files.find(
-                            basePath,
-                            Integer.MAX_VALUE,
-                            (path, attrs) -> {
-                                try {
-                                    if (!attrs.isRegularFile() || isHidden(attrs)) {
+            if (cachedManifest != null) {
+                totalFiles.set(cachedFiles.size());
+            } else {
+                // Files.find hands the walk's already-read attributes to the predicate, so counting
+                // does not re-stat every path.
+                try (Stream<Path> countPaths =
+                        Files.find(
+                                basePath,
+                                Integer.MAX_VALUE,
+                                (path, attrs) -> {
+                                    try {
+                                        if (!attrs.isRegularFile() || isHidden(attrs)) {
+                                            return false;
+                                        }
+
+                                        String relativePath = toRelativePath(basePath, path);
+
+                                        // Skip large-transfer staging files (partial disk-write);
+                                        // they are protocol state, not user content
+                                        if (isPartialStagePath(relativePath)) {
+                                            return false;
+                                        }
+
+                                        // Skip .gitignore files themselves when respectGitignore is
+                                        // enabled
+                                        if (parser != null && relativePath.endsWith(".gitignore")) {
+                                            return false;
+                                        }
+
+                                        // Check if file should be ignored based on .gitignore
+                                        return parser == null
+                                                || !parser.isIgnored(relativePath, false);
+                                    } catch (Exception e) {
+                                        // Skip files that can't be accessed during counting
                                         return false;
                                     }
-
-                                    String relativePath = toRelativePath(basePath, path);
-
-                                    // Skip large-transfer staging files (partial disk-write);
-                                    // they are protocol state, not user content
-                                    if (isPartialStagePath(relativePath)) {
-                                        return false;
-                                    }
-
-                                    // Skip .gitignore files themselves when respectGitignore is
-                                    // enabled
-                                    if (parser != null && relativePath.endsWith(".gitignore")) {
-                                        return false;
-                                    }
-
-                                    // Check if file should be ignored based on .gitignore
-                                    return parser == null || !parser.isIgnored(relativePath, false);
-                                } catch (Exception e) {
-                                    // Skip files that can't be accessed during counting
-                                    return false;
-                                }
-                            })) {
-                totalFiles.set((int) countPaths.count());
+                                })) {
+                    totalFiles.set((int) countPaths.count());
+                }
             }
             progressCallback.onStart(totalFiles.get());
         }
@@ -1096,8 +1110,21 @@ public class FileChangeDetector {
             return;
         }
         int processed = processedFiles.incrementAndGet();
-        progressCallback.onProgress(processed, totalFiles.get());
-        progressCallback.onFileProcessed(relativePath, processed, totalFiles.get());
+        // The total may be an estimate from the persisted cache (the pre-count walk is skipped
+        // there); grow it monotonically so the fraction can never exceed 1 when files beyond the
+        // estimate show up. Every reporting site (the walk predicate's inline branches and the hash
+        // pool's tasks) is a producer, so the CAS loop below is the only race here.
+        int total = totalFiles.get();
+        int observedTotal = total;
+        while (total < processed && !totalFiles.compareAndSet(total, processed)) {
+            total = totalFiles.get();
+        }
+        // Read the possibly-grown value once and hand the same number to both callbacks: two
+        // separate reads can straddle another producer's growth, which would report a different
+        // denominator to onProgress than to onFileProcessed for the same file.
+        int reportedTotal = totalFiles.get();
+        progressCallback.onProgress(processed, reportedTotal);
+        progressCallback.onFileProcessed(relativePath, processed, reportedTotal);
     }
 
     private static FileManifest loadPersistedManifest(File manifestFile) {

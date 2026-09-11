@@ -10,6 +10,10 @@ public enum SyncEventType {
     TRANSFER_COMPLETE,
     FILE_PROGRESS,
     TRANSFER_PROGRESS,
+    /**
+     * Manifest generation/manifest-wait progress, throttled; see SyncEvent.ManifestProgressEvent.
+     */
+    MANIFEST_PROGRESS,
     /** Re-evaluate Sync Control enablement (e.g. after manifest XMODEM without SYNC_COMPLETE). */
     SYNC_CONTROL_REFRESH,
     LOG,

@@ -123,6 +123,78 @@ class SyncProtocolWaitForCommandTest {
         assertNull(protocol.pollStashedMessage());
     }
 
+    @Test
+    void idleBoundedWaitReturnsExpectedCommandAndKeepsLivenessOnHeartbeats() throws IOException {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        protocol.setTimeout(10_000);
+        List<Message> activity = new ArrayList<>();
+        protocol.setMessageActivityCallback(() -> activity.add(null));
+        Message ack = new Message(SyncProtocol.CMD_ACK, new String[0]);
+        protocol.feed(
+                new Message(SyncProtocol.CMD_HEARTBEAT, new String[0]),
+                new Message(SyncProtocol.CMD_HEARTBEAT, new String[0]),
+                ack);
+
+        Message result = protocol.waitForCommand(SyncProtocol.CMD_ACK, 500);
+
+        assertSame(ack, result);
+        assertEquals(2, protocol.heartbeatAcksSent, "Heartbeats are answered inline");
+        assertEquals(2, activity.size(), "Each heartbeat refreshes the liveness callback");
+        assertNull(protocol.pollStashedMessage(), "Heartbeats must not be stashed");
+    }
+
+    @Test
+    void idleBoundedWaitThrowsWhenPeerGoesSilent() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        protocol.setTimeout(10_000);
+        List<Message> activity = new ArrayList<>();
+        protocol.setMessageActivityCallback(() -> activity.add(null));
+        // One heartbeat, then the queue drains: the peer "dies" mid-generation.
+        protocol.feed(new Message(SyncProtocol.CMD_HEARTBEAT, new String[0]));
+
+        IOException ex =
+                assertThrows(
+                        IOException.class,
+                        () -> protocol.waitForCommand(SyncProtocol.CMD_ACK, 150));
+
+        assertTrue(
+                ex.getMessage().contains("Timeout waiting for command"),
+                "the idle abort reads like a read timeout: " + ex.getMessage());
+        assertTrue(
+                ex.getMessage().contains("peer silent"),
+                "the idle abort names the liveness failure: " + ex.getMessage());
+        assertEquals(1, protocol.heartbeatAcksSent, "The last heartbeat was answered before death");
+    }
+
+    @Test
+    void idleBoundedWaitStillHonorsTheTotalDeadline() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        protocol.setTimeout(80);
+
+        IOException ex =
+                assertThrows(
+                        IOException.class,
+                        () -> protocol.waitForCommand(SyncProtocol.CMD_ACK, 60_000));
+
+        assertTrue(
+                ex.getMessage().contains("Timeout waiting for command"),
+                "total deadline still applies with an idle bound: " + ex.getMessage());
+        assertTrue(
+                !ex.getMessage().contains("peer silent"),
+                "the abort here is the overall deadline, not silence: " + ex.getMessage());
+    }
+
+    @Test
+    void nonPositiveIdleBoundFallsBackToThePlainWait() throws IOException {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        Message ack = new Message(SyncProtocol.CMD_ACK, new String[0]);
+        protocol.feed(ack);
+
+        Message result = protocol.waitForCommand(SyncProtocol.CMD_ACK, 0);
+
+        assertSame(ack, result);
+    }
+
     /** Feeds a scripted sequence of messages to receiveCommand without touching a serial port. */
     private static final class ScriptedProtocol extends SyncProtocol {
         private final Queue<Message> script = new ArrayDeque<>();
@@ -138,6 +210,13 @@ class SyncProtocolWaitForCommandTest {
 
         @Override
         public Message receiveCommand() {
+            return script.poll();
+        }
+
+        @Override
+        public Message receiveCommand(int readTimeoutMs) {
+            // An empty queue reads as "no frame within the slice", exactly what the idle-bounded
+            // wait loop expects on silence.
             return script.poll();
         }
 

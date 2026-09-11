@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.filesync.sync.SyncPreviewPlan;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -26,28 +25,6 @@ class SyncPreviewRendererChangePreviewTest {
 
     private static byte[] utf8(String text) {
         return text.getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static com.filesync.sync.FileChangeDetector.FileInfo fileInfo(String path, long size) {
-        return new com.filesync.sync.FileChangeDetector.FileInfo(path, size, 0L, null);
-    }
-
-    private static SyncPreviewPlan planWith(
-            List<com.filesync.sync.FileChangeDetector.FileInfo> files,
-            java.util.Set<String> existingRemotePaths) {
-        long total = files.stream().mapToLong(f -> f.getSize()).sum();
-        return new SyncPreviewPlan(
-                files,
-                List.of(),
-                List.of(),
-                List.of(),
-                total,
-                false,
-                List.of(),
-                java.util.Set.of(),
-                java.util.Set.of(),
-                existingRemotePaths,
-                java.util.Map.of());
     }
 
     // --- Table shape -------------------------------------------------------------------------
@@ -164,8 +141,7 @@ class SyncPreviewRendererChangePreviewTest {
         row.setBaseFetched(true);
 
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("m.txt", 18L)), java.util.Set.of("m.txt")), dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         FileDiffPreviewModel model = renderer.buildPreviewModel(row, null);
 
@@ -183,9 +159,7 @@ class SyncPreviewRendererChangePreviewTest {
         row.setBaseFetched(true);
 
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("gone.txt", 5L)), java.util.Set.of("gone.txt")),
-                dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         FileDiffPreviewModel model = renderer.buildPreviewModel(row, null);
 
@@ -201,8 +175,7 @@ class SyncPreviewRendererChangePreviewTest {
                 new SyncPreviewRow(SyncPreviewOperationType.MODIFIED, "m.txt", "6 B", 6L);
 
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("m.txt", 6L)), java.util.Set.of("m.txt")), dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         FileDiffPreviewModel model = renderer.buildPreviewModel(row, "read timeout");
 
@@ -220,8 +193,7 @@ class SyncPreviewRendererChangePreviewTest {
                 new SyncPreviewRow(SyncPreviewOperationType.NEW, "fresh.txt", "6 B", 6L);
 
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("fresh.txt", 6L)), java.util.Set.of()), dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         FileDiffPreviewModel model = renderer.buildPreviewModel(row, null);
 
@@ -246,9 +218,7 @@ class SyncPreviewRendererChangePreviewTest {
         assertTrue(Files.size(big) > SyncPreviewRenderer.MAX_PREVIEW_BYTES);
 
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("big.bin", Files.size(big))), java.util.Set.of()),
-                dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         assertNull(renderer.readLocalPreviewContent("big.bin"));
     }
@@ -257,8 +227,7 @@ class SyncPreviewRendererChangePreviewTest {
     void emptyLocalFileReadsAsEmptyContentNotUnavailable(@TempDir Path dir) throws Exception {
         Files.createFile(dir.resolve("empty.txt"));
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("empty.txt", 0L)), java.util.Set.of()), dir.toFile());
+        renderer.setPreviewSyncFolder(dir.toFile());
 
         byte[] content = renderer.readLocalPreviewContent("empty.txt");
         assertNotNull(content);
@@ -275,9 +244,7 @@ class SyncPreviewRendererChangePreviewTest {
     @Test
     void previewForUnconfiguredFolderReportsUnavailable() {
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        File folder = new File(System.getProperty("java.io.tmpdir"));
-        renderer.showSyncPreviewDialogWithResult(
-                planWith(List.of(fileInfo("a.txt", 1L)), java.util.Set.of("a.txt")), folder);
+        renderer.setPreviewSyncFolder(new File(System.getProperty("java.io.tmpdir")));
 
         // The file does not exist in the temp folder, so the local read must fail cleanly.
         assertNull(renderer.readLocalPreviewContent("definitely-missing-file-xyz.txt"));

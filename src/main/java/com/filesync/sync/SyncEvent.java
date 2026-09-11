@@ -100,6 +100,42 @@ public interface SyncEvent {
         }
     }
 
+    /**
+     * Progress of local manifest generation (or the wait for the remote manifest). Throttled by the
+     * poster, so consumers may update UI directly.
+     *
+     * <p>{@code processed == -1} marks the sender's wait-for-remote-manifest phase: nothing is
+     * countable yet, the UI should show an indeterminate state.
+     */
+    final class ManifestProgressEvent implements SyncEvent {
+        private final int processed;
+        private final int total;
+        private final String fileName;
+
+        public ManifestProgressEvent(int processed, int total, String fileName) {
+            this.processed = processed;
+            this.total = total;
+            this.fileName = fileName;
+        }
+
+        public int getProcessed() {
+            return processed;
+        }
+
+        public int getTotal() {
+            return total;
+        }
+
+        public String getFileName() {
+            return fileName;
+        }
+
+        @Override
+        public SyncEventType getType() {
+            return SyncEventType.MANIFEST_PROGRESS;
+        }
+    }
+
     final class TransferProgressEvent implements SyncEvent {
         private final int currentBlock;
         private final int totalBlocks;

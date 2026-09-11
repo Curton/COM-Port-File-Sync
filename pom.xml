@@ -5,7 +5,7 @@
 
     <groupId>com.filesync</groupId>
     <artifactId>com-file-sync</artifactId>
-    <version>1.6.44</version>
+    <version>1.6.45</version>
     <packaging>jar</packaging>
 
     <name>COM Port File Sync</name>
@@ -70,6 +70,11 @@
                 <version>3.2.5</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
+                    <!-- Tests must never open Swing windows: headless makes any window creation
+                         fail the test with HeadlessException instead of blocking the run. -->
+                    <systemPropertyVariables>
+                        <java.awt.headless>true</java.awt.headless>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
             <plugin>

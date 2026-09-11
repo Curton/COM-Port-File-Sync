@@ -460,6 +460,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     components.getSyncButton().setEnabled(true);
                     components.getPreviewSyncButton().setEnabled(false);
                     components.getDirectionButton().setEnabled(false);
+                    components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setValue(0);
                     components.getProgressBar().setString("Starting sync...");
                 });
@@ -468,6 +469,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     public void onSyncCancelled() {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
+                    components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Sync cancelled");
                     updateSyncButtonState();
                 });
@@ -489,6 +491,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                         }
                     }
                     state.clearPendingMappingRemotePath();
+                    components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setValue(100);
                     components.getProgressBar().setString("Sync complete");
                     updateSyncButtonState();
@@ -518,7 +521,54 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         components.getDirectionButton().setEnabled(!transferBusy && !state.isPreviewInProgress());
     }
 
+    /**
+     * Monotonic clamp for manifest percentages: processed counts are monotonic, but reports may
+     * arrive slightly out of order across the hash pool, so without the clamp the bar could briefly
+     * jump backwards between two throttled updates.
+     */
+    private int lastManifestPercent = 0;
+
+    public void onManifestProgress(int processed, int total, String fileName) {
+        javax.swing.JProgressBar bar = components.getProgressBar();
+        if (processed < 0) {
+            // Sender waiting for the remote manifest: nothing countable yet, show motion instead
+            // so the silence reads as work, not a hang.
+            bar.setValue(0);
+            bar.setIndeterminate(true);
+            bar.setString("Waiting for remote manifest...");
+            lastManifestPercent = 0;
+            return;
+        }
+        String filePart = fileName != null && !fileName.isEmpty() ? ": " + fileName : "";
+        bar.setIndeterminate(false);
+        if (processed == 0) {
+            // The generation's first (unthrottled) event: resets the clamp for a new run.
+            lastManifestPercent = 0;
+        }
+        if (total > 0) {
+            int percent =
+                    Math.max(
+                            (int) Math.min(100L, (long) processed * 100 / total),
+                            lastManifestPercent);
+            lastManifestPercent = percent;
+            bar.setValue(percent);
+            bar.setString(
+                    "Generating manifest "
+                            + percent
+                            + "% ("
+                            + processed
+                            + "/"
+                            + total
+                            + ")"
+                            + filePart);
+        } else {
+            bar.setValue(0);
+            bar.setString("Generating manifest (" + processed + " files)" + filePart);
+        }
+    }
+
     public void onFileProgress(int currentFile, int totalFiles, String fileName) {
+        components.getProgressBar().setIndeterminate(false);
         components.getProgressBar().setValue((int) ((double) currentFile / totalFiles * 100));
         components
                 .getProgressBar()
@@ -527,6 +577,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     public void onTransferProgress(
             int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
+        components.getProgressBar().setIndeterminate(false);
         String speedStr = UiFormatting.formatSpeed(speedBytesPerSec);
         if (totalBlocks > 0) {
             components.getProgressBar().setValue((int) ((double) currentBlock / totalBlocks * 100));
@@ -542,6 +593,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     public void onTransferComplete() {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
+                    components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Transfer complete");
                     components.getProgressBar().setValue(100);
                     updateSyncButtonState();
@@ -587,6 +639,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
                     logController.log("ERROR: " + message);
+                    components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Error");
                     updateSyncButtonState();
                 });
