@@ -297,6 +297,46 @@ class FileChangeDetectorTest {
     }
 
     @Test
+    void getChangedFiles_detectsDifferentMd5WithinMetadataWindow() {
+        // Same size, mtime difference within MODIFY_WINDOW_MS, but proven-different MD5s:
+        // the checksum must win over the metadata quick check, otherwise a quick post-sync
+        // re-edit (or FAT 2-second granularity) is skipped silently.
+        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
+        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc"));
+        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
+        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 2000L, "def"));
+
+        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
+        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+
+        List<FileChangeDetector.FileInfo> changed =
+                FileChangeDetector.getChangedFiles(source, target);
+        assertEquals(
+                1,
+                changed.size(),
+                "Differing MD5s must detect change even when metadata matches within window");
+    }
+
+    @Test
+    void getChangedFiles_usesMetadataWhenOneSideLacksMd5() {
+        // Only one side hashed (e.g. the other file was unreadable): fall back to the
+        // metadata window comparison.
+        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
+        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc"));
+        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
+        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 2000L, null));
+
+        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
+        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+
+        List<FileChangeDetector.FileInfo> changed =
+                FileChangeDetector.getChangedFiles(source, target);
+        assertTrue(
+                changed.isEmpty(),
+                "With a missing checksum, metadata within window should mean unchanged");
+    }
+
+    @Test
     void getChangedFiles_skipsSameMetadataInWindow() {
         Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
         sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, null));

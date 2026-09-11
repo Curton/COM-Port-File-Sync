@@ -611,14 +611,17 @@ public class FileChangeDetector {
             if (targetInfo == null) {
                 // File doesn't exist in target
                 changedFiles.add(sourceInfo);
-            } else {
-                boolean sameByChecksum = false;
-                // If both sides have checksums, compare them
-                if (sourceInfo.getMd5() != null && targetInfo.getMd5() != null) {
-                    sameByChecksum = sourceInfo.getMd5().equals(targetInfo.getMd5());
+            } else if (sourceInfo.getMd5() != null && targetInfo.getMd5() != null) {
+                // Both sides hashed: the checksum is the sole authority. A metadata match
+                // must not rescue a proven content difference — a same-size edit landing
+                // within MODIFY_WINDOW_MS (a quick post-sync re-edit, or FAT 2-second
+                // timestamp granularity) would otherwise be skipped silently.
+                if (!sourceInfo.getMd5().equals(targetInfo.getMd5())) {
+                    changedFiles.add(sourceInfo);
                 }
-
-                // Rsync-style quick check based on metadata with timestamp tolerance.
+            } else {
+                // Checksum missing on at least one side (quick-mode binaries): rsync-style
+                // quick check based on metadata with timestamp tolerance.
                 // Uses MODIFY_WINDOW_MS to handle filesystem timestamp precision differences
                 // (similar to rsync's --modify-window option).
                 boolean sameByMetadata =
@@ -628,7 +631,7 @@ public class FileChangeDetector {
                                                         - targetInfo.getLastModified())
                                         <= MODIFY_WINDOW_MS;
 
-                if (!(sameByChecksum || sameByMetadata)) {
+                if (!sameByMetadata) {
                     // File exists but appears different
                     changedFiles.add(sourceInfo);
                 }
