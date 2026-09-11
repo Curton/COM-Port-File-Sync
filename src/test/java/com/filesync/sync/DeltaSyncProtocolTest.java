@@ -16,6 +16,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -378,5 +381,172 @@ class DeltaSyncProtocolTest {
                 serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
                 "must not cancel on command-phase failure: " + serial.getWrittenLines());
         assertFalse(protocol.isXmodemInProgress());
+    }
+
+    /**
+     * Regression: a receiver may have accepted the command and entered xmodem.receive() while its
+     * ACK was lost. The command retry must first eject that stuck receive with a bare CAN abort —
+     * otherwise the re-sent command is consumed as XMODEM payload, the receiver's raw ACK byte
+     * never completes a line, and one lost ACK costs every attempt and the whole sync.
+     */
+    @Test
+    void sendFile_commandPhaseRetryEjectsStuckReceiverWithCan(@TempDir Path tempDir)
+            throws Exception {
+        EventRecordingSerialPort serial = new EventRecordingSerialPort();
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<Boolean> outcome = new AtomicReference<>();
+        Thread worker =
+                new Thread(
+                        () -> {
+                            try {
+                                outcome.set(
+                                        protocol.sendFile(
+                                                tempDir.toFile(),
+                                                "a.bin",
+                                                new byte[] {1, 2, 3},
+                                                1234L));
+                            } catch (Throwable t) {
+                                failure.set(t);
+                            }
+                        });
+        worker.start();
+
+        // Attempt 1 gets no ACK, so its handshake times out. The retried command must be
+        // preceded on the wire by the CAN pair ejecting the receiver from xmodem.receive().
+        waitForSerialState(
+                () ->
+                        serial.getWrittenLines().stream()
+                                        .filter(l -> l.contains("FILE_DATA:a.bin"))
+                                        .count()
+                                >= 2,
+                "retried FILE_DATA command");
+
+        // Let attempt 2 complete: ACK the command, then serve the XMODEM handshake, the block
+        // ACK and the EOT ACK lazily so no scripted byte is drained as stale.
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(new byte[] {XModemTransfer.C});
+        waitForSerialState(
+                () -> serial.wireEvents().stream().anyMatch(e -> e.startsWith("bytes:")),
+                "first XMODEM block write");
+        serial.feedBytes(new byte[] {XModemTransfer.ACK});
+        waitForSerialState(
+                () -> serial.wireEvents().contains("byte:" + (XModemTransfer.EOT & 0xFF)),
+                "EOT write");
+        serial.feedBytes(new byte[] {XModemTransfer.ACK});
+
+        worker.join(10_000);
+        assertFalse(worker.isAlive(), "sendFile did not complete: " + failure.get());
+        assertFalse(failure.get() != null, "sendFile failed: " + failure.get());
+        assertFalse(outcome.get() == null, "sendFile did not return");
+
+        List<String> events = serial.wireEvents();
+        int firstCmd = indexOfFileData(events, 1);
+        int secondCmd = indexOfFileData(events, 2);
+        int firstCan = events.indexOf("byte:" + (XModemTransfer.CAN & 0xFF));
+        assertTrue(firstCmd >= 0 && secondCmd > firstCmd, "two command attempts: " + events);
+        assertTrue(
+                firstCan > firstCmd && firstCan < secondCmd,
+                "a bare CAN abort must precede the retried command: " + events);
+        assertEquals(
+                "byte:" + (XModemTransfer.CAN & 0xFF),
+                events.get(firstCan + 1),
+                "CAN is sent twice: " + events);
+    }
+
+    /**
+     * Regression: sendTransferCancel writes two bare CAN bytes (no newline) ahead of the CANCEL
+     * frame, so a newline-delimited read merges them into one line ("\u0018\u0018[[SYNC:CANCEL]]").
+     * The merged frame must still be honored: before the fix it was dropped whole, and a peer
+     * cancel arriving during the ACK wait went unnoticed — the sender then timed out, retried, and
+     * resurrected the transfer the user had cancelled.
+     */
+    @Test
+    void sendFile_canPrefixedCancelDuringAckWaitAbortsImmediatelyWithoutResend(
+            @TempDir Path tempDir) throws Exception {
+        EventRecordingSerialPort serial = new EventRecordingSerialPort();
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(500);
+
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread worker =
+                new Thread(
+                        () -> {
+                            try {
+                                protocol.sendFile(
+                                        tempDir.toFile(), "a.bin", new byte[] {1, 2, 3}, 1234L);
+                            } catch (Throwable t) {
+                                failure.set(t);
+                            }
+                        });
+        worker.start();
+        waitForSerialState(
+                () ->
+                        serial.getWrittenLines().stream()
+                                .anyMatch(l -> l.contains("FILE_DATA:a.bin")),
+                "first FILE_DATA command");
+
+        // The exact byte sequence the wire delivers when the peer cancels here.
+        serial.feedLine("\u0018\u0018[[SYNC:CANCEL]]");
+
+        worker.join(10_000);
+        assertFalse(worker.isAlive(), "sendFile did not stop after the peer's cancel");
+        assertTrue(
+                failure.get() instanceof TransferCancelledException,
+                "expected TransferCancelledException, got: " + failure.get());
+        assertEquals(
+                1,
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_DATA:a.bin"))
+                        .count(),
+                "a cancelled transfer must not be resurrected by the retry logic");
+    }
+
+    private static void waitForSerialState(BooleanSupplier condition, String description)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(condition.getAsBoolean(), "timed out waiting for " + description);
+    }
+
+    private static int indexOfFileData(List<String> events, int occurrence) {
+        int seen = 0;
+        for (int i = 0; i < events.size(); i++) {
+            if (events.get(i).startsWith("line:") && events.get(i).contains("FILE_DATA:a.bin")) {
+                if (++seen == occurrence) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** Scripted port that also records raw byte writes and block writes in one ordered log. */
+    private static final class EventRecordingSerialPort extends ScriptedSerialPortManager {
+        private final List<String> wireEvents = new CopyOnWriteArrayList<>();
+
+        List<String> wireEvents() {
+            return wireEvents;
+        }
+
+        @Override
+        public void write(int b) {
+            wireEvents.add("byte:" + (b & 0xFF));
+        }
+
+        @Override
+        public void write(byte[] data) {
+            wireEvents.add("bytes:" + data.length);
+        }
+
+        @Override
+        public void writeLine(String line) {
+            super.writeLine(line);
+            wireEvents.add("line:" + line);
+        }
     }
 }

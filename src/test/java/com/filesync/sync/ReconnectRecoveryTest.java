@@ -220,6 +220,157 @@ class ReconnectRecoveryTest {
     }
 
     @Test
+    void restartAfterCancelWaitsForSupersededWorkerToExit() throws Exception {
+        Files.writeString(tempDir.resolve("test.txt"), "payload");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        BlockingSyncProtocol protocol = new BlockingSyncProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        AtomicInteger syncStartedCount = new AtomicInteger();
+        List<String> errors = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SyncStartedEvent) {
+                        syncStartedCount.incrementAndGet();
+                    } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
+                        errors.add(errorEvent.getMessage());
+                    }
+                });
+
+        SyncCoordinator coordinator =
+                new SyncCoordinator(
+                        protocol,
+                        eventBus,
+                        () -> tempDir.toFile(),
+                        () -> false,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        pendingWriteService,
+                        syncing,
+                        () -> {},
+                        () -> {},
+                        () -> {});
+
+        ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
+        coordinator.setExecutor(executor);
+        try {
+            protocol.setBlockAtManifestWait(true);
+            coordinator.startSync();
+            assertTrue(
+                    protocol.awaitFirstWaitEntered(Duration.ofSeconds(2)),
+                    "First sync should reach the blocked manifest wait");
+
+            // Cancel without interrupting models a worker stuck in an uninterruptible stage
+            // (hashing, compression): it stays parked on the manifest wait. The restarted sync
+            // must not let its worker touch the protocol until this superseded worker exits.
+            coordinator.cancelOngoingSync();
+            coordinator.startSync();
+            Thread.sleep(400);
+            assertEquals(
+                    1,
+                    syncStartedCount.get(),
+                    "Restarted sync must not enter performSync while the first worker lives");
+            assertEquals(
+                    1,
+                    protocol.manifestWaitEntries(),
+                    "Restarted sync must not touch the protocol while the first worker lives");
+
+            // Releasing the first worker lets it unwind through its cancellation path; only
+            // then may the restart's worker proceed.
+            protocol.releaseBlockedWait();
+            waitUntil(() -> syncStartedCount.get() >= 2, Duration.ofSeconds(2));
+            waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(5));
+            assertEquals(
+                    2,
+                    protocol.manifestWaitEntries(),
+                    "Restarted sync should reach the manifest wait after the first worker exited");
+            assertTrue(
+                    errors.stream().noneMatch(msg -> msg.contains("Sync already in progress")),
+                    "Second sync should not be rejected as already in progress");
+        } finally {
+            shutdownExecutor(executor);
+        }
+    }
+
+    @Test
+    void cancellingTheWaitingRestartDoesNotDuplicateTheCancelNotice() throws Exception {
+        Files.writeString(tempDir.resolve("test.txt"), "payload");
+
+        AtomicBoolean syncing = new AtomicBoolean(false);
+        BlockingSyncProtocol protocol = new BlockingSyncProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        AtomicInteger cancelledEventCount = new AtomicInteger();
+        List<String> logs = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SyncCancelledEvent) {
+                        cancelledEventCount.incrementAndGet();
+                    } else if (event instanceof SyncEvent.LogEvent logEvent) {
+                        synchronized (logs) {
+                            logs.add(logEvent.getMessage());
+                        }
+                    }
+                });
+
+        SyncCoordinator coordinator =
+                new SyncCoordinator(
+                        protocol,
+                        eventBus,
+                        () -> tempDir.toFile(),
+                        () -> false,
+                        () -> false,
+                        () -> false,
+                        () -> true,
+                        () -> true,
+                        () -> true,
+                        pendingWriteService,
+                        syncing,
+                        () -> {},
+                        () -> {},
+                        () -> {});
+
+        ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
+        coordinator.setExecutor(executor);
+        try {
+            protocol.setBlockAtManifestWait(true);
+            coordinator.startSync();
+            assertTrue(
+                    protocol.awaitFirstWaitEntered(Duration.ofSeconds(2)),
+                    "First sync should reach the blocked manifest wait");
+
+            // Cancel the first sync and restart after it; the restarted worker parks on the
+            // still-blocked predecessor. Cancelling the restart too (cancel + interrupt, as
+            // FileSyncManager.cancelSync does) is where a duplicate cancellation notice used to
+            // be posted: the superseded worker reports its own cancellation when it unwinds.
+            coordinator.cancelOngoingSync();
+            coordinator.startSync();
+            Thread.sleep(400); // let the restarted worker reach the await on the first worker
+            coordinator.cancelOngoingSync();
+            coordinator.interruptOngoingSync();
+            protocol.releaseBlockedWait();
+
+            waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(5));
+            waitUntil(() -> cancelledEventCount.get() >= 1, Duration.ofSeconds(2));
+
+            assertEquals(
+                    1,
+                    cancelledEventCount.get(),
+                    "The superseded worker reports the cancellation; the waiting restart must not repeat it");
+            synchronized (logs) {
+                assertEquals(
+                        1,
+                        logs.stream().filter("Sync cancelled"::equals).count(),
+                        "Expected exactly one 'Sync cancelled' log line, got: " + logs);
+            }
+        } finally {
+            shutdownExecutor(executor);
+        }
+    }
+
+    @Test
     void cancelOngoingSyncClearsStateWithoutPostingError() throws Exception {
         Files.writeString(tempDir.resolve("test.txt"), "payload");
 
@@ -835,6 +986,7 @@ class ReconnectRecoveryTest {
     private static final class BlockingSyncProtocol extends SyncProtocol {
         private final CountDownLatch firstWaitEntered = new CountDownLatch(1);
         private final CountDownLatch releaseWait = new CountDownLatch(1);
+        private final AtomicInteger manifestWaitEntries = new AtomicInteger();
         private volatile boolean blockAtManifestWait;
 
         BlockingSyncProtocol() {
@@ -850,6 +1002,10 @@ class ReconnectRecoveryTest {
                     timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
         }
 
+        int manifestWaitEntries() {
+            return manifestWaitEntries.get();
+        }
+
         void releaseBlockedWait() {
             releaseWait.countDown();
         }
@@ -861,13 +1017,19 @@ class ReconnectRecoveryTest {
 
         @Override
         public Message waitForCommand(String expectedCommand) throws IOException {
-            if (blockAtManifestWait && SyncProtocol.CMD_MANIFEST_DATA.equals(expectedCommand)) {
-                firstWaitEntered.countDown();
-                try {
-                    releaseWait.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Interrupted while simulating blocked manifest wait", e);
+            if (SyncProtocol.CMD_MANIFEST_DATA.equals(expectedCommand)) {
+                // Count every entry: a restarted sync must not reach this point while the
+                // superseded worker is still alive.
+                manifestWaitEntries.incrementAndGet();
+                if (blockAtManifestWait) {
+                    firstWaitEntered.countDown();
+                    try {
+                        releaseWait.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException(
+                                "Interrupted while simulating blocked manifest wait", e);
+                    }
                 }
             }
             return new Message(expectedCommand, new String[0]);
@@ -896,6 +1058,17 @@ class ReconnectRecoveryTest {
                 throw new IOException("Interrupted before completing simulated send");
             }
             return false;
+        }
+
+        @Override
+        public boolean sendBatch(
+                List<Object[]> files,
+                int maxBatchSizeBytes,
+                BatchTransferSession.BatchProgressCallback batchProgressCallback,
+                File baseDirForReceive) {
+            // Simulate a successful batch: syncs completing in these tests need no real serial
+            // I/O, and a real sendBatch here would fail against the stubbed port.
+            return true;
         }
 
         @Override

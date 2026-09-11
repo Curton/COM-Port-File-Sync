@@ -241,8 +241,21 @@ public class SyncProtocol {
 
     /** Parse a protocol message */
     public static Message parseMessage(String line) {
-        if (line == null || !line.startsWith(START_MARKER) || !line.endsWith(END_MARKER)) {
+        if (line == null) {
             return null;
+        }
+        int start = line.lastIndexOf(START_MARKER);
+        if (start < 0 || !line.endsWith(END_MARKER)) {
+            return null;
+        }
+        if (start > 0) {
+            // Resync past leading garbage on the line: reads are newline-delimited, but raw
+            // XMODEM bytes carry no newline — notably the CAN pair sent ahead of CMD_CANCEL by
+            // sendTransferCancel — so they share a line with the frame that follows them.
+            // Dropping the whole line would lose the command the prefixed frame carries. The
+            // last marker wins: when a torn prefix of an earlier frame merges into the same
+            // line, only the trailing frame is complete.
+            line = line.substring(start);
         }
 
         String content = line.substring(START_MARKER.length(), line.length() - END_MARKER.length());
@@ -447,14 +460,16 @@ public class SyncProtocol {
      * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
      * sourceSize} lets the receiver pre-size the output buffer.
      *
-     * <p>Recovery contract: the command/ACK handshake is retried up to {@code maxAttempts} times,
-     * because a failure there occurs before the receiver enters {@code xmodem.receive()} and a
-     * re-sent command is safe. Once the XMODEM phase is entered, any failure ({@code xmodem.send}
-     * returning {@code false} or throwing) is terminal: a transfer-cancel is sent to release the
-     * receiver from its blocking {@code xmodem.receive()} and no further attempts are made. A
-     * re-sent command after a mid-transfer failure would otherwise be consumed as XMODEM data,
-     * desynchronizing the peers; the CAN abort plus the listener's frame resync is the intended
-     * recovery, and the file is re-evaluated on the next sync.
+     * <p>Recovery contract: the command/ACK handshake is retried up to {@code maxAttempts} times.
+     * Each retry first ejects the peer from any blocked {@code xmodem.receive()} ({@link
+     * #resyncForCommandRetry()}), because a handshake failure can also mean the receiver did accept
+     * the command and its ACK was lost on the way back. Once the XMODEM phase is entered, any
+     * failure ({@code xmodem.send} returning {@code false} or throwing) is terminal: a
+     * transfer-cancel is sent to release the receiver from its blocking {@code xmodem.receive()}
+     * and no further attempts are made. A re-sent command after a mid-transfer failure would
+     * otherwise be consumed as XMODEM data, desynchronizing the peers; the CAN abort plus the
+     * listener's frame resync is the intended recovery, and the file is re-evaluated on the next
+     * sync.
      *
      * @return true if the delta was compressed, false otherwise
      */
@@ -495,6 +510,10 @@ public class SyncProtocol {
                     return wasCompressed;
                 }
             } catch (IOException e) {
+                // A peer cancel is terminal for the session: never retry a refused transfer.
+                if (e instanceof TransferCancelledException) {
+                    throw (TransferCancelledException) e;
+                }
                 lastFailure = e;
             }
 
@@ -513,12 +532,9 @@ public class SyncProtocol {
                 break;
             }
 
-            // Command/ACK-phase failure: the receiver has not entered xmodem.receive() yet, so
-            // re-sending the command is safe.
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException ignored) {
-            }
+            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
+            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
+            resyncForCommandRetry();
             if (attempt < maxAttempts) {
                 try {
                     Thread.sleep(200);
@@ -648,8 +664,10 @@ public class SyncProtocol {
      * reconstruction before writing.
      *
      * <p>Retry contract: identical to {@link #sendFileDelta} — the command/ACK handshake is retried
-     * up to {@code maxAttempts} times; once the XMODEM phase is entered, any failure is terminal
-     * (transfer-cancel releases the receiver from its blocking {@code xmodem.receive()}).
+     * up to {@code maxAttempts} times, ejecting a possibly-stuck receiver from {@code
+     * xmodem.receive()} before each retry ({@link #resyncForCommandRetry()}); once the XMODEM phase
+     * is entered, any failure is terminal (transfer-cancel releases the receiver from its blocking
+     * {@code xmodem.receive()}).
      *
      * @return true if the tail was compressed, false otherwise
      */
@@ -696,6 +714,10 @@ public class SyncProtocol {
                     return wasCompressed;
                 }
             } catch (IOException e) {
+                // A peer cancel is terminal for the session: never retry a refused transfer.
+                if (e instanceof TransferCancelledException) {
+                    throw (TransferCancelledException) e;
+                }
                 lastFailure = e;
             }
 
@@ -714,12 +736,9 @@ public class SyncProtocol {
                 break;
             }
 
-            // Command/ACK-phase failure: the receiver has not entered xmodem.receive() yet, so
-            // re-sending the command is safe.
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException ignored) {
-            }
+            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
+            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
+            resyncForCommandRetry();
             if (attempt < maxAttempts) {
                 try {
                     Thread.sleep(200);
@@ -1130,8 +1149,13 @@ public class SyncProtocol {
                     return true;
                 }
             } catch (IOException e) {
-                // lastFailure tracking is unnecessary here: sendBatch returns false rather than
-                // reporting a cause, and the detail is not surfaced.
+                // A peer cancel is terminal for the session and must propagate: returning false
+                // here would let the caller's per-file fallback re-send what the peer refused.
+                // For other failures, lastFailure tracking is unnecessary: sendBatch returns
+                // false rather than reporting a cause, and the detail is not surfaced.
+                if (e instanceof TransferCancelledException) {
+                    throw (TransferCancelledException) e;
+                }
             }
 
             if (xmodemPhase) {
@@ -1147,11 +1171,9 @@ public class SyncProtocol {
                 break;
             }
 
-            // Command/ACK-phase failure: safe to retry.
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException ignored) {
-            }
+            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
+            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
+            resyncForCommandRetry();
             if (attempt < maxAttempts) {
                 try {
                     Thread.sleep(200);
@@ -1291,6 +1313,10 @@ public class SyncProtocol {
                     return wasCompressed;
                 }
             } catch (IOException e) {
+                // A peer cancel is terminal for the session: never retry a refused transfer.
+                if (e instanceof TransferCancelledException) {
+                    throw (TransferCancelledException) e;
+                }
                 // Failed attempt - continue to cleanup and retry/cancel logic below
                 lastFailure = e;
             }
@@ -1308,12 +1334,9 @@ public class SyncProtocol {
                 break;
             }
 
-            // Command/ACK-phase failure: safe to retry.
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException e) {
-                // Ignore cleanup errors; we will surface the XMODEM error if all attempts fail
-            }
+            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
+            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
+            resyncForCommandRetry();
 
             if (attempt < maxAttempts) {
                 // Small backoff before retrying
@@ -1419,6 +1442,10 @@ public class SyncProtocol {
                     return wasCompressed;
                 }
             } catch (IOException e) {
+                // A peer cancel is terminal for the session: never retry a refused transfer.
+                if (e instanceof TransferCancelledException) {
+                    throw (TransferCancelledException) e;
+                }
                 lastFailure = e;
             }
 
@@ -1435,11 +1462,9 @@ public class SyncProtocol {
                 break;
             }
 
-            // Command/ACK-phase failure: safe to retry.
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException e) {
-            }
+            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
+            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
+            resyncForCommandRetry();
 
             if (attempt < maxAttempts) {
                 try {
@@ -2041,6 +2066,29 @@ public class SyncProtocol {
         sendCancelCommand();
     }
 
+    /**
+     * Recovery after a command/ACK handshake failure, before the command is re-sent. A failed
+     * handshake does not prove the receiver is still at the command level: it may have accepted the
+     * command and be blocked in {@code xmodem.receive()} with its ACK lost on the way back. A
+     * command re-sent into that state is swallowed as XMODEM payload, and the receiver's raw ACK
+     * byte in reply never completes a line for this side's newline-delimited parser — one lost ACK
+     * would otherwise cost every retry attempt. The bare CAN abort ejects a stuck receive; CANs are
+     * idempotent, so an idle peer is unaffected (its frame parser resyncs past the stray bytes).
+     * Also drains our own input so a torn frame does not poison the next read.
+     */
+    private void resyncForCommandRetry() {
+        try {
+            xmodem.sendCancelSignal();
+        } catch (IOException ignored) {
+            // The link is broken anyway; the retry (or its failure) surfaces it.
+        }
+        try {
+            serialPort.clearInputBuffer();
+        } catch (IOException ignored) {
+            // Stale bytes are also skipped by the frame resync on the next read.
+        }
+    }
+
     /** Send heartbeat to check connection */
     public void sendHeartbeat() throws IOException {
         sendCommand(CMD_HEARTBEAT);
@@ -2314,7 +2362,8 @@ public class SyncProtocol {
 
     /**
      * Wait for specific command. Handles HEARTBEAT and HEARTBEAT_ACK to keep liveness active during
-     * long waits. Throws IOException when CMD_ERROR is received.
+     * long waits. Throws IOException when CMD_ERROR is received, and TransferCancelledException
+     * when the peer sends CMD_CANCEL.
      */
     public Message waitForCommand(String expectedCommand) throws IOException {
         awaitingCommand.set(true);
@@ -2407,9 +2456,9 @@ public class SyncProtocol {
 
     /**
      * Applies the shared waitForCommand semantics to one received frame: returns it when it is the
-     * expected command, throws on CMD_ERROR and CMD_BASE_STALE (after delivering the notification),
-     * answers heartbeats, and stashes anything unrelated. Returns null when the frame was consumed
-     * rather than matched.
+     * expected command, throws on CMD_ERROR, CMD_CANCEL and CMD_BASE_STALE (the latter after
+     * delivering the notification), answers heartbeats, and stashes anything unrelated. Returns
+     * null when the frame was consumed rather than matched.
      */
     private Message dispatchWaitedCommand(String expectedCommand, Message msg) throws IOException {
         String cmd = msg.getCommand();
@@ -2419,6 +2468,12 @@ public class SyncProtocol {
         if (CMD_ERROR.equals(cmd)) {
             String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
             throw new IOException("Remote error: " + errMsg);
+        }
+        if (CMD_CANCEL.equals(cmd)) {
+            // The peer cancelled the session. Raise it here, not via the stash: a stashed
+            // cancel would only surface after this exchange timed out, and the retry logic in
+            // between would re-send transfers the peer just refused.
+            throw new TransferCancelledException("Remote cancelled sync");
         }
         if (CMD_BASE_STALE.equals(cmd)) {
             // The receiver rejected a delta/append against a base that is not its current

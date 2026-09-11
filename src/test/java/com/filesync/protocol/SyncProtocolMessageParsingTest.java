@@ -90,6 +90,38 @@ class SyncProtocolMessageParsingTest {
     }
 
     @Test
+    void parseMessage_resyncsPastLeadingCanGarbage() {
+        // sendTransferCancel's leading CAN bytes carry no newline, so newline-delimited reads
+        // merge them with the frame that follows; the frame must still parse, not be dropped.
+        SyncProtocol.Message cancel = SyncProtocol.parseMessage("\u0018\u0018[[SYNC:CANCEL]]");
+        assertNotNull(cancel);
+        assertEquals(SyncProtocol.CMD_CANCEL, cancel.getCommand());
+
+        SyncProtocol.Message ack = SyncProtocol.parseMessage("\u0018[[SYNC:ACK]]");
+        assertNotNull(ack);
+        assertEquals(SyncProtocol.CMD_ACK, ack.getCommand());
+    }
+
+    @Test
+    void parseMessage_stillDropsLinesWithoutACompleteFrame() {
+        assertNull(SyncProtocol.parseMessage("\u0018\u0018"), "bare CAN bytes are not a frame");
+        assertNull(SyncProtocol.parseMessage("noise [[SYNC:CANCEL]] trailing"));
+        assertNull(SyncProtocol.parseMessage("[[SYNC:CANCEL]\u0018]"));
+    }
+
+    @Test
+    void parseMessage_recoversLastCompleteFrameWhenTornPrefixMergesIntoLine() {
+        // A torn frame prefix (its newline lost mid-read) merges into the same line as the
+        // complete frame that follows. Parsing from the FIRST start marker would treat the
+        // merged garbage as one frame and swallow the real command; the last complete frame is
+        // the only recoverable one.
+        SyncProtocol.Message msg = SyncProtocol.parseMessage("[[SYNC:HEARTBEAT[[SYNC:ACK]]");
+        assertNotNull(msg);
+        assertEquals(SyncProtocol.CMD_ACK, msg.getCommand());
+        assertEquals(0, msg.getParams().length);
+    }
+
+    @Test
     void parseMessage_returnsNullForMissingEndMarker() {
         assertNull(SyncProtocol.parseMessage("[[SYNC:ACK"));
     }

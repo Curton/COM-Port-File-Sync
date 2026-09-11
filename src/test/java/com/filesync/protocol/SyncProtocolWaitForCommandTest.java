@@ -72,6 +72,25 @@ class SyncProtocolWaitForCommandTest {
     }
 
     @Test
+    void waitForCommandThrowsImmediatelyOnCancel() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        Message sharedText =
+                new Message(SyncProtocol.CMD_SHARED_TEXT, new String[] {"1", "aGVsbG8="});
+        protocol.feed(sharedText, new Message(SyncProtocol.CMD_CANCEL, new String[0]));
+
+        TransferCancelledException ex =
+                assertThrows(
+                        TransferCancelledException.class,
+                        () -> protocol.waitForCommand(SyncProtocol.CMD_ACK));
+
+        assertTrue(ex.getMessage().contains("cancelled"));
+        // Earlier async messages stay stashed; the cancel itself is raised, not stashed — a
+        // stashed cancel would let the retry logic resurrect a transfer the peer just refused.
+        assertSame(sharedText, protocol.pollStashedMessage());
+        assertNull(protocol.pollStashedMessage());
+    }
+
+    @Test
     void waitForCommandFiresBaseStaleHandlerAndThrows() {
         ScriptedProtocol protocol = new ScriptedProtocol();
         Message sharedText =
