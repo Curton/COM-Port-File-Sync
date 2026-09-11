@@ -324,12 +324,51 @@ class DeltaSyncCoordinatorTest {
     }
 
     @Test
-    void performSync_notBeneficialDelta_fallsBackToBatch() throws IOException {
+    void performSync_poorBlockMatchRatio_sendsFileDelta() throws IOException {
+        // Zip-container documents (docx/xlsx) reshuffle their compressed stream on any edit,
+        // so block matches stay sparse even for a small change: here only every 7th block
+        // matches, leaving the delta at ~86% of the full transfer. The absolute saving
+        // (~9 KB, nearly a second at 115200 baud) must still route to the delta path — a
+        // file this size fills a batch by itself, so no session is saved by falling back.
+        byte[] base = randomBytes(64 * 1024, 1);
+        byte[] source = base.clone();
+        int blockSize = SignatureUtil.chooseBlockSize(base.length);
+        for (int off = 0, block = 0; off < source.length; off += blockSize, block++) {
+            if (block % 7 != 0) {
+                source[off] ^= 0x5A;
+            }
+        }
+        Files.write(tempDir.resolve("big.bin"), source);
+
+        SignatureSet sigs =
+                new SignatureSet(List.of(SignatureUtil.compute("big.bin", base, blockSize)));
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
+        when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
+                .thenReturn(false);
+
+        SyncCoordinator coordinator = createCoordinator();
+        coordinator.setExecutor(null);
+        coordinator.startSyncWithPlan(planFor("big.bin", source.length));
+
+        verify(mockProtocol).requestDeltaSignatures(anyList());
+        verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol, never())
+                .sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        any(File.class));
+    }
+
+    @Test
+    void performSync_noBlockMatches_fallsBackToBatch() throws IOException {
         byte[] data = randomBytes(10 * 1024, 1);
         Files.write(tempDir.resolve("big.bin"), data);
 
-        // Signatures from completely unrelated bytes -> no block matches -> delta ~= full -> not
-        // beneficial.
+        // Signatures from completely unrelated bytes -> no block matches -> the delta is the
+        // full content plus opcode overhead, so the absolute saving is negative and the file
+        // falls back to the batch path.
         byte[] unrelated = randomBytes(10 * 1024, 99);
         SignatureSet sigs =
                 new SignatureSet(
@@ -372,10 +411,10 @@ class DeltaSyncCoordinatorTest {
     }
 
     @Test
-    void performSync_ratioBeneficialButSmallSaving_fallsBackToBatch() throws IOException {
-        // 48KB of repetitive text: the full transfer compresses to a few hundred bytes, so a
-        // block-matching delta passes the ratio test, but its absolute wire saving is far
-        // below the handshake cost of a dedicated session — the file must ride the batch.
+    void performSync_tinyAbsoluteSaving_fallsBackToBatch() throws IOException {
+        // 48KB of repetitive text: both the full transfer and the delta compress to a few
+        // hundred bytes, so the absolute wire saving stays far below the per-session fixed
+        // cost (MIN_DELTA_SAVINGS_BYTES) — the file must ride the batch.
         byte[] data =
                 "hello world\n".repeat(4000).getBytes(java.nio.charset.StandardCharsets.UTF_8);
         Files.write(tempDir.resolve("big.txt"), data);

@@ -29,22 +29,6 @@ public final class DeltaEncoder {
     private DeltaEncoder() {}
 
     /**
-     * A delta must save at least this fraction of the full compressed transfer to be worth sending.
-     */
-    public static final double BENEFICIAL_RATIO = 0.8;
-
-    /**
-     * Whether a delta of {@code deltaLen} bytes is worth sending instead of the full compressed
-     * transfer of {@code fullCompressedLen} bytes.
-     */
-    public static boolean isBeneficial(int deltaLen, int fullCompressedLen) {
-        if (fullCompressedLen <= 0) {
-            return false;
-        }
-        return deltaLen < fullCompressedLen * BENEFICIAL_RATIO;
-    }
-
-    /**
      * Encode the delta from the receiver's existing file (described by {@code sigs}) to the
      * sender's {@code source} bytes.
      */

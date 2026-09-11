@@ -1446,12 +1446,13 @@ public class SyncCoordinator {
                         long savedBytes =
                                 (long) fullCompressed.getData().length
                                         - deltaCompressed.getData().length;
-                        if (!DeltaEncoder.isBeneficial(
-                                        deltaCompressed.getData().length,
-                                        fullCompressed.getData().length)
-                                || savedBytes < MIN_DELTA_SAVINGS_BYTES) {
-                            // The saving does not pay for a dedicated XMODEM session: the
-                            // batch path amortizes one session across many files.
+                        if (savedBytes < MIN_DELTA_SAVINGS_BYTES) {
+                            // Absolute savings decide: the benchmarked per-session fixed cost
+                            // (com.filesync.bench.DeltaThresholdBenchmark) is a few KB of wire
+                            // time, and a file this size fills a batch by itself, so the batch
+                            // path pays a dedicated XMODEM session either way. A relative ratio
+                            // would reject savings of tens of KB on zip-container formats
+                            // (docx, xlsx), whose block matches are inherently sparse.
                             deltaFallback.add(fi);
                             eventBus.post(
                                     new SyncEvent.LogEvent(

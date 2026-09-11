@@ -241,12 +241,4 @@ class DeltaEncoderDecoderTest {
         delta[21] = (byte) 0xFF;
         assertThrows(IOException.class, () -> DeltaDecoder.decode(base, delta));
     }
-
-    @Test
-    void isBeneficialThreshold() {
-        assertTrue(DeltaEncoder.isBeneficial(100, 1000));
-        assertTrue(DeltaEncoder.isBeneficial(799, 1000));
-        assertTrue(!DeltaEncoder.isBeneficial(800, 1000));
-        assertTrue(!DeltaEncoder.isBeneficial(10, 0));
-    }
 }
