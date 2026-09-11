@@ -894,7 +894,7 @@ public class SyncPreviewRenderer {
             private Color typeColor(SyncPreviewOperationType type) {
                 return switch (type) {
                     case CONFLICT -> new Color(200, 0, 0);
-                    case NEW -> new Color(0, 128, 0);
+                    case NEW, CREATE_DIR -> new Color(0, 128, 0);
                     case MODIFIED -> new Color(0, 0, 180);
                     case APPEND -> new Color(0, 128, 128);
                     default -> null;
