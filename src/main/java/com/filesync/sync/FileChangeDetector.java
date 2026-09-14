@@ -489,10 +489,17 @@ public class FileChangeDetector {
                                             });
                             hashTasks.add(future);
                         } else {
-                            // Quick mode, non-text file: rely on size + lastModified only. Preserve
-                            // any previously cached checksum so a later full-mode pass can reuse
-                            // it.
-                            String hash = cachedInfo != null ? cachedInfo.getMd5() : null;
+                            // Quick mode, non-text file: rely on size + lastModified only. A
+                            // previously cached checksum is reused for a later full-mode pass, but
+                            // only while the cache still describes the bytes on disk. Carrying it
+                            // across a metadata change would publish a self-contradictory entry
+                            // (new size/lastModified, old checksum), and getChangedFiles treats two
+                            // non-null checksums as the sole authority — so the modified file would
+                            // compare equal to the peer's old copy and never be transferred.
+                            String hash =
+                                    canReuseHash(cachedInfo, size, lastModified)
+                                            ? cachedInfo.getMd5()
+                                            : null;
                             files.put(
                                     relativePath,
                                     new FileInfo(relativePath, size, lastModified, hash));

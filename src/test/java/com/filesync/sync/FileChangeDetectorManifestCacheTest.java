@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -235,6 +236,102 @@ class FileChangeDetectorManifestCacheTest {
         assertEquals(5L, info.getSize(), "Size comes from the walk attributes");
         assertEquals(
                 12345000L, info.getLastModified(), "LastModified comes from the walk attributes");
+    }
+
+    /**
+     * Regression for the Fast Mode stale-checksum leak: quick mode carries a cached MD5 over to
+     * binary entries, and used to do so without checking that the cache still describes the bytes
+     * on disk. The resulting manifest entry — fresh size/lastModified, stale MD5 — is
+     * self-contradictory, and {@link FileChangeDetector#getChangedFiles} takes two non-null
+     * checksums as the sole authority, so the edited binary looked unchanged and was never
+     * transferred. Only a metadata-consistent cache entry may supply a checksum.
+     */
+    @Test
+    void quickModeChangedBinaryDoesNotKeepStaleChecksum() throws IOException {
+        Path blob = syncFolder.resolve("archive.zip");
+        Files.write(blob, new byte[] {1, 2, 3, 4, 5, 6, 7, 8});
+        File cacheFile = newCacheFile();
+
+        // 1. A full pass (Fast Mode off) hashes the binary and caches its checksum.
+        FileChangeDetector.FileInfo full =
+                generateWithHasher(false, new CountingHasher(), cacheFile)
+                        .getFiles()
+                        .get("archive.zip");
+        assertNotNull(full.getMd5(), "Sanity: full mode caches a checksum for the binary");
+
+        // 2. The binary changes. The different size makes the edit metadata-visible, so no
+        // timestamp-granularity subtlety is involved.
+        Files.write(blob, new byte[] {9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9});
+
+        // 3. Fast Mode must drop the stale checksum, not relabel the new bytes with it.
+        FileChangeDetector.FileInfo quick =
+                generateWithHasher(true, new CountingHasher(), cacheFile)
+                        .getFiles()
+                        .get("archive.zip");
+
+        assertEquals(11L, quick.getSize(), "Fast mode records the new size");
+        assertNull(
+                quick.getMd5(),
+                "A modified binary must not carry the checksum of its previous content");
+    }
+
+    /**
+     * The user-visible consequence of the stale-checksum leak: after a full sync, switching to Fast
+     * Mode and editing a binary left the file absent from the preview. The manifest is compared
+     * against what the peer recorded at the last successful sync, and the edited file must come
+     * back as changed.
+     */
+    @Test
+    void quickModeChangedBinaryIsDetectedAsChanged() throws IOException {
+        Path blob = syncFolder.resolve("archive.zip");
+        Files.write(blob, new byte[] {1, 2, 3, 4, 5, 6, 7, 8});
+        File cacheFile = newCacheFile();
+
+        // What the peer learned from the last successful (full) sync.
+        FileChangeDetector.FileManifest peerManifest =
+                generateWithHasher(false, new CountingHasher(), cacheFile);
+
+        Files.write(blob, new byte[] {9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9});
+
+        FileChangeDetector.FileManifest localManifest =
+                generateWithHasher(true, new CountingHasher(), cacheFile);
+
+        List<String> changed =
+                FileChangeDetector.getChangedFiles(localManifest, peerManifest).stream()
+                        .map(FileChangeDetector.FileInfo::getPath)
+                        .toList();
+        assertEquals(
+                List.of("archive.zip"),
+                changed,
+                "Fast mode must still report the edited binary as changed");
+    }
+
+    /**
+     * Guards the intent behind the reuse in the quick-mode binary branch: an unchanged file must
+     * keep its cached checksum so a later full-mode pass can reuse it instead of re-reading the
+     * file.
+     */
+    @Test
+    void quickModeUnchangedBinaryKeepsCachedChecksum() throws IOException {
+        Files.write(syncFolder.resolve("archive.zip"), new byte[] {1, 2, 3, 4});
+        File cacheFile = newCacheFile();
+
+        String fullHash =
+                generateWithHasher(false, new CountingHasher(), cacheFile)
+                        .getFiles()
+                        .get("archive.zip")
+                        .getMd5();
+        assertNotNull(fullHash, "Sanity: full mode caches a checksum for the binary");
+
+        FileChangeDetector.FileInfo quick =
+                generateWithHasher(true, new CountingHasher(), cacheFile)
+                        .getFiles()
+                        .get("archive.zip");
+
+        assertEquals(
+                fullHash,
+                quick.getMd5(),
+                "An unchanged binary keeps its cached checksum for later full-mode reuse");
     }
 
     private File newCacheFile() {
