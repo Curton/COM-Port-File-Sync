@@ -2082,13 +2082,25 @@ public class SyncCoordinator {
         if (directory == null || !directory.exists() || !directory.isDirectory()) {
             return;
         }
-        if (directory.equals(syncFolder)) {
+        File current;
+        File syncRoot;
+        try {
+            current = directory.getCanonicalFile();
+            syncRoot = syncFolder.getCanonicalFile();
+        } catch (IOException e) {
+            // Cannot establish the containment boundary - delete nothing.
             return;
         }
-        String[] contents = directory.list();
+        // The sync folder is the boundary, not a cleanup candidate: never walk above it. Compared
+        // canonically so a differently-cased or symlinked sync folder still matches; without this
+        // the recursion would delete the sync folder itself and then continue upwards.
+        if (current.equals(syncRoot) || !current.toPath().startsWith(syncRoot.toPath())) {
+            return;
+        }
+        String[] contents = current.list();
         if (contents != null && contents.length == 0) {
-            File parent = directory.getParentFile();
-            if (directory.delete()) {
+            File parent = current.getParentFile();
+            if (current.delete()) {
                 cleanupEmptyDirectories(parent, syncFolder);
             }
         }
@@ -2162,16 +2174,44 @@ public class SyncCoordinator {
     }
 
     /**
-     * Resolve a remote-supplied relative path against a base directory, rejecting paths that
-     * attempt to escape the base directory via {@code ../} segments.
+     * Resolve a remote-supplied relative path against a base directory, rejecting anything that
+     * could reach outside it.
+     *
+     * <p>A substring test for {@code "../"} is not enough. The bare forms {@code ".."}, {@code
+     * "sub/.."}, {@code "."} and {@code ""} contain no {@code "../"} substring yet still resolve to
+     * the base directory or to its parent — so a remote {@code RMDIR} carrying one of them would
+     * recursively delete the folder that <em>contains</em> the sync folder, or the sync folder
+     * itself. The checks are layered: reject the forms our own manifest walk never produces (empty,
+     * absolute, drive-qualified, {@code .}/{@code ..} segments), then verify canonically that the
+     * result really is strictly inside the base.
+     *
+     * @return the canonical file, guaranteed to be strictly inside {@code baseDir}
      */
     static File resolveSafe(File baseDir, String relativePath) throws IOException {
-        String normalized = relativePath.replace('\\', '/');
-        if (normalized.startsWith("/")
-                || normalized.contains("../")
-                || normalized.contains("..\\")) {
+        if (relativePath == null || relativePath.isEmpty()) {
+            throw new IOException("Path traversal rejected: empty path");
+        }
+        // Drive-qualified ("C:foo"), NTFS alternate-data-stream ("file.txt:stream") and UNC forms
+        // are never produced by the manifest walk and must not be joined onto the base.
+        if (relativePath.indexOf(':') >= 0) {
             throw new IOException("Path traversal rejected: " + relativePath);
         }
-        return new File(baseDir, relativePath);
+        String normalized = relativePath.replace('\\', '/');
+        if (normalized.startsWith("/")) {
+            throw new IOException("Path traversal rejected: " + relativePath);
+        }
+        for (String segment : normalized.split("/")) {
+            if (segment.equals(".") || segment.equals("..")) {
+                throw new IOException("Path traversal rejected: " + relativePath);
+            }
+        }
+        File base = baseDir.getCanonicalFile();
+        File resolved = new File(base, normalized).getCanonicalFile();
+        // Strictly inside: a path that canonicalizes onto the base itself names the sync root,
+        // which no remote-supplied path may address.
+        if (resolved.equals(base) || !resolved.toPath().startsWith(base.toPath())) {
+            throw new IOException("Path traversal rejected: " + relativePath);
+        }
+        return resolved;
     }
 }

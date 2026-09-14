@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -115,6 +116,25 @@ class SyncCoordinatorTest {
                 connectionAlive != null ? connectionAlive : () -> true,
                 isSender != null ? isSender : () -> true,
                 roleNegotiated != null ? roleNegotiated : () -> true,
+                pendingWriteService,
+                syncing,
+                () -> syncIdleCalls.incrementAndGet(),
+                () -> syncBoundaryCalls.incrementAndGet(),
+                () -> heartbeatTouches.incrementAndGet());
+    }
+
+    /** Same as {@link #createCoordinator} but pointed at an explicit sync folder. */
+    private SyncCoordinator createCoordinatorAt(File folder) {
+        return new SyncCoordinator(
+                mockProtocol,
+                mockEventBus,
+                () -> folder,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                () -> true,
                 pendingWriteService,
                 syncing,
                 () -> syncIdleCalls.incrementAndGet(),
@@ -565,6 +585,122 @@ class SyncCoordinatorTest {
         coordinator.handleRmdir(relativePath);
 
         assertFalse(Files.exists(parentDir));
+    }
+
+    // ========== resolveSafe: path traversal ==========
+
+    /**
+     * A remote-supplied path may not resolve outside the sync folder. The bare {@code ..} case is
+     * the dangerous one: it collapses to the sync folder's *parent*, so a remote RMDIR would wipe
+     * the directory that contains the sync folder.
+     */
+    @Test
+    void resolveSafe_rejectsPathsThatEscapeTheSyncFolder() {
+        for (String hostile :
+                new String[] {"..", "sub/..", "sub/../..", "../x", "..\\x", "..//x"}) {
+            assertThrows(
+                    IOException.class,
+                    () -> SyncCoordinator.resolveSafe(syncFolder, hostile),
+                    "expected rejection for [" + hostile + "]");
+        }
+    }
+
+    /**
+     * Paths that collapse onto the sync folder itself are just as unusable as escaping ones — an
+     * empty path or {@code sub/..} would let a remote RMDIR delete the whole sync folder.
+     */
+    @Test
+    void resolveSafe_rejectsPathsThatCollapseToTheSyncFolderItself() {
+        for (String hostile : new String[] {"", ".", "./"}) {
+            assertThrows(
+                    IOException.class,
+                    () -> SyncCoordinator.resolveSafe(syncFolder, hostile),
+                    "expected rejection for [" + hostile + "]");
+        }
+    }
+
+    /** Absolute and drive-qualified paths must never be joined onto the sync folder. */
+    @Test
+    void resolveSafe_rejectsAbsoluteAndDriveQualifiedPaths() {
+        for (String hostile :
+                new String[] {"/abs", "/", "C:/Windows", "C:\\Windows", "\\\\server\\share\\x"}) {
+            assertThrows(
+                    IOException.class,
+                    () -> SyncCoordinator.resolveSafe(syncFolder, hostile),
+                    "expected rejection for [" + hostile + "]");
+        }
+    }
+
+    /** Ordinary relative paths — including names that merely *contain* dots — stay allowed. */
+    @Test
+    void resolveSafe_allowsOrdinaryRelativePaths() throws IOException {
+        for (String ok :
+                new String[] {"file.txt", "sub", "sub/file.txt", "a..b", "sub..dir/a..b"}) {
+            File resolved = SyncCoordinator.resolveSafe(syncFolder, ok);
+            assertTrue(
+                    resolved.getCanonicalFile()
+                            .toPath()
+                            .startsWith(syncFolder.getCanonicalFile().toPath()),
+                    "expected [" + ok + "] to stay inside the sync folder");
+        }
+    }
+
+    // ========== handleRmdir: traversal must not reach outside the sync folder ==========
+
+    /**
+     * Regression: {@code RMDIR ..} used to delete the parent of the sync folder (recursively), and
+     * {@code RMDIR ""} used to delete the sync folder itself.
+     */
+    @Test
+    void handleRmdir_refusesToDeleteTheParentOfTheSyncFolder() throws IOException {
+        Path outer = tempDir.resolve("outer");
+        Path nestedSyncFolder = outer.resolve("syncFolder");
+        Files.createDirectories(nestedSyncFolder);
+        Path sentinel = outer.resolve("sentinel.txt");
+        Files.writeString(sentinel, "must survive");
+        SyncCoordinator coordinator = createCoordinatorAt(nestedSyncFolder.toFile());
+
+        coordinator.handleRmdir("..");
+
+        assertTrue(Files.exists(sentinel), "sentinel outside the sync folder must survive");
+        assertTrue(Files.exists(nestedSyncFolder), "sync folder itself must survive");
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
+    }
+
+    @Test
+    void handleRmdir_refusesToDeleteTheSyncFolderItself() throws IOException {
+        Path nestedSyncFolder = tempDir.resolve("syncFolder");
+        Files.createDirectories(nestedSyncFolder);
+        Files.writeString(nestedSyncFolder.resolve("keep.txt"), "must survive");
+        SyncCoordinator coordinator = createCoordinatorAt(nestedSyncFolder.toFile());
+
+        coordinator.handleRmdir("");
+
+        assertTrue(Files.exists(nestedSyncFolder), "sync folder itself must survive");
+        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
+    }
+
+    /**
+     * The empty-directory cleanup that follows a delete walks upwards, so it must stop at the sync
+     * folder even when the configured path differs in case from the on-disk one — a case-sensitive
+     * comparison there would delete the sync folder and keep climbing. Skipped on case-sensitive
+     * filesystems, where the premise does not hold.
+     */
+    @Test
+    void cleanupAfterDelete_stopsAtSyncFolder_whenConfiguredPathCaseDiffers() throws IOException {
+        Path nestedSyncFolder = tempDir.resolve("syncFolder");
+        Files.createDirectories(nestedSyncFolder);
+        Files.writeString(nestedSyncFolder.resolve("only-file.txt"), "content");
+        File differentlyCased = new File(nestedSyncFolder.toString().toUpperCase());
+        assumeTrue(
+                differentlyCased.isDirectory(),
+                "case-insensitive filesystem required for this scenario");
+        SyncCoordinator coordinator = createCoordinatorAt(differentlyCased);
+
+        coordinator.handleFileDelete("only-file.txt");
+
+        assertTrue(
+                Files.exists(nestedSyncFolder), "sync folder itself must survive the cleanup walk");
     }
 
     // ========== Medium tests: handleFileDelete ==========
