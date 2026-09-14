@@ -886,7 +886,8 @@ public class FileChangeDetector {
             } else {
                 byte[] outBuffer = new byte[HASH_BUFFER_SIZE];
                 boolean pendingCR = false;
-                // Feed in HASH_BUFFER_SIZE chunks so the normalized output always fits outBuffer.
+                // Feed in HASH_BUFFER_SIZE chunks; updateNormalized splits them internally so the
+                // normalized output always fits outBuffer.
                 for (int off = 0; off < len; off += HASH_BUFFER_SIZE) {
                     int chunkLen = Math.min(HASH_BUFFER_SIZE, len - off);
                     pendingCR = updateNormalized(md, data, off, chunkLen, outBuffer, pendingCR);
@@ -1044,10 +1045,40 @@ public class FileChangeDetector {
     /**
      * Feed {@code chunk[off..off+len)} into {@code md} with line-ending normalization: CRLF, a lone
      * CR, and a standalone LF all map to a single LF. Reuses {@code outBuffer} for normalized
-     * output (never larger than {@code len}). Returns the updated pending-CR state so callers can
-     * carry it across chunk boundaries.
+     * output. Returns the updated pending-CR state so callers can carry it across chunk boundaries.
+     *
+     * <p>A lone CR carried in from the previous chunk is flushed as an extra LF *ahead of* this
+     * chunk's own output, so a chunk of {@code outBuffer.length} input bytes can need one byte more
+     * than the buffer holds. The input is therefore fed in sub-chunks of at most {@code
+     * outBuffer.length - 1} bytes, which makes the buffer a hard bound instead of a convention every
+     * caller has to uphold — sizing the buffer at exactly one read and assuming that was enough is
+     * what crashed on a file with a lone CR on a read boundary. Splitting is invisible in the
+     * digest: {@link MessageDigest#update} is order-preserving and the pending-CR state is carried
+     * across the split.
      */
     private static boolean updateNormalized(
+            MessageDigest md, byte[] chunk, int off, int len, byte[] outBuffer, boolean pendingCR) {
+        int maxSubChunk = outBuffer.length - 1;
+        int end = off + len;
+        for (int pos = off; pos < end; pos += maxSubChunk) {
+            pendingCR =
+                    normalizeChunk(
+                            md,
+                            chunk,
+                            pos,
+                            Math.min(maxSubChunk, end - pos),
+                            outBuffer,
+                            pendingCR);
+        }
+        return pendingCR;
+    }
+
+    /**
+     * Normalize one sub-chunk of at most {@code outBuffer.length - 1} input bytes into {@code
+     * outBuffer} and feed it to {@code md}. Output is at most {@code len + 1} bytes: one LF for a CR
+     * pending from the previous chunk, then at most one byte per input byte.
+     */
+    private static boolean normalizeChunk(
             MessageDigest md, byte[] chunk, int off, int len, byte[] outBuffer, boolean pendingCR) {
         int outLen = 0;
         for (int i = off; i < off + len; i++) {

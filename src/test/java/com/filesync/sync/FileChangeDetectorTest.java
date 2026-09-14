@@ -14,10 +14,13 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -519,9 +522,12 @@ class FileChangeDetectorTest {
 
     @Test
     void hashFilePrefix_matchesArrayImplementationForTextPrefixes() throws IOException {
-        // "\r\na" triples put a lone CR exactly at the streaming sample boundary (4095) and at
-        // the array implementation's chunk boundary (16383), and several prefix lengths below
-        // cut right after a CR, exercising the pending-CR carry and the trailing-CR flush.
+        // "\r\na" triples put a CR every 3 bytes, so 4095 and 16383 are CRs — but each is followed by
+        // an LF, i.e. a CRLF pair straddling the streaming sample boundary (4095) and the array
+        // implementation's chunk boundary (16383), which exercises carrying the pending-CR state
+        // across a boundary. Several prefix lengths below also cut right after a CR, covering the
+        // trailing-CR flush. Lone CRs (where the flush adds a byte) are covered separately by
+        // textHashing_handlesLoneCrAtEveryChunkBoundary.
         byte[] data = "\r\na".repeat(6000).getBytes(StandardCharsets.UTF_8);
         File file = tempDir.resolve("crlf.log").toFile();
         Files.write(file.toPath(), data);
@@ -564,5 +570,62 @@ class FileChangeDetectorTest {
         File file = tempDir.resolve("short.log").toFile();
         Files.write(file.toPath(), "hello".getBytes(StandardCharsets.UTF_8));
         assertThrows(EOFException.class, () -> FileChangeDetector.hashFilePrefix(file, 6));
+    }
+
+    @Test
+    void textHashing_handlesLoneCrAtEveryChunkBoundary() throws IOException {
+        // A lone CR that sits on a read boundary is flushed as one extra LF ahead of the *next*
+        // chunk's output, so normalizing a chunk of HASH_BUFFER_SIZE input bytes can need
+        // HASH_BUFFER_SIZE + 1 output bytes. Each offset below parks that lone CR on a boundary of
+        // a different hashing path, and is followed by a full chunk:
+        //   4095, 12287 -> calculateMD5 / hashFilePrefix (4096-byte sample, then 8192-byte reads)
+        //   8191, 16383 -> calculateMD5OfPrefix (8192-byte chunks starting at offset 0)
+        // Writing the extra LF at index HASH_BUFFER_SIZE is what produced "Index 8192 out of bounds
+        // for length 8192" and aborted manifest generation for the whole folder.
+        int length = 24576;
+        for (int loneCrOffset : new int[] {4095, 8191, 12287, 16383}) {
+            byte[] data = new byte[length];
+            Arrays.fill(data, (byte) 'a');
+            data[loneCrOffset] = (byte) '\r';
+            data[loneCrOffset + 1] = (byte) 'b'; // not LF, so the CR stays lone
+
+            String expected = normalizedMd5Hex(data, length);
+            String context = " with a lone CR at offset " + loneCrOffset;
+            File file = tempDir.resolve("lone-cr-" + loneCrOffset + ".txt").toFile();
+            Files.write(file.toPath(), data);
+
+            assertEquals(expected, FileChangeDetector.calculateMD5(file), "calculateMD5" + context);
+            assertEquals(
+                    expected,
+                    FileChangeDetector.calculateMD5OfPrefix(data, length),
+                    "calculateMD5OfPrefix" + context);
+            assertEquals(
+                    expected,
+                    FileChangeDetector.hashFilePrefix(file, length).manifestMd5(),
+                    "hashFilePrefix" + context);
+        }
+    }
+
+    /**
+     * Independent oracle for the documented normalization (CRLF and a lone CR both collapse to one
+     * LF), deliberately sharing no code with the implementation under test.
+     */
+    private static String normalizedMd5Hex(byte[] data, int length) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            for (int i = 0; i < length; i++) {
+                if (data[i] == (byte) '\r') {
+                    if (i + 1 < length && data[i + 1] == (byte) '\n') {
+                        i++;
+                    }
+                    md.update((byte) '\n');
+                } else {
+                    md.update(data[i]);
+                }
+            }
+            return HexFormat.of().formatHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("MD5 algorithm not available", e);
+        }
     }
 }
