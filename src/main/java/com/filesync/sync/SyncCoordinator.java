@@ -392,6 +392,26 @@ public class SyncCoordinator {
                                 localManifest, remoteManifest)
                         : new ArrayList<>();
 
+        // A receiver whose filesystem cannot tell two spellings of a name apart holds one file, not
+        // two, so a path that only differs from ours by letter case is deliberately neither deleted
+        // there nor re-sent on every sync (see FileChangeDetector.getFilesToDelete). Report it, or
+        // the preview looks like it silently dropped a rename the user just made.
+        List<String> caseOnlyRenames =
+                FileChangeDetector.findCaseOnlyRenamePaths(localManifest, remoteManifest);
+        if (!caseOnlyRenames.isEmpty()) {
+            String examples =
+                    String.join(", ", caseOnlyRenames.stream().limit(3).toList())
+                            + (caseOnlyRenames.size() > 3 ? ", ..." : "");
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            caseOnlyRenames.size()
+                                    + " path(s) differ from the receiver only by letter case (e.g. "
+                                    + examples
+                                    + "): its filesystem cannot hold both spellings, so the"
+                                    + " receiver keeps the spelling it has and nothing is"
+                                    + " deleted"));
+        }
+
         long totalBytesToTransfer =
                 filesToSync.stream().mapToLong(FileChangeDetector.FileInfo::getSize).sum();
 

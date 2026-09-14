@@ -22,9 +22,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -280,6 +282,10 @@ public class FileChangeDetector {
         }
         final GitignoreParser parser = gitignoreParser;
 
+        // Probed up front, while the probe file is still the only thing the folder holds: the walk
+        // below must never see it.
+        boolean caseSensitive = isCaseSensitiveFileSystem(directory);
+
         Map<String, FileInfo> files = new ConcurrentHashMap<>();
         Set<String> directories = ConcurrentHashMap.newKeySet();
         Set<String> emptyDirectories = ConcurrentHashMap.newKeySet();
@@ -326,6 +332,12 @@ public class FileChangeDetector {
                                         // Skip large-transfer staging files (partial disk-write);
                                         // they are protocol state, not user content
                                         if (isPartialStagePath(relativePath)) {
+                                            return false;
+                                        }
+
+                                        // Skip a case-sensitivity probe the delete of which a
+                                        // scanner refused
+                                        if (isCaseProbePath(relativePath)) {
                                             return false;
                                         }
 
@@ -406,6 +418,11 @@ public class FileChangeDetector {
                         // Skip large-transfer staging files (partial disk-write); they are
                         // protocol state, not user content
                         if (isPartialStagePath(relativePath)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        // Skip a case-sensitivity probe the delete of which a scanner refused
+                        if (isCaseProbePath(relativePath)) {
                             return FileVisitResult.CONTINUE;
                         }
 
@@ -528,7 +545,7 @@ public class FileChangeDetector {
             }
         }
 
-        FileManifest manifest = new FileManifest(files, emptyDirectories);
+        FileManifest manifest = new FileManifest(files, emptyDirectories, caseSensitive);
         if (resolvedOptions.isPersistResult()) {
             persistManifest(resolvedOptions.getPersistedManifestFile(), manifest);
         }
@@ -609,11 +626,26 @@ public class FileChangeDetector {
      */
     public static List<FileInfo> getChangedFiles(FileManifest source, FileManifest target) {
         List<FileInfo> changedFiles = new ArrayList<>();
+        // A receiver whose filesystem ignores letter case resolves "foo.txt" to the entry it stores
+        // as "Foo.txt", so such a path is not missing there and has to be compared rather than
+        // transferred as a brand-new file — otherwise every sync re-sends it forever. The index is
+        // built on the first path the target does not have verbatim, the only case that needs it,
+        // so a folder with nothing new for the receiver never pays for the fold.
+        Map<String, String> targetPathsByFold = null;
 
         for (Map.Entry<String, FileInfo> entry : source.getFiles().entrySet()) {
             String path = entry.getKey();
             FileInfo sourceInfo = entry.getValue();
             FileInfo targetInfo = target.getFiles().get(path);
+            if (targetInfo == null && !target.isCaseSensitive()) {
+                if (targetPathsByFold == null) {
+                    targetPathsByFold = caseFoldIndex(target.getFiles().keySet());
+                }
+                String targetSpelling = targetPathsByFold.get(foldCase(path));
+                if (targetSpelling != null) {
+                    targetInfo = target.getFiles().get(targetSpelling);
+                }
+            }
 
             if (targetInfo == null) {
                 // File doesn't exist in target
@@ -651,18 +683,58 @@ public class FileChangeDetector {
     /**
      * Compare two manifests and return files that need to be deleted from target Returns files that
      * exist in target but not in source (for strict sync mode)
+     *
+     * <p>A target path the source holds under a different spelling is not a deletion when the
+     * target's filesystem ignores letter case: "Foo.txt" and "foo.txt" are one file there, so the
+     * sender still has it. Deleting it would destroy the file this very sync writes — transfers run
+     * before deletes — leaving the receiver without it while the sender keeps it, so the next sync
+     * repeats the transfer and the delete for good. On a case-sensitive target the two spellings
+     * are two entries and the rename is still mirrored as a transfer plus a delete.
      */
     public static List<String> getFilesToDelete(FileManifest source, FileManifest target) {
         List<String> filesToDelete = new ArrayList<>();
+        Map<String, String> sourcePathsByFold =
+                target.isCaseSensitive() ? null : caseFoldIndex(source.getFiles().keySet());
 
         for (String path : target.getFiles().keySet()) {
-            if (!source.getFiles().containsKey(path)) {
-                // File exists in target but not in source - should be deleted
-                filesToDelete.add(path);
+            if (source.getFiles().containsKey(path)) {
+                continue;
             }
+            if (sourcePathsByFold != null && sourcePathsByFold.containsKey(foldCase(path))) {
+                // Differs from a path the source still has only by letter case - not obsolete
+                continue;
+            }
+            // File exists in target but not in source - should be deleted
+            filesToDelete.add(path);
         }
 
         return filesToDelete;
+    }
+
+    /**
+     * Sender-side paths that the target also holds, under a different spelling of the same letters.
+     *
+     * <p>Empty when the target's filesystem is case-sensitive, where the two spellings are two
+     * entries. Such a path is a rename that this sync deliberately does not carry out (see {@link
+     * #getFilesToDelete}), and only exists so the preview can say so instead of looking like it
+     * missed the rename.
+     */
+    public static List<String> findCaseOnlyRenamePaths(FileManifest source, FileManifest target) {
+        List<String> caseOnlyRenames = new ArrayList<>();
+        if (target.isCaseSensitive()) {
+            return caseOnlyRenames;
+        }
+        Map<String, String> targetPathsByFold = caseFoldIndex(target.getFiles().keySet());
+        for (String path : source.getFiles().keySet()) {
+            if (target.getFiles().containsKey(path)) {
+                continue;
+            }
+            if (targetPathsByFold.containsKey(foldCase(path))) {
+                caseOnlyRenames.add(path);
+            }
+        }
+        Collections.sort(caseOnlyRenames);
+        return caseOnlyRenames;
     }
 
     /**
@@ -672,12 +744,15 @@ public class FileChangeDetector {
     public static List<String> getEmptyDirectoriesToCreate(
             FileManifest source, FileManifest target) {
         List<String> dirsToCreate = new ArrayList<>();
+        boolean caseInsensitive = !target.isCaseSensitive();
 
         for (String dir : source.getEmptyDirectories()) {
             // A directory that merely holds files is absent from the target's emptyDirectories
             // set yet still exists there, so existence must be checked against the file entries
             // too; otherwise the preview plans CREATE_DIR rows for directories already present.
-            if (!directoryExistsInManifest(dir, target)) {
+            // On a case-insensitive target a differently-spelled directory is that same directory,
+            // so there is nothing to create either.
+            if (!directoryExistsInManifest(dir, target, caseInsensitive)) {
                 dirsToCreate.add(dir);
             }
         }
@@ -692,6 +767,7 @@ public class FileChangeDetector {
     public static List<String> getEmptyDirectoriesToDelete(
             FileManifest source, FileManifest target) {
         List<String> dirsToDelete = new ArrayList<>();
+        boolean caseInsensitive = !target.isCaseSensitive();
 
         for (String dir : target.getEmptyDirectories()) {
             // A source directory that gained files since the last sync leaves the source's
@@ -699,8 +775,11 @@ public class FileChangeDetector {
             // schedule its deletion on the receiver even though this very sync transfers files
             // into it — and rmdir is recursive, so it would wipe the fresh files right after
             // they landed. Only a directory absent from the source's file entries and
-            // empty-directory entries alike is really gone.
-            if (!directoryExistsInManifest(dir, source)) {
+            // empty-directory entries alike is really gone. A differently-spelled source
+            // directory counts as that same directory on a case-insensitive target, which makes
+            // this check the difference between the rename and a recursive delete of the files
+            // the sender is putting there.
+            if (!directoryExistsInManifest(dir, source, caseInsensitive)) {
                 // Directory exists in target but not in source - should be deleted
                 dirsToDelete.add(dir);
             }
@@ -1046,6 +1125,18 @@ public class FileChangeDetector {
     }
 
     /**
+     * Whether a relative path is this class's own case-sensitivity probe file. The probe is deleted
+     * immediately after it is created, but a folder being scanned by an indexer or antivirus can
+     * have that delete refused; a leftover probe must never be published to the peer as user
+     * content.
+     */
+    private static boolean isCaseProbePath(String relativePath) {
+        int slash = relativePath.lastIndexOf('/');
+        String name = slash >= 0 ? relativePath.substring(slash + 1) : relativePath;
+        return name.startsWith(CASE_PROBE_PREFIX);
+    }
+
+    /**
      * Determine whether a path is hidden using Windows DOS attributes. Reads through symbolic
      * links, so it is used for walk entries whose manifest metadata also follows the target
      * (non-regular files); regular files use {@link #isHidden(BasicFileAttributes)} instead. This
@@ -1063,6 +1154,52 @@ public class FileChangeDetector {
         }
     }
 
+    /** Prefix of the throwaway file created to probe how a folder treats letter case. */
+    static final String CASE_PROBE_PREFIX = ".filesync-case-probe-";
+
+    /**
+     * Whether {@code directory} lives on a filesystem that tells paths apart by letter case.
+     *
+     * <p>Probed rather than guessed from the OS name: a file is created under a mixed-case name and
+     * a differently-cased spelling of that same name is then looked up. On a case-insensitive
+     * filesystem (Windows, macOS default volumes, most vfat mounts) that lookup resolves to the
+     * probe — the two spellings are one file; on a case-sensitive one it resolves to nothing. A
+     * case-sensitive folder can perfectly well live inside a case-insensitive OS (case-sensitive
+     * volumes, SMB mounts, WSL interiors), so the OS is not the authority here.
+     *
+     * <p>The probe file is removed before returning, and it is created before the manifest walk
+     * starts. {@link #isCaseProbePath} keeps it out of a manifest even if the delete is refused.
+     *
+     * <p>If the probe cannot run at all (read-only folder, permission denied, unwritable medium)
+     * the OS default answers instead.
+     */
+    static boolean isCaseSensitiveFileSystem(File directory) {
+        if (directory == null) {
+            return defaultCaseSensitivityByOs();
+        }
+        String token = Long.toHexString(System.nanoTime());
+        File probe = new File(directory, CASE_PROBE_PREFIX + token + "Ab");
+        File alternateSpelling = new File(directory, CASE_PROBE_PREFIX + token + "ab");
+        try {
+            if (!probe.createNewFile()) {
+                return defaultCaseSensitivityByOs();
+            }
+            try {
+                return !alternateSpelling.exists();
+            } finally {
+                probe.delete();
+            }
+        } catch (IOException | SecurityException e) {
+            return defaultCaseSensitivityByOs();
+        }
+    }
+
+    /** Fallback answer for {@link #isCaseSensitiveFileSystem} when the folder cannot be probed. */
+    private static boolean defaultCaseSensitivityByOs() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return !(osName.contains("win") || osName.contains("mac"));
+    }
+
     private static void markParentHasChild(
             String relativePath, Map<String, Boolean> dirHasChildren) {
         int lastSeparator = relativePath.lastIndexOf('/');
@@ -1076,19 +1213,48 @@ public class FileChangeDetector {
      * directories explicitly — a directory that currently holds files exists solely through its
      * file entries — so both must be consulted before treating a directory as absent.
      */
-    private static boolean directoryExistsInManifest(String dir, FileManifest manifest) {
-        String childPrefix = dir + "/";
+    private static boolean directoryExistsInManifest(
+            String dir, FileManifest manifest, boolean caseInsensitive) {
+        String resolvedDir = resolveForComparison(dir, caseInsensitive);
+        String resolvedChildPrefix = resolveForComparison(dir + "/", caseInsensitive);
         for (String path : manifest.getFiles().keySet()) {
-            if (path.startsWith(childPrefix)) {
+            if (resolveForComparison(path, caseInsensitive).startsWith(resolvedChildPrefix)) {
                 return true;
             }
         }
         for (String path : manifest.getEmptyDirectories()) {
-            if (path.equals(dir) || path.startsWith(childPrefix)) {
+            String resolved = resolveForComparison(path, caseInsensitive);
+            if (resolved.equals(resolvedDir) || resolved.startsWith(resolvedChildPrefix)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * The spelling a path is judged under: itself, or its case-folded form when the filesystem
+     * being compared against ignores letter case.
+     */
+    private static String resolveForComparison(String path, boolean caseInsensitive) {
+        return caseInsensitive ? foldCase(path) : path;
+    }
+
+    /** The spelling a case-insensitive filesystem resolves a path under, for lookups. */
+    private static String foldCase(String path) {
+        return path.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Index of {@code paths} by their case-folded spelling, so a path can be looked up the way a
+     * case-insensitive filesystem resolves it. Built only for the comparisons that need it, since
+     * the fold of every path is not free on a large folder.
+     */
+    private static Map<String, String> caseFoldIndex(Collection<String> paths) {
+        Map<String, String> byFold = new HashMap<>(paths.size());
+        for (String path : paths) {
+            byFold.putIfAbsent(foldCase(path), path);
+        }
+        return byFold;
     }
 
     private static boolean canReuseHash(FileInfo cachedInfo, long size, long lastModified) {
@@ -1233,6 +1399,10 @@ public class FileChangeDetector {
          * change (e.g. line-ending normalization). Manifests with a different (or missing) version
          * are discarded by {@link #loadPersistedManifest(File)} to avoid reusing stale,
          * incompatible hashes as a cache.
+         *
+         * <p>Not bumped for the additive {@code caseSensitive} field: it describes the folder, is
+         * recomputed by every generation, and is never read back out of a persisted cache (only the
+         * file entries are), so a cache written by the previous format stays valid.
          */
         public static final int CURRENT_VERSION = 2;
 
@@ -1240,27 +1410,51 @@ public class FileChangeDetector {
         private final java.util.Set<String> emptyDirectories;
         private final int schemaVersion;
 
+        /**
+         * Whether the filesystem this manifest was generated on tells paths apart by letter case.
+         *
+         * <p>It travels with the manifest because the peer needs it to interpret this side's paths:
+         * on a case-insensitive filesystem {@code Foo.txt} and {@code foo.txt} are one file, so a
+         * path that only differs in case from one of ours is not missing here — and deleting it
+         * here would delete the file the peer is currently writing. See {@link
+         * FileChangeDetector#getFilesToDelete} and {@link FileChangeDetector#getChangedFiles}.
+         *
+         * <p>{@code false} is the fail-safe answer for an unknown filesystem, and it is what a
+         * manifest built in memory or deserialized from a payload without the field reports.
+         * Assuming case sensitivity instead would turn a case-only rename into a delete of live
+         * data, while assuming case insensitivity merely leaves a path alone.
+         */
+        private final boolean caseSensitive;
+
         public FileManifest() {
-            this.files = new HashMap<>();
-            this.emptyDirectories = new java.util.HashSet<>();
-            this.schemaVersion = CURRENT_VERSION;
+            this(new HashMap<>(), new java.util.HashSet<>(), false);
         }
 
         public FileManifest(Map<String, FileInfo> files) {
-            this.files = files;
-            this.emptyDirectories = new java.util.HashSet<>();
-            this.schemaVersion = CURRENT_VERSION;
+            this(files, new java.util.HashSet<>(), false);
         }
 
         public FileManifest(Map<String, FileInfo> files, java.util.Set<String> emptyDirectories) {
+            this(files, emptyDirectories, false);
+        }
+
+        public FileManifest(
+                Map<String, FileInfo> files,
+                java.util.Set<String> emptyDirectories,
+                boolean caseSensitive) {
             this.files = files;
             this.emptyDirectories =
                     emptyDirectories != null ? emptyDirectories : new java.util.HashSet<>();
             this.schemaVersion = CURRENT_VERSION;
+            this.caseSensitive = caseSensitive;
         }
 
         public int getSchemaVersion() {
             return schemaVersion;
+        }
+
+        public boolean isCaseSensitive() {
+            return caseSensitive;
         }
 
         public Map<String, FileInfo> getFiles() {
