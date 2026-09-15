@@ -38,21 +38,25 @@ class TextDiffUtilTest {
 
     @Test
     void testAddedLines() {
-        String local = "line1\nline2";
-        String remote = "line1\nline2\nline3";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
+        DiffResult result = TextDiffUtil.computeDiff("line1\nline2", "line1\nline2\nline3");
         assertTrue(result.hasChanges());
         assertEquals(1, result.getAddedCount());
         assertEquals(0, result.getRemovedCount());
+
+        result = TextDiffUtil.computeDiff("", "new line");
+        assertTrue(result.hasChanges());
+        assertEquals(1, result.getAddedCount());
     }
 
     @Test
     void testRemovedLines() {
-        String local = "line1\nline2\nline3";
-        String remote = "line1\nline3";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
+        DiffResult result = TextDiffUtil.computeDiff("line1\nline2\nline3", "line1\nline3");
         assertTrue(result.hasChanges());
         assertEquals(0, result.getAddedCount());
+        assertEquals(1, result.getRemovedCount());
+
+        result = TextDiffUtil.computeDiff("old line", "");
+        assertTrue(result.hasChanges());
         assertEquals(1, result.getRemovedCount());
     }
 
@@ -101,24 +105,29 @@ class TextDiffUtilTest {
     }
 
     @Test
-    void testHasMeaningfulDifferences_WhitespaceOnly() {
-        String local = "hello world  ";
-        String remote = "hello world";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-    }
-
-    @Test
-    void testHasMeaningfulDifferences_TrailingSpaces() {
-        String local = "line1  \nline2   \n";
-        String remote = "line1\nline2\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-    }
-
-    @Test
-    void testHasMeaningfulDifferences_BlankLines() {
-        String local = "hello\n\n\nworld";
-        String remote = "hello\nworld";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+    void testHasMeaningfulDifferences_ignoresWhitespaceOnlyChanges() {
+        Object[][] cases = {
+            // Whitespace-only differences must not count as meaningful changes.
+            {"hello world  ", "hello world", false}, // trailing spaces on one side
+            {"line1  \nline2   \n", "line1\nline2\n", false},
+            {"hello\n\n\nworld", "hello\nworld", false}, // blank lines
+            {"hello  \nworld   \n", "hello  \nworld   \n", false}, // identical after normalization
+            {"\n\n\n", "\n\n\n", false}, // newline-only content
+            {"   \n   \n", "\n\n", false},
+            {"   \n\t\t\n", "\n", false}, // whitespace-only on both sides
+            {null, null, false},
+            {"hello\r\nworld\r\n", "hello\r\nworld\r\n", false}, // identical CRLF text
+            {"hello  \r\nworld\r\n", "hello\r\nworld\r\n", false},
+            {"hello\nworld", "hello\n   \nworld", false}, // added lines are whitespace-only
+            // A real content change must still be detected.
+            {"hello\nworld", "hello\n   \nreal change\nworld", true},
+        };
+        for (Object[] c : cases) {
+            assertEquals(
+                    c[2],
+                    TextDiffUtil.hasMeaningfulDifferences((String) c[0], (String) c[1]),
+                    "unexpected verdict for " + c[0] + " vs " + c[1]);
+        }
     }
 
     @Test
@@ -210,84 +219,12 @@ class TextDiffUtilTest {
         assertEquals(3, result.getRemovedCount());
     }
 
-    @Test
-    void testSingleLineAdd() {
-        String local = "";
-        String remote = "new line";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getAddedCount());
-    }
-
-    @Test
-    void testSingleLineRemove() {
-        String local = "old line";
-        String remote = "";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getRemovedCount());
-    }
-
     // ========== hasMeaningfulDifferences streaming pre-check ==========
-
-    @Test
-    void hasMeaningfulDifferences_identicalTexts_normalized() {
-        String text = "hello  \nworld   \n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(text, text));
-    }
-
-    @Test
-    void hasMeaningfulDifferences_allNewLines_only() {
-        String local = "\n\n\n";
-        String remote = "\n\n\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-
-        // Different whitespace-only content across newlines
-        String local2 = "   \n   \n";
-        String remote2 = "\n\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local2, remote2));
-    }
-
-    @Test
-    void hasMeaningfulDifferences_mixedWhitespaceAndContent() {
-        // Lines added but only whitespace
-        String local = "hello\nworld";
-        String remote = "hello\n   \nworld";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-
-        // Lines added with actual content interspersed with whitespace-only
-        String remote2 = "hello\n   \nreal change\nworld";
-        assertTrue(TextDiffUtil.hasMeaningfulDifferences(local, remote2));
-    }
-
-    @Test
-    void hasMeaningfulDifferences_onlyWhitespaceOnBothSides() {
-        String local = "   \n\t\t\n";
-        String remote = "\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-    }
-
-    @Test
-    void hasMeaningfulDifferences_bothNull() {
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(null, null));
-    }
 
     @Test
     void hasMeaningfulDifferences_oneNull() {
         assertTrue(TextDiffUtil.hasMeaningfulDifferences(null, "hello"));
         assertTrue(TextDiffUtil.hasMeaningfulDifferences("hello", null));
-    }
-
-    @Test
-    void hasMeaningfulDifferences_carriageReturns() {
-        String local = "hello\r\nworld\r\n";
-        String remote = "hello\r\nworld\r\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local, remote));
-
-        // Only whitespace difference with CRLF
-        String local2 = "hello  \r\nworld\r\n";
-        String remote2 = "hello\r\nworld\r\n";
-        assertFalse(TextDiffUtil.hasMeaningfulDifferences(local2, remote2));
     }
 
     @Test

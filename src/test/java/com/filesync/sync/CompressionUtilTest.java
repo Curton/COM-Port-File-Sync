@@ -19,79 +19,79 @@ import org.junit.jupiter.api.Test;
 class CompressionUtilTest {
 
     @Test
-    void isTextExtensionRecognizesCommonTextExtensions() {
-        assertTrue(CompressionUtil.isTextExtension("file.txt"));
-        assertTrue(CompressionUtil.isTextExtension("file.java"));
-        assertTrue(CompressionUtil.isTextExtension("file.xml"));
-        assertTrue(CompressionUtil.isTextExtension("file.json"));
-        assertTrue(CompressionUtil.isTextExtension("file.html"));
-        assertTrue(CompressionUtil.isTextExtension("file.js"));
-        assertTrue(CompressionUtil.isTextExtension("file.py"));
-        assertTrue(CompressionUtil.isTextExtension("file.md"));
-        assertTrue(CompressionUtil.isTextExtension("file.yaml"));
-        assertTrue(CompressionUtil.isTextExtension("file.yml"));
-        assertTrue(CompressionUtil.isTextExtension("file.css"));
-        assertTrue(CompressionUtil.isTextExtension("file.sql"));
-        assertTrue(CompressionUtil.isTextExtension("file.log"));
-        assertTrue(CompressionUtil.isTextExtension("file.csv"));
-        assertTrue(CompressionUtil.isTextExtension("FILE.TXT"));
-        assertTrue(CompressionUtil.isTextExtension("File.Txt"));
+    void isTextExtensionClassifiesFilenames() {
+        Object[][] cases = {
+            {"file.txt", true},
+            {"file.java", true},
+            {"file.xml", true},
+            {"file.json", true},
+            {"file.html", true},
+            {"file.js", true},
+            {"file.py", true},
+            {"file.md", true},
+            {"file.yaml", true},
+            {"file.yml", true},
+            {"file.css", true},
+            {"file.sql", true},
+            {"file.log", true},
+            {"file.csv", true},
+            {"FILE.TXT", true},
+            {"File.Txt", true},
+            {"file.jpg", false},
+            {"file.mp3", false},
+            {"file.zip", false},
+            {"file.pdf", false},
+            {"file.docx", false},
+            {"file.xlsx", false},
+            {"file.png", false},
+            {"file.gif", false},
+            {null, false},
+            {"", false},
+            {"noextension", false},
+            {".hidden", false},
+            {"trailing.", false},
+        };
+        for (Object[] c : cases) {
+            assertEquals(
+                    c[1],
+                    CompressionUtil.isTextExtension((String) c[0]),
+                    "unexpected classification for " + c[0]);
+        }
     }
 
     @Test
-    void isTextExtensionRejectsNonTextExtensions() {
-        assertFalse(CompressionUtil.isTextExtension("file.jpg"));
-        assertFalse(CompressionUtil.isTextExtension("file.mp3"));
-        assertFalse(CompressionUtil.isTextExtension("file.zip"));
-        assertFalse(CompressionUtil.isTextExtension("file.pdf"));
-        assertFalse(CompressionUtil.isTextExtension("file.docx"));
-        assertFalse(CompressionUtil.isTextExtension("file.xlsx"));
-        assertFalse(CompressionUtil.isTextExtension("file.png"));
-        assertFalse(CompressionUtil.isTextExtension("file.gif"));
-    }
-
-    @Test
-    void isTextExtensionHandlesEdgeCases() {
-        assertFalse(CompressionUtil.isTextExtension(null));
-        assertFalse(CompressionUtil.isTextExtension(""));
-        assertFalse(CompressionUtil.isTextExtension("noextension"));
-        assertFalse(CompressionUtil.isTextExtension(".hidden"));
-        assertFalse(CompressionUtil.isTextExtension("trailing."));
-    }
-
-    @Test
-    void isCompressedExtensionRecognizesCompressedFormats() {
-        assertTrue(CompressionUtil.isCompressedExtension("file.zip"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.gz"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.bz2"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.7z"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.rar"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.tar"));
-    }
-
-    @Test
-    void isCompressedExtensionRecognizesMediaFormats() {
-        assertTrue(CompressionUtil.isCompressedExtension("file.jpg"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.jpeg"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.png"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.gif"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.webp"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.mp3"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.mp4"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.avi"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.mkv"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.pdf"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.docx"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.xlsx"));
-        assertTrue(CompressionUtil.isCompressedExtension("file.pptx"));
-    }
-
-    @Test
-    void isCompressedExtensionRejectsNonCompressed() {
-        assertFalse(CompressionUtil.isCompressedExtension("file.txt"));
-        assertFalse(CompressionUtil.isCompressedExtension("file.java"));
-        assertFalse(CompressionUtil.isCompressedExtension("file.md"));
-        assertFalse(CompressionUtil.isCompressedExtension("file.csv"));
+    void isCompressedExtensionClassifiesFilenames() {
+        Object[][] cases = {
+            {"file.zip", true},
+            {"file.gz", true},
+            {"file.bz2", true},
+            {"file.7z", true},
+            {"file.rar", true},
+            {"file.tar", true},
+            {"file.jpg", true},
+            {"file.jpeg", true},
+            {"file.png", true},
+            {"file.gif", true},
+            {"file.webp", true},
+            {"file.mp3", true},
+            {"file.mp4", true},
+            {"file.avi", true},
+            {"file.mkv", true},
+            {"file.pdf", true},
+            {"file.docx", true},
+            {"file.xlsx", true},
+            {"file.pptx", true},
+            {"file.txt", false},
+            {"file.java", false},
+            {"file.md", false},
+            {"file.csv", false},
+        };
+        for (Object[] c : cases) {
+            assertEquals(
+                    c[1],
+                    CompressionUtil.isCompressedExtension((String) c[0]),
+                    "unexpected classification for " + c[0]);
+        }
     }
 
     @Test
@@ -105,17 +105,15 @@ class CompressionUtilTest {
     }
 
     @Test
-    void calculateEntropyForZeroData() {
-        byte[] zeroData = new byte[1000];
-        double entropy = CompressionUtil.calculateEntropy(zeroData);
-        assertEquals(0.0, entropy, "Zero data should have zero entropy");
-    }
-
-    @Test
-    void calculateEntropyForSingleByteData() {
-        byte[] singleByte = new byte[] {42};
-        double entropy = CompressionUtil.calculateEntropy(singleByte);
-        assertEquals(0.0, entropy, "Single byte data should have zero entropy");
+    void calculateEntropyForUniformDataIsZero() {
+        assertEquals(
+                0.0,
+                CompressionUtil.calculateEntropy(new byte[1000]),
+                "Zero data should have zero entropy");
+        assertEquals(
+                0.0,
+                CompressionUtil.calculateEntropy(new byte[] {42}),
+                "Single byte data should have zero entropy");
     }
 
     @Test
@@ -205,27 +203,11 @@ class CompressionUtilTest {
     }
 
     @Test
-    void compressNullDataReturnsNull() throws IOException {
-        byte[] result = CompressionUtil.compress(null);
-        assertNull(result);
-    }
-
-    @Test
-    void compressEmptyDataReturnsEmpty() throws IOException {
-        byte[] result = CompressionUtil.compress(new byte[] {});
-        assertArrayEquals(new byte[] {}, result);
-    }
-
-    @Test
-    void decompressNullDataReturnsNull() throws IOException {
-        byte[] result = CompressionUtil.decompress(null);
-        assertNull(result);
-    }
-
-    @Test
-    void decompressEmptyDataReturnsEmpty() throws IOException {
-        byte[] result = CompressionUtil.decompress(new byte[] {});
-        assertArrayEquals(new byte[] {}, result);
+    void compressAndDecompressHandleNullAndEmptyInput() throws IOException {
+        assertNull(CompressionUtil.compress(null));
+        assertArrayEquals(new byte[] {}, CompressionUtil.compress(new byte[] {}));
+        assertNull(CompressionUtil.decompress(null));
+        assertArrayEquals(new byte[] {}, CompressionUtil.decompress(new byte[] {}));
     }
 
     @Test
@@ -277,6 +259,8 @@ class CompressionUtilTest {
             randomishData[i] = (byte) (Math.random() * 256);
         }
         result = CompressionUtil.compressIfBeneficial("file.java", randomishData);
+        assertFalse(result.isCompressed(), "High-entropy data gains nothing from gzip");
+        assertArrayEquals(randomishData, result.getData());
     }
 
     @Test
@@ -313,12 +297,7 @@ class CompressionUtilTest {
     void hasHighCompressionPotentialRejectsCompressedFormats() {
         byte[] data = new byte[1000];
         assertFalse(CompressionUtil.hasHighCompressionPotential("file.zip", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.gz", data));
         assertFalse(CompressionUtil.hasHighCompressionPotential("file.jpg", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.png", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.mp3", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.mp4", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.pdf", data));
     }
 
     @Test

@@ -56,6 +56,19 @@ class SyncProtocolWaitForCommandTest {
     }
 
     @Test
+    void notifyMessageActivityRunsTheRegisteredActivityCallback() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        List<String> activity = new ArrayList<>();
+        protocol.setMessageActivityCallback(() -> activity.add("activity"));
+        assertEquals(0, activity.size(), "registering the callback must not fire it");
+
+        // The protected hook protocol subclasses use to simulate heartbeat handling.
+        protocol.simulateMessageActivity();
+
+        assertEquals(List.of("activity"), activity, "the hook must run the registered callback");
+    }
+
+    @Test
     void waitForCommandThrowsOnErrorButKeepsStashedMessages() {
         ScriptedProtocol protocol = new ScriptedProtocol();
         Message sharedText =
@@ -242,6 +255,10 @@ class SyncProtocolWaitForCommandTest {
         @Override
         public void sendHeartbeatAck() {
             heartbeatAcksSent++;
+        }
+
+        void simulateMessageActivity() {
+            notifyMessageActivity();
         }
     }
 }

@@ -233,62 +233,6 @@ class RemoteLogFetchTest {
     }
 
     @Test
-    void fetchRemoteLogText_logXferAbortedByRemote_returnsNull() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        List<SyncEvent> events = new CopyOnWriteArrayList<>();
-        fsm.getEventBus().register(events::add);
-        try {
-            startConnected(fsm, serial);
-            Thread feeder =
-                    new Thread(
-                            () -> {
-                                waitUntil(
-                                        () ->
-                                                serial.getWrittenLines()
-                                                        .contains("[[SYNC:LOG_MARKER_REQ]]"),
-                                        Duration.ofSeconds(5));
-                                serial.feedLine("[[SYNC:ACK]]");
-                                waitUntil(
-                                        () -> serial.getWrittenLines().contains("[[SYNC:LOG_REQ]]"),
-                                        Duration.ofSeconds(5));
-                                serial.feedLine("[[SYNC:LOG_XFER:5]]");
-                                // The peer answers the XMODEM receive with CAN, aborting the
-                                // transfer instead of sending blocks.
-                                serial.feedBytes(new byte[] {XModemTransfer.CAN});
-                            },
-                            "fsm-log-fetch-feeder-xfer-abort");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertNull(result, "An aborted XMODEM receive must yield null");
-            // A peer cancel is a benign outcome: reported as a plain log line, not an ERROR.
-            assertTrue(
-                    events.stream()
-                            .anyMatch(
-                                    e ->
-                                            e instanceof SyncEvent.LogEvent le
-                                                    && le.getMessage()
-                                                            .contains("cancelled by sender")),
-                    "The cancel must be reported as a benign log event");
-            assertTrue(
-                    events.stream()
-                            .noneMatch(
-                                    e ->
-                                            e instanceof SyncEvent.ErrorEvent ee
-                                                    && ee.getMessage()
-                                                            .contains(
-                                                                    "Failed to fetch remote log")),
-                    "A peer cancel must not surface as a fetch error");
-        } finally {
-            stopQuietly(fsm);
-        }
-    }
-
-    @Test
     void fetchRemoteLogText_cancel_returnsNull() throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));

@@ -252,32 +252,48 @@ class FileChangeDetectorTest {
 
     // ========== Delta method tests ==========
 
+    // --- fixture helpers ---------------------------------------------------
+
+    private static FileChangeDetector.FileInfo file(
+            String path, long size, long lastModified, String md5) {
+        return new FileChangeDetector.FileInfo(path, size, lastModified, md5);
+    }
+
+    private static Map<String, FileChangeDetector.FileInfo> files(
+            FileChangeDetector.FileInfo... entries) {
+        Map<String, FileChangeDetector.FileInfo> map = new HashMap<>();
+        for (FileChangeDetector.FileInfo entry : entries) {
+            map.put(entry.getPath(), entry);
+        }
+        return map;
+    }
+
+    private static FileChangeDetector.FileManifest manifest(
+            Map<String, FileChangeDetector.FileInfo> files) {
+        return new FileChangeDetector.FileManifest(files);
+    }
+
+    private static FileChangeDetector.FileManifest emptyDirs(String... dirs) {
+        return new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(Set.of(dirs)));
+    }
+
     @Test
     void getChangedFiles_returnsFileOnlyInSource() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("new.txt", new FileChangeDetector.FileInfo("new.txt", 100, 1000L, "abc"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+        FileChangeDetector.FileManifest source =
+                manifest(files(file("new.txt", 100, 1000L, "abc")));
 
         List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
+                FileChangeDetector.getChangedFiles(source, manifest(files()));
         assertEquals(1, changed.size());
         assertEquals("new.txt", changed.get(0).getPath());
     }
 
     @Test
     void getChangedFiles_skipsFileWithSameMd5() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put(
-                "file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc123"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put(
-                "file.txt", new FileChangeDetector.FileInfo("file.txt", 200, 5000L, "abc123"));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+        FileChangeDetector.FileManifest source =
+                manifest(files(file("file.txt", 100, 1000L, "abc123")));
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("file.txt", 200, 5000L, "abc123")));
 
         List<FileChangeDetector.FileInfo> changed =
                 FileChangeDetector.getChangedFiles(source, target);
@@ -285,32 +301,14 @@ class FileChangeDetectorTest {
     }
 
     @Test
-    void getChangedFiles_detectsDifferentMd5() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 200, 5000L, "def"));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(1, changed.size());
-    }
-
-    @Test
     void getChangedFiles_detectsDifferentMd5WithinMetadataWindow() {
         // Same size, mtime difference within MODIFY_WINDOW_MS, but proven-different MD5s:
         // the checksum must win over the metadata quick check, otherwise a quick post-sync
         // re-edit (or FAT 2-second granularity) is skipped silently.
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 2000L, "def"));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+        FileChangeDetector.FileManifest source =
+                manifest(files(file("file.txt", 100, 1000L, "abc")));
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("file.txt", 100, 2000L, "def")));
 
         List<FileChangeDetector.FileInfo> changed =
                 FileChangeDetector.getChangedFiles(source, target);
@@ -321,82 +319,56 @@ class FileChangeDetectorTest {
     }
 
     @Test
-    void getChangedFiles_usesMetadataWhenOneSideLacksMd5() {
-        // Only one side hashed (e.g. the other file was unreadable): fall back to the
-        // metadata window comparison.
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, "abc"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 2000L, null));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(
-                changed.isEmpty(),
-                "With a missing checksum, metadata within window should mean unchanged");
-    }
-
-    @Test
-    void getChangedFiles_skipsSameMetadataInWindow() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, null));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 2000L, null));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+    void getChangedFiles_skipsSameMetadataWhenChecksumIsMissing() {
+        // Neither side hashed (quick-mode binaries on both ends): same size with the mtime
+        // difference inside MODIFY_WINDOW_MS means unchanged.
+        FileChangeDetector.FileManifest source =
+                manifest(files(file("file.txt", 100, 1000L, null)));
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("file.txt", 100, 2000L, null)));
 
         List<FileChangeDetector.FileInfo> changed =
                 FileChangeDetector.getChangedFiles(source, target);
         assertTrue(
                 changed.isEmpty(),
                 "Within MODIFY_WINDOW_MS (3000) and same size should be unchanged");
+
+        // Only one side hashed (e.g. the other file was unreadable): fall back to the
+        // metadata window comparison.
+        source = manifest(files(file("file.txt", 100, 1000L, "abc")));
+        target = manifest(files(file("file.txt", 100, 2000L, null)));
+
+        changed = FileChangeDetector.getChangedFiles(source, target);
+        assertTrue(
+                changed.isEmpty(),
+                "With a missing checksum, metadata within window should mean unchanged");
     }
 
     @Test
-    void getChangedFiles_detectsMetadataBeyondWindow() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, null));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 5000L, null));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+    void getChangedFiles_detectsMetadataChangeWhenChecksumIsMissing() {
+        // Same size, but the mtime difference reaches past MODIFY_WINDOW_MS.
+        FileChangeDetector.FileManifest source =
+                manifest(files(file("file.txt", 100, 1000L, null)));
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("file.txt", 100, 5000L, null)));
 
         List<FileChangeDetector.FileInfo> changed =
                 FileChangeDetector.getChangedFiles(source, target);
         assertEquals(1, changed.size(), "Beyond MODIFY_WINDOW_MS should detect change");
-    }
 
-    @Test
-    void getChangedFiles_detectsDifferentSizeEvenWithinWindow() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 100, 1000L, null));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("file.txt", new FileChangeDetector.FileInfo("file.txt", 200, 1500L, null));
+        // A different size is visible on its own, even with both mtimes inside the window.
+        source = manifest(files(file("file.txt", 100, 1000L, null)));
+        target = manifest(files(file("file.txt", 200, 1500L, null)));
 
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
+        changed = FileChangeDetector.getChangedFiles(source, target);
         assertEquals(1, changed.size(), "Different size should always detect change");
     }
 
     @Test
     void getFilesToDelete_returnsPathsOnlyInTarget() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("keep.txt", new FileChangeDetector.FileInfo("keep.txt", 50, 0, "x"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("keep.txt", new FileChangeDetector.FileInfo("keep.txt", 50, 0, "x"));
-        targetFiles.put(
-                "obsolete.txt", new FileChangeDetector.FileInfo("obsolete.txt", 30, 0, "y"));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+        FileChangeDetector.FileManifest source = manifest(files(file("keep.txt", 50, 0, "x")));
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("keep.txt", 50, 0, "x"), file("obsolete.txt", 30, 0, "y")));
 
         List<String> toDelete = FileChangeDetector.getFilesToDelete(source, target);
         assertEquals(1, toDelete.size());
@@ -404,28 +376,9 @@ class FileChangeDetectorTest {
     }
 
     @Test
-    void getFilesToDelete_returnsEmptyWhenTargetIsSubset() {
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("a.txt", new FileChangeDetector.FileInfo("a.txt", 10, 0, "x"));
-        sourceFiles.put("b.txt", new FileChangeDetector.FileInfo("b.txt", 20, 0, "y"));
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put("a.txt", new FileChangeDetector.FileInfo("a.txt", 10, 0, "x"));
-
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
-
-        assertTrue(FileChangeDetector.getFilesToDelete(source, target).isEmpty());
-    }
-
-    @Test
     void getEmptyDirectoriesToCreate_returnsDirsOnlyInSource() {
-        Set<String> sourceDirs = new HashSet<>(List.of("newdir", "shared"));
-        Set<String> targetDirs = new HashSet<>(List.of("shared"));
-
-        FileChangeDetector.FileManifest source =
-                new FileChangeDetector.FileManifest(new HashMap<>(), sourceDirs);
-        FileChangeDetector.FileManifest target =
-                new FileChangeDetector.FileManifest(new HashMap<>(), targetDirs);
+        FileChangeDetector.FileManifest source = emptyDirs("newdir", "shared");
+        FileChangeDetector.FileManifest target = emptyDirs("shared");
 
         List<String> toCreate = FileChangeDetector.getEmptyDirectoriesToCreate(source, target);
         assertEquals(1, toCreate.size());
@@ -434,13 +387,8 @@ class FileChangeDetectorTest {
 
     @Test
     void getEmptyDirectoriesToDelete_returnsDirsOnlyInTargetSortedDeepestFirst() {
-        Set<String> sourceDirs = new HashSet<>(List.of("a"));
-        Set<String> targetDirs = new HashSet<>(List.of("a", "b/c/d", "b/c", "b"));
-
-        FileChangeDetector.FileManifest source =
-                new FileChangeDetector.FileManifest(new HashMap<>(), sourceDirs);
-        FileChangeDetector.FileManifest target =
-                new FileChangeDetector.FileManifest(new HashMap<>(), targetDirs);
+        FileChangeDetector.FileManifest source = emptyDirs("a");
+        FileChangeDetector.FileManifest target = emptyDirs("a", "b/c/d", "b/c", "b");
 
         List<String> toDelete = FileChangeDetector.getEmptyDirectoriesToDelete(source, target);
         assertEquals(3, toDelete.size());
@@ -452,24 +400,17 @@ class FileChangeDetectorTest {
         // Receiver still has an empty foo/ while the sender has put bar.txt inside its foo/. The
         // preview must never pair "transfer foo/bar.txt" with "delete foo/": rmdir is recursive
         // and would wipe the file right after it landed.
-        Map<String, FileChangeDetector.FileInfo> sourceFiles = new HashMap<>();
-        sourceFiles.put("foo/bar.txt", new FileChangeDetector.FileInfo("foo/bar.txt", 5, 0, "h"));
-        FileChangeDetector.FileManifest source = new FileChangeDetector.FileManifest(sourceFiles);
-        FileChangeDetector.FileManifest target =
-                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
+        FileChangeDetector.FileManifest source = manifest(files(file("foo/bar.txt", 5, 0, "h")));
 
         assertTrue(
-                FileChangeDetector.getEmptyDirectoriesToDelete(source, target).isEmpty(),
+                FileChangeDetector.getEmptyDirectoriesToDelete(source, emptyDirs("foo")).isEmpty(),
                 "A directory the sender still populates must not be deleted on the receiver");
     }
 
     @Test
     void getEmptyDirectoriesToDelete_skipsDirThatHoldsEmptySubdirOnSource() {
-        FileChangeDetector.FileManifest source =
-                new FileChangeDetector.FileManifest(
-                        new HashMap<>(), new HashSet<>(List.of("foo/inner")));
-        FileChangeDetector.FileManifest target =
-                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
+        FileChangeDetector.FileManifest source = emptyDirs("foo/inner");
+        FileChangeDetector.FileManifest target = emptyDirs("foo");
 
         assertTrue(
                 FileChangeDetector.getEmptyDirectoriesToDelete(source, target).isEmpty(),
@@ -481,12 +422,9 @@ class FileChangeDetectorTest {
         // Mirror image of the delete case: the sender's foo/ is empty while the receiver's foo/
         // holds files, so the directory already exists there and no CREATE_DIR row belongs in
         // the preview.
-        Map<String, FileChangeDetector.FileInfo> targetFiles = new HashMap<>();
-        targetFiles.put(
-                "foo/existing.txt", new FileChangeDetector.FileInfo("foo/existing.txt", 7, 0, "h"));
-        FileChangeDetector.FileManifest source =
-                new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(List.of("foo")));
-        FileChangeDetector.FileManifest target = new FileChangeDetector.FileManifest(targetFiles);
+        FileChangeDetector.FileManifest source = emptyDirs("foo");
+        FileChangeDetector.FileManifest target =
+                manifest(files(file("foo/existing.txt", 7, 0, "h")));
 
         assertTrue(
                 FileChangeDetector.getEmptyDirectoriesToCreate(source, target).isEmpty(),
@@ -494,35 +432,9 @@ class FileChangeDetectorTest {
     }
 
     @Test
-    void fileManifest_noArgConstructorCreatesEmptyManifest() {
-        FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest();
-        assertTrue(manifest.getFiles().isEmpty());
-        assertTrue(manifest.getEmptyDirectories().isEmpty());
-        assertEquals(0, manifest.getFileCount());
-        assertEquals(0, manifest.getEmptyDirectoryCount());
-    }
-
-    @Test
-    void fileManifest_singleArgConstructorUsesProvidedMap() {
-        Map<String, FileChangeDetector.FileInfo> files = new HashMap<>();
-        files.put("a.txt", new FileChangeDetector.FileInfo("a.txt", 10, 0, "hash"));
-        FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest(files);
-        assertEquals(1, manifest.getFileCount());
-        assertTrue(manifest.getEmptyDirectories().isEmpty());
-    }
-
-    @Test
-    void fileInfo_toStringIncludesPathAndSize() {
-        FileChangeDetector.FileInfo info =
-                new FileChangeDetector.FileInfo("test.txt", 42, 0, "abc");
-        String str = info.toString();
-        assertTrue(str.contains("test.txt"));
-        assertTrue(str.contains("42"));
-    }
-
-    @Test
     void hashFilePrefix_matchesArrayImplementationForTextPrefixes() throws IOException {
-        // "\r\na" triples put a CR every 3 bytes, so 4095 and 16383 are CRs — but each is followed by
+        // "\r\na" triples put a CR every 3 bytes, so 4095 and 16383 are CRs — but each is followed
+        // by
         // an LF, i.e. a CRLF pair straddling the streaming sample boundary (4095) and the array
         // implementation's chunk boundary (16383), which exercises carrying the pending-CR state
         // across a boundary. Several prefix lengths below also cut right after a CR, covering the

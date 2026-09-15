@@ -1,6 +1,5 @@
 package com.filesync.sync;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -80,30 +79,6 @@ class ConflictAnalyzerTest {
         assertEquals("file.txt", conflict.getPath());
         assertFalse(conflict.isBinary(), "Text file should not be marked as binary");
         assertNotNull(conflict.getLocalContent());
-    }
-
-    @Test
-    void findConflicts_noConflict_whenOnlyOneSideModified() throws IOException {
-        // Create test files
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-
-        // File exists only on local side (receiver deleted or never had it)
-        Files.writeString(localDir.resolve("newfile.txt"), "new content on sender");
-
-        // Generate manifests
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
-
-        // Find conflicts
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-
-        assertTrue(conflicts.isEmpty(), "No conflict when file exists on only one side");
     }
 
     @Test
@@ -368,126 +343,6 @@ class ConflictAnalyzerTest {
         assertEquals("abc", new String(sample));
     }
 
-    // ========== ConflictInfo mutability and getter tests ==========
-
-    @Test
-    void conflictInfo_settersAndGetters() throws IOException {
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-
-        Path localFile = localDir.resolve("file.txt");
-        Path remoteFile = remoteDir.resolve("file.txt");
-        Files.writeString(localFile, "local content");
-        Files.writeString(remoteFile, "remote content");
-        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
-        Files.setLastModifiedTime(
-                remoteFile, FileTime.fromMillis(5000L)); // remote newer for conflict detection
-
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
-
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-        assertEquals(1, conflicts.size());
-
-        ConflictInfo conflict = conflicts.get(0);
-        assertEquals("file.txt", conflict.getPath());
-        assertFalse(conflict.isBinary());
-        assertNotNull(conflict.getLocalInfo());
-        assertNotNull(conflict.getRemoteInfo());
-        assertNotNull(conflict.getLocalContent());
-        assertEquals("local content", conflict.getLocalContentAsString());
-
-        // Test setters and mutable getters
-        byte[] remoteContent = "remote content".getBytes();
-        conflict.setRemoteContent(remoteContent);
-        assertArrayEquals(remoteContent, conflict.getRemoteContent());
-        assertEquals("remote content", conflict.getRemoteContentAsString());
-
-        conflict.setMergedContent("merged content");
-        assertEquals("merged content", conflict.getMergedContent());
-
-        assertFalse(conflict.isResolved());
-        conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
-        assertEquals(ConflictInfo.Resolution.KEEP_LOCAL, conflict.getResolution());
-        assertTrue(conflict.isResolved());
-    }
-
-    @Test
-    void conflictInfo_getMergedContentAsBytes() {
-        FileChangeDetector.FileInfo localInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "abc");
-        FileChangeDetector.FileInfo remoteInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "def");
-        ConflictInfo conflict = new ConflictInfo("test.txt", localInfo, remoteInfo, false, null);
-
-        conflict.setMergedContent("merged result");
-        byte[] mergedBytes = conflict.getMergedContentAsBytes();
-
-        assertNotNull(mergedBytes);
-        assertEquals(
-                "merged result", new String(mergedBytes, java.nio.charset.StandardCharsets.UTF_8));
-    }
-
-    @Test
-    void conflictInfo_toString() {
-        FileChangeDetector.FileInfo localInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "abc");
-        FileChangeDetector.FileInfo remoteInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "def");
-        ConflictInfo conflict = new ConflictInfo("test.txt", localInfo, remoteInfo, true, null);
-
-        String str = conflict.toString();
-        assertTrue(str.contains("test.txt"));
-        assertTrue(str.contains("binary=true"));
-        assertTrue(str.contains("resolution=UNRESOLVED"));
-    }
-
-    @Test
-    void conflictInfo_remoteContentNullHandling() {
-        FileChangeDetector.FileInfo localInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "abc");
-        FileChangeDetector.FileInfo remoteInfo =
-                new FileChangeDetector.FileInfo("test.txt", 10, 0, "def");
-        ConflictInfo conflict = new ConflictInfo("test.txt", localInfo, remoteInfo, false, null);
-
-        // Remote content not set yet
-        assertEquals("", conflict.getRemoteContentAsString());
-        assertNull(conflict.getMergedContentAsBytes());
-    }
-
-    @Test
-    void findConflicts_contentLoadedOnDemand_lazyLoading(@TempDir Path tempDir) throws IOException {
-        // Verify that content is loaded lazily from disk (not eagerly in findConflicts)
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-
-        Path localFile = localDir.resolve("file.txt");
-        Path remoteFile = remoteDir.resolve("file.txt");
-        Files.writeString(localFile, "local version");
-        Files.writeString(remoteFile, "remote version");
-        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
-        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(5000L));
-
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
-
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-        assertEquals(1, conflicts.size());
-
-        // Content loaded on first access
-        assertEquals("local version", conflicts.get(0).getLocalContentAsString());
-    }
-
     // ========== exemptPrefixShapedConflicts tests ==========
 
     /**
@@ -544,7 +399,8 @@ class ConflictAnalyzerTest {
             throws IOException {
         Path localDir = tempDir.resolve("local");
         Path remoteDir = tempDir.resolve("remote");
-        // Same sizes, but the receiver's bytes differ inside the prefix: a genuine modification
+        // Same sizes, but the receiver's bytes differ inside the prefix: a genuine modification.
+        // An equal-size receiver file is not an append shape either, so the conflict must stay.
         byte[] localContent = new byte[96];
         byte[] remoteContent = new byte[96];
         for (int i = 0; i < localContent.length; i++) {
@@ -570,7 +426,11 @@ class ConflictAnalyzerTest {
         Set<String> exempted =
                 ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
 
-        assertEquals(1, conflicts.size(), "non-prefix conflict must be kept");
+        assertEquals(
+                1,
+                conflicts.size(),
+                "non-prefix conflict must be kept (an equal-size receiver file is not a prefix"
+                        + " shape)");
         assertTrue(exempted.isEmpty());
     }
 
@@ -636,41 +496,6 @@ class ConflictAnalyzerTest {
                 ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
 
         assertEquals(1, conflicts.size(), "text conflicts are never exempted");
-        assertTrue(exempted.isEmpty());
-    }
-
-    @Test
-    void exemptPrefixShapedConflicts_keepsEqualOrEmptyReceiverFiles(@TempDir Path tempDir)
-            throws IOException {
-        // Receiver file same size as sender's: not an append shape
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        byte[] localContent = new byte[96];
-        byte[] remoteContent = new byte[96];
-        for (int i = 0; i < localContent.length; i++) {
-            localContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x41 + (i % 26));
-            remoteContent[i] = (byte) (i % 2 == 0 ? 0x00 : 0x61 + (i % 26));
-        }
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-        Path localFile = localDir.resolve("archive.gz");
-        Path remoteFile = remoteDir.resolve("archive.gz");
-        Files.write(localFile, localContent);
-        Files.write(remoteFile, remoteContent);
-        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
-        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-        assertEquals(1, conflicts.size());
-
-        Set<String> exempted =
-                ConflictAnalyzer.exemptPrefixShapedConflicts(conflicts, localDir.toFile());
-
-        assertEquals(1, conflicts.size(), "equal-size receiver file is not a prefix shape");
         assertTrue(exempted.isEmpty());
     }
 

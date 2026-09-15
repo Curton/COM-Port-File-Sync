@@ -50,6 +50,10 @@ class ConnectionServiceTest {
 
         assertTrue(service.isConnectionAlive());
         assertTrue(reconnectCalled);
+        assertTrue(
+                eventBus.getEvents().stream()
+                        .anyMatch(e -> e instanceof SyncEvent.ConnectionEvent));
+        assertTrue(eventBus.getEvents().stream().anyMatch(e -> e instanceof SyncEvent.LogEvent));
     }
 
     @Test
@@ -124,16 +128,6 @@ class ConnectionServiceTest {
     @Test
     void isConnectionAliveReturnsFalseInitially() {
         assertFalse(service.isConnectionAlive());
-    }
-
-    @Test
-    void handleHeartbeatPostsConnectionEvent() {
-        service.handleHeartbeat();
-
-        assertTrue(
-                eventBus.getEvents().stream()
-                        .anyMatch(e -> e instanceof SyncEvent.ConnectionEvent));
-        assertTrue(eventBus.getEvents().stream().anyMatch(e -> e instanceof SyncEvent.LogEvent));
     }
 
     @Test

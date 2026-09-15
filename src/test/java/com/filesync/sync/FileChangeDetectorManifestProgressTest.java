@@ -107,22 +107,16 @@ class FileChangeDetectorManifestProgressTest {
             lastTotal = pair[1];
         }
         assertEquals(4, lastTotal, "The total grows to the real file count during the walk");
-    }
 
-    @Test
-    void withCacheAndNoNewFiles_totalStaysAtCacheSize() throws IOException {
-        for (int i = 0; i < 3; i++) {
-            Files.writeString(syncFolder.resolve("file" + i + ".txt"), "content-" + i);
+        // A folder the cache already describes exactly: the cache size is the total, and no
+        // growth is reported at all.
+        RecordingCallback third = new RecordingCallback();
+        FileChangeDetector.FileManifest unchanged = generate(true, third);
+
+        assertEquals(4, third.startTotal, "Unchanged folder: the cache size is the exact total");
+        for (int[] pair : third.progressPairs) {
+            assertEquals(4, pair[1], "No growth needed when nothing new appeared");
         }
-        generate(true, new RecordingCallback());
-        RecordingCallback second = new RecordingCallback();
-
-        FileChangeDetector.FileManifest manifest = generate(true, second);
-
-        assertEquals(3, second.startTotal, "Unchanged folder: the cache size is the exact total");
-        for (int[] pair : second.progressPairs) {
-            assertEquals(3, pair[1], "No growth needed when nothing new appeared");
-        }
-        assertEquals(3, manifest.getFileCount());
+        assertEquals(4, unchanged.getFileCount());
     }
 }

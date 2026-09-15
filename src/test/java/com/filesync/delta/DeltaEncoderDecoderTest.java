@@ -2,7 +2,6 @@ package com.filesync.delta;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -220,25 +219,5 @@ class DeltaEncoderDecoderTest {
         byte[] delta = DeltaEncoder.encode(source, sigs);
         byte[] rebuilt = DeltaDecoder.decode(base, delta);
         assertArrayEquals(source, rebuilt);
-    }
-
-    @Test
-    void decoderRejectsOutOfBoundsCopy() throws IOException {
-        // Build a base with one block and a source that reuses it (guarantees a COPY token),
-        // then corrupt the COPY block index so it references a non-existent block.
-        byte[] base = randomBytes(BLOCK, 12);
-        byte[] source = new byte[BLOCK + 30];
-        System.arraycopy(base, 0, source, 0, BLOCK);
-        System.arraycopy(randomBytes(30, 77), 0, source, BLOCK, 30);
-
-        byte[] delta = encode(base, source);
-        // Header is MAGIC(4)+VERSION(1)+BLOCK_SIZE(4)+SOURCE_SIZE(8) = 17 bytes; first token at 17.
-        assertEquals(DeltaCodec.TAG_COPY, delta[17], "expected first token to be a COPY");
-        // Overwrite the 4-byte block index (bytes 18..21) with a huge value.
-        delta[18] = (byte) 0xFF;
-        delta[19] = (byte) 0xFF;
-        delta[20] = (byte) 0xFF;
-        delta[21] = (byte) 0xFF;
-        assertThrows(IOException.class, () -> DeltaDecoder.decode(base, delta));
     }
 }

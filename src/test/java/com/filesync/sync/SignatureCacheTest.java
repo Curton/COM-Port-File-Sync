@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Random;
 import java.util.Set;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -220,5 +221,34 @@ class SignatureCacheTest {
         assertTrue(cache.isRejected("app.log", remote(600, 43L, "md5-new")));
         assertNull(cache.lookup("app.log", remote(500, 42L, "md5-old")));
         assertNull(cache.lookup("app.log", remote(600, 43L, "md5-new")));
+    }
+
+    // ========== CacheLocations override ==========
+
+    @AfterEach
+    void restoreDefaultCacheLocation() {
+        CacheLocations.clearOverrideForTest();
+    }
+
+    @Test
+    void cacheDirDefaultsToUserHomeFilesyncDir() {
+        assertEquals(
+                new File(System.getProperty("user.home"), ".filesync"),
+                CacheLocations.cacheDir(),
+                "Without an override, caches live under ~/.filesync");
+    }
+
+    @Test
+    void cacheDirOverrideRedirectsUntilCleared() {
+        File overrideDir = new File("temp-cache-dir");
+
+        CacheLocations.setOverrideForTest(overrideDir);
+        assertEquals(overrideDir, CacheLocations.cacheDir(), "Override must redirect the location");
+
+        CacheLocations.clearOverrideForTest();
+        assertEquals(
+                new File(System.getProperty("user.home"), ".filesync"),
+                CacheLocations.cacheDir(),
+                "Clearing must restore the default location");
     }
 }

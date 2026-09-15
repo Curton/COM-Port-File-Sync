@@ -107,107 +107,65 @@ class LineEndingNormalizationTest {
     // ========== manifest comparison ignores CRLF/LF ==========
 
     @Test
-    void getChangedFiles_ignoresCrlfOnlyDifferenceInFullMode() throws IOException {
-        Path sourceDir = tempDir.resolve("src");
-        Path targetDir = tempDir.resolve("tgt");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
+    void getChangedFiles_ignoresCrlfOnlyDifferenceInBothModes() throws IOException {
+        for (boolean quickHash : new boolean[] {false, true}) {
+            Path sourceDir = tempDir.resolve("src");
+            Path targetDir = tempDir.resolve("tgt");
+            Files.createDirectories(sourceDir);
+            Files.createDirectories(targetDir);
 
-        byte[] crlf = "alpha\r\nbeta\r\n".getBytes(StandardCharsets.UTF_8);
-        byte[] lf = "alpha\nbeta\n".getBytes(StandardCharsets.UTF_8);
-        Files.write(sourceDir.resolve("doc.txt"), crlf);
-        Files.write(targetDir.resolve("doc.txt"), lf);
+            byte[] crlf = "alpha\r\nbeta\r\n".getBytes(StandardCharsets.UTF_8);
+            byte[] lf = "alpha\nbeta\n".getBytes(StandardCharsets.UTF_8);
+            Files.write(sourceDir.resolve("doc.txt"), crlf);
+            Files.write(targetDir.resolve("doc.txt"), lf);
 
-        FileChangeDetector.FileManifest source =
-                FileChangeDetector.generateManifest(sourceDir.toFile(), false, false);
-        FileChangeDetector.FileManifest target =
-                FileChangeDetector.generateManifest(targetDir.toFile(), false, false);
+            FileChangeDetector.FileManifest source =
+                    FileChangeDetector.generateManifest(sourceDir.toFile(), false, quickHash);
+            FileChangeDetector.FileManifest target =
+                    FileChangeDetector.generateManifest(targetDir.toFile(), false, quickHash);
 
-        // Stored size is the raw byte count and must differ (CRLF is larger) - this documents that
-        // only the hash is normalized, not the stored size used for display/transfer/batching.
-        assertNotEquals(
-                source.getFiles().get("doc.txt").getSize(),
-                target.getFiles().get("doc.txt").getSize(),
-                "raw sizes should differ between CRLF and LF");
-        assertEquals(
-                source.getFiles().get("doc.txt").getMd5(),
-                target.getFiles().get("doc.txt").getMd5(),
-                "normalized hashes must match across line endings");
+            // Stored size is the raw byte count and must differ (CRLF is larger) - this documents
+            // that
+            // only the hash is normalized, not the stored size used for display/transfer/batching.
+            assertNotEquals(
+                    source.getFiles().get("doc.txt").getSize(),
+                    target.getFiles().get("doc.txt").getSize(),
+                    "raw sizes should differ between CRLF and LF");
+            assertEquals(
+                    source.getFiles().get("doc.txt").getMd5(),
+                    target.getFiles().get("doc.txt").getMd5(),
+                    "normalized hashes must match across line endings");
 
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(changed.isEmpty(), "CRLF-only difference must not be a change in full mode");
+            List<FileChangeDetector.FileInfo> changed =
+                    FileChangeDetector.getChangedFiles(source, target);
+            assertTrue(changed.isEmpty(), "CRLF-only difference must not be a change");
+        }
     }
 
     @Test
-    void getChangedFiles_ignoresCrlfOnlyDifferenceInQuickMode() throws IOException {
-        Path sourceDir = tempDir.resolve("src");
-        Path targetDir = tempDir.resolve("tgt");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
+    void getChangedFiles_detectsRealContentChangeInBothModes() throws IOException {
+        for (boolean quickHash : new boolean[] {false, true}) {
+            Path sourceDir = tempDir.resolve("src");
+            Path targetDir = tempDir.resolve("tgt");
+            Files.createDirectories(sourceDir);
+            Files.createDirectories(targetDir);
 
-        Files.write(
-                sourceDir.resolve("doc.txt"), "alpha\r\nbeta\r\n".getBytes(StandardCharsets.UTF_8));
-        Files.write(targetDir.resolve("doc.txt"), "alpha\nbeta\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(
+                    sourceDir.resolve("doc.txt"),
+                    "line1\nline2\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(
+                    targetDir.resolve("doc.txt"),
+                    "line1\nCHANGED\n".getBytes(StandardCharsets.UTF_8));
 
-        FileChangeDetector.FileManifest source =
-                FileChangeDetector.generateManifest(sourceDir.toFile(), false, true);
-        FileChangeDetector.FileManifest target =
-                FileChangeDetector.generateManifest(targetDir.toFile(), false, true);
+            FileChangeDetector.FileManifest source =
+                    FileChangeDetector.generateManifest(sourceDir.toFile(), false, quickHash);
+            FileChangeDetector.FileManifest target =
+                    FileChangeDetector.generateManifest(targetDir.toFile(), false, quickHash);
 
-        assertEquals(
-                source.getFiles().get("doc.txt").getMd5(),
-                target.getFiles().get("doc.txt").getMd5(),
-                "normalized hashes must match across line endings in quick mode");
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(changed.isEmpty(), "CRLF-only difference must not be a change in quick mode");
-    }
-
-    @Test
-    void getChangedFiles_detectsRealContentChangeInFullMode() throws IOException {
-        Path sourceDir = tempDir.resolve("src");
-        Path targetDir = tempDir.resolve("tgt");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
-
-        Files.write(
-                sourceDir.resolve("doc.txt"), "line1\nline2\n".getBytes(StandardCharsets.UTF_8));
-        Files.write(
-                targetDir.resolve("doc.txt"), "line1\nCHANGED\n".getBytes(StandardCharsets.UTF_8));
-
-        FileChangeDetector.FileManifest source =
-                FileChangeDetector.generateManifest(sourceDir.toFile(), false, false);
-        FileChangeDetector.FileManifest target =
-                FileChangeDetector.generateManifest(targetDir.toFile(), false, false);
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(1, changed.size(), "A real content change must still be detected");
-    }
-
-    @Test
-    void getChangedFiles_detectsRealContentChangeInQuickMode() throws IOException {
-        Path sourceDir = tempDir.resolve("src");
-        Path targetDir = tempDir.resolve("tgt");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
-
-        Files.write(
-                sourceDir.resolve("doc.txt"), "line1\nline2\n".getBytes(StandardCharsets.UTF_8));
-        Files.write(
-                targetDir.resolve("doc.txt"), "line1\nCHANGED\n".getBytes(StandardCharsets.UTF_8));
-
-        FileChangeDetector.FileManifest source =
-                FileChangeDetector.generateManifest(sourceDir.toFile(), false, true);
-        FileChangeDetector.FileManifest target =
-                FileChangeDetector.generateManifest(targetDir.toFile(), false, true);
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(
-                1, changed.size(), "A real content change must still be detected in quick mode");
+            List<FileChangeDetector.FileInfo> changed =
+                    FileChangeDetector.getChangedFiles(source, target);
+            assertEquals(1, changed.size(), "A real content change must still be detected");
+        }
     }
 
     // ========== persisted manifest schema version ==========

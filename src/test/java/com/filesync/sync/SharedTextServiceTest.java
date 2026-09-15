@@ -56,49 +56,20 @@ class SharedTextServiceTest {
     }
 
     @Test
-    void handleIncomingSharedTextDataPostsReceivedEvent() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        protocol.setReceivedSharedText("large shared text");
-
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        AtomicReference<String> receivedText = new AtomicReference<>();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
-                        receivedText.set(sharedTextEvent.getText());
-                    }
-                });
-
-        SharedTextService service =
-                new SharedTextService(
-                        protocol,
-                        eventBus,
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> true);
-
-        service.handleIncomingSharedTextData(123L, true, 17);
-
-        assertEquals("large shared text", receivedText.get());
-        assertTrue(protocol.wasReceiveSharedTextDataCalled(), "Expected shared text receive path");
-        assertEquals(17, protocol.getReceivedSharedTextLength());
-    }
-
-    @Test
     void handleIncomingSharedTextDataUsesExpectedLength() {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         protocol.setReceivedSharedText("with explicit length");
 
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
         AtomicReference<String> receivedText = new AtomicReference<>();
+        List<SyncEvent> events = new ArrayList<>();
         eventBus.register(
                 event -> {
                     if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
                         receivedText.set(sharedTextEvent.getText());
                     }
                 });
+        eventBus.register(events::add);
 
         SharedTextService service =
                 new SharedTextService(
@@ -117,6 +88,10 @@ class SharedTextServiceTest {
         assertTrue(
                 protocol.wasReceiveSharedTextDataWithLengthCalled(),
                 "Expected length-aware receive path");
+        assertTrue(
+                events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                "A SyncControlRefreshEvent must follow the XMODEM shared-text receive, or the"
+                        + " sync controls stay disabled after the transfer");
     }
 
     @Test
@@ -246,33 +221,6 @@ class SharedTextServiceTest {
     }
 
     @Test
-    void handleIncomingSharedTextDataPostsSyncControlRefreshOnSuccess() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        protocol.setReceivedSharedText("large shared text");
-
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        List<SyncEvent> events = new ArrayList<>();
-        eventBus.register(events::add);
-
-        SharedTextService service =
-                new SharedTextService(
-                        protocol,
-                        eventBus,
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> true);
-
-        service.handleIncomingSharedTextData(123L, true, 17);
-
-        assertTrue(
-                events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
-                "A SyncControlRefreshEvent must follow the XMODEM shared-text receive, or the"
-                        + " sync controls stay disabled after the transfer");
-    }
-
-    @Test
     void handleIncomingSharedTextDataPostsSyncControlRefreshWhenPeerCancels() {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         protocol.setReceiveFailure(
@@ -305,7 +253,14 @@ class SharedTextServiceTest {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
         List<SyncEvent> events = new ArrayList<>();
+        List<String> logs = new ArrayList<>();
         eventBus.register(events::add);
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.LogEvent logEvent) {
+                        logs.add(logEvent.getMessage());
+                    }
+                });
 
         SharedTextService service =
                 new SharedTextService(
@@ -321,191 +276,140 @@ class SharedTextServiceTest {
 
         assertEquals(List.of("hello"), protocol.getSentTexts());
         assertTrue(
+                logs.contains("Shared text sent"),
+                "Successful delivery should be logged, got: " + logs);
+        assertTrue(
                 events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                 "A SyncControlRefreshEvent must follow the shared-text send, or the sync"
                         + " controls stay disabled after an XMODEM-sized payload");
     }
 
     @Test
-    void flushIfIdleDoesNotSendWhenNotRunning() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SharedTextService service =
+    void flushIfIdleDoesNotSendWhenConnectionIsNotReady() {
+        TestSharedTextProtocol notRunningProtocol = new TestSharedTextProtocol();
+        SharedTextService notRunning =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
+                        notRunningProtocol,
+                        new SimpleSyncEventBus(),
                         () -> false, // not running
                         () -> true,
                         () -> false,
                         () -> false,
                         () -> true);
-
-        service.queueSharedText("should not send");
-
-        // The text is queued but flush should fail due to not running
-        assertTrue(protocol.getSentTexts().isEmpty(), "Nothing should be sent when not running");
-    }
-
-    @Test
-    void flushIfIdleDoesNotSendWhenNotConnected() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SharedTextService service =
+        TestSharedTextProtocol notConnectedProtocol = new TestSharedTextProtocol();
+        SharedTextService notConnected =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
+                        notConnectedProtocol,
+                        new SimpleSyncEventBus(),
                         () -> true,
                         () -> false, // not connected
                         () -> false,
                         () -> false,
                         () -> true);
-
-        service.queueSharedText("should not send");
-
-        assertTrue(protocol.getSentTexts().isEmpty(), "Nothing should be sent when not connected");
-    }
-
-    @Test
-    void flushIfIdleDoesNotSendWhenRoleNotNegotiated() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SharedTextService service =
+        TestSharedTextProtocol notNegotiatedProtocol = new TestSharedTextProtocol();
+        SharedTextService notNegotiated =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
+                        notNegotiatedProtocol,
+                        new SimpleSyncEventBus(),
                         () -> true,
                         () -> true,
                         () -> false,
                         () -> false,
                         () -> false); // role not negotiated
 
-        service.queueSharedText("should not send");
+        notRunning.queueSharedText("should not send");
+        notConnected.queueSharedText("should not send");
+        notNegotiated.queueSharedText("should not send");
 
         assertTrue(
-                protocol.getSentTexts().isEmpty(),
+                notRunningProtocol.getSentTexts().isEmpty(),
+                "Nothing should be sent when not running");
+        assertTrue(
+                notConnectedProtocol.getSentTexts().isEmpty(),
+                "Nothing should be sent when not connected");
+        assertTrue(
+                notNegotiatedProtocol.getSentTexts().isEmpty(),
                 "Nothing should be sent when role not negotiated");
     }
 
     @Test
-    void queueSharedTextLogsSentWhenDelivered() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        List<String> logs = new ArrayList<>();
-        eventBus.register(
+    void flushIfIdleLogsDeferralReasonWhenHeldBack() {
+        // Only which BooleanSupplier flips varies: role not negotiated, syncing, or transfer busy.
+        TestSharedTextProtocol notNegotiatedProtocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus notNegotiatedBus = new SimpleSyncEventBus();
+        List<String> notNegotiatedLogs = new ArrayList<>();
+        notNegotiatedBus.register(
                 event -> {
                     if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
+                        notNegotiatedLogs.add(logEvent.getMessage());
                     }
                 });
-
-        SharedTextService service =
+        SharedTextService roleNotNegotiated =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> true);
-
-        service.queueSharedText("hello");
-
-        assertTrue(
-                logs.contains("Shared text sent"),
-                "Successful delivery should be logged, got: " + logs);
-    }
-
-    @Test
-    void flushIfIdleLogsDeferralReasonWhenRoleNotNegotiated() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        List<String> logs = new ArrayList<>();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
-                    }
-                });
-
-        SharedTextService service =
-                new SharedTextService(
-                        protocol,
-                        eventBus,
+                        notNegotiatedProtocol,
+                        notNegotiatedBus,
                         () -> true,
                         () -> true,
                         () -> false,
                         () -> false,
                         () -> false); // role not negotiated
 
-        service.queueSharedText("held back");
-
-        assertTrue(protocol.getSentTexts().isEmpty());
-        assertTrue(
-                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
-                "Deferral should be logged with a reason, got: " + logs);
-    }
-
-    @Test
-    void flushIfIdleLogsDeferralReasonWhileSyncing() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        List<String> logs = new ArrayList<>();
-        eventBus.register(
+        TestSharedTextProtocol syncingProtocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus syncingBus = new SimpleSyncEventBus();
+        List<String> syncingLogs = new ArrayList<>();
+        syncingBus.register(
                 event -> {
                     if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
+                        syncingLogs.add(logEvent.getMessage());
                     }
                 });
-
-        SharedTextService service =
+        SharedTextService syncing =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
+                        syncingProtocol,
+                        syncingBus,
                         () -> true,
                         () -> true,
                         () -> true, // syncing
                         () -> false,
                         () -> true);
 
-        service.queueSharedText("held back");
-
-        assertTrue(protocol.getSentTexts().isEmpty());
-        assertTrue(
-                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
-                "Deferral should be logged with a reason, got: " + logs);
-    }
-
-    @Test
-    void flushIfIdleLogsDeferralReasonWhileTransferBusy() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        List<String> logs = new ArrayList<>();
-        eventBus.register(
+        TestSharedTextProtocol transferBusyProtocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus transferBusyBus = new SimpleSyncEventBus();
+        List<String> transferBusyLogs = new ArrayList<>();
+        transferBusyBus.register(
                 event -> {
                     if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
+                        transferBusyLogs.add(logEvent.getMessage());
                     }
                 });
-
-        SharedTextService service =
+        SharedTextService transferBusy =
                 new SharedTextService(
-                        protocol,
-                        eventBus,
+                        transferBusyProtocol,
+                        transferBusyBus,
                         () -> true,
                         () -> true,
                         () -> false,
                         () -> true, // transfer busy
                         () -> true);
 
-        service.queueSharedText("held back");
+        roleNotNegotiated.queueSharedText("held back");
+        syncing.queueSharedText("held back");
+        transferBusy.queueSharedText("held back");
 
-        assertTrue(protocol.getSentTexts().isEmpty());
+        assertTrue(notNegotiatedProtocol.getSentTexts().isEmpty());
         assertTrue(
-                logs.stream().anyMatch(message -> message.contains("Shared text queued")),
-                "Deferral should be logged with a reason, got: " + logs);
+                notNegotiatedLogs.stream()
+                        .anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + notNegotiatedLogs);
+        assertTrue(syncingProtocol.getSentTexts().isEmpty());
+        assertTrue(
+                syncingLogs.stream().anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + syncingLogs);
+        assertTrue(transferBusyProtocol.getSentTexts().isEmpty());
+        assertTrue(
+                transferBusyLogs.stream()
+                        .anyMatch(message -> message.contains("Shared text queued")),
+                "Deferral should be logged with a reason, got: " + transferBusyLogs);
     }
 
     @Test
@@ -793,10 +697,6 @@ class SharedTextServiceTest {
 
         private void setReceiveFailure(IOException receiveFailure) {
             this.receiveFailure = receiveFailure;
-        }
-
-        private boolean wasReceiveSharedTextDataCalled() {
-            return receiveSharedTextDataWithLengthCalled;
         }
 
         private boolean wasReceiveSharedTextDataWithLengthCalled() {

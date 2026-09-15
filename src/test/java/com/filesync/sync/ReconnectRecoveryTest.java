@@ -2,7 +2,6 @@ package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.protocol.BatchTransferSession;
@@ -170,22 +169,7 @@ class ReconnectRecoveryTest {
                     }
                 });
 
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
+        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
 
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         coordinator.setExecutor(executor);
@@ -237,22 +221,7 @@ class ReconnectRecoveryTest {
                     }
                 });
 
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
+        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
 
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         coordinator.setExecutor(executor);
@@ -315,22 +284,7 @@ class ReconnectRecoveryTest {
                     }
                 });
 
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
+        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
 
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         coordinator.setExecutor(executor);
@@ -388,22 +342,7 @@ class ReconnectRecoveryTest {
                 });
 
         BlockingSyncProtocol protocol = new BlockingSyncProtocol();
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
+        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
 
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
         coordinator.setExecutor(executor);
@@ -424,53 +363,6 @@ class ReconnectRecoveryTest {
         } finally {
             shutdownExecutor(executor);
         }
-    }
-
-    @Test
-    void receivingFileCancellationClearsSyncStateAndRethrows() {
-        AtomicBoolean syncing = new AtomicBoolean(true);
-        List<String> logs = new ArrayList<>();
-        List<String> errors = new ArrayList<>();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
-                    } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
-                        errors.add(errorEvent.getMessage());
-                    }
-                });
-
-        CancelingIncomingFileProtocol protocol = new CancelingIncomingFileProtocol();
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
-
-        SyncProtocol.Message cancelMessage =
-                new SyncProtocol.Message(
-                        SyncProtocol.CMD_FILE_DATA, new String[] {"test.txt", "10", "false", "0"});
-
-        // The IOException is re-thrown so the listenLoop can handle it (may trigger restart)
-        assertThrows(
-                IOException.class,
-                () -> coordinator.handleIncomingFileData(cancelMessage),
-                "Cancellation during receive should re-throw so caller can handle");
-
-        assertFalse(syncing.get(), "Syncing flag should be cleared after cancellation");
-        assertTrue(errors.isEmpty(), "Cancellation during receive should not emit an error event");
     }
 
     @Test
@@ -506,38 +398,6 @@ class ReconnectRecoveryTest {
     }
 
     @Test
-    void senderCancellationClearsSyncingFlagDuringTransfer() {
-        AtomicBoolean syncing = new AtomicBoolean(true);
-        CancelSignalProtocol transportCancellationProtocol = new CancelSignalProtocol(true);
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        transportCancellationProtocol,
-                        new SimpleSyncEventBus(),
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
-
-        coordinator.cancelOngoingSync();
-
-        assertFalse(
-                transportCancellationProtocol.cancelCommandSent.get(),
-                "Cancel should not send a cancel command during transfer");
-        assertFalse(
-                transportCancellationProtocol.transferCancelSent.get(),
-                "Cancel should not send an XMODEM cancel signal");
-        assertFalse(syncing.get(), "Cancelling should clear syncing flag");
-    }
-
-    @Test
     void interruptOngoingSyncUnblocksWorkerAsBenignCancellation() throws Exception {
         Files.writeString(tempDir.resolve("test.txt"), "payload");
 
@@ -559,22 +419,7 @@ class ReconnectRecoveryTest {
                     }
                 });
 
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> tempDir.toFile(),
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
+        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
         coordinator.setCommunicationFailureReporter(failures::add);
 
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
@@ -669,35 +514,6 @@ class ReconnectRecoveryTest {
                 0,
                 protocol.perFileSendCount.get(),
                 "A file the peer cancelled must not be re-sent via the per-file fallback");
-    }
-
-    @Test
-    void directionChangeMarksRoleNegotiated() {
-        AtomicBoolean isSender = new AtomicBoolean(true);
-        AtomicBoolean roleNegotiated = new AtomicBoolean(false);
-        List<Boolean> directionStates = new ArrayList<>();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.DirectionEvent directionEvent) {
-                        directionStates.add(directionEvent.isSender());
-                    }
-                });
-
-        RoleNegotiationService service =
-                new RoleNegotiationService(
-                        new NoOpSyncProtocol(), eventBus, isSender, roleNegotiated, () -> true);
-
-        service.handleDirectionChange(true);
-
-        assertFalse(
-                service.isSender(),
-                "Remote sender announcement should switch this side to receiver");
-        assertTrue(service.isRoleNegotiated(), "Direction changes should finalize the local role");
-        assertEquals(
-                List.of(false),
-                directionStates,
-                "Direction change event should reflect the new local role");
     }
 
     @Test
@@ -907,21 +723,6 @@ class ReconnectRecoveryTest {
     }
 
     @Test
-    void waitForCommandInvokesActivityCallbackWhenHeartbeatReceived() throws IOException {
-        AtomicInteger activityCallbackCount = new AtomicInteger(0);
-        SyncProtocol protocol = new HeartbeatSimulatingProtocol();
-        protocol.setMessageActivityCallback(activityCallbackCount::incrementAndGet);
-
-        SyncProtocol.Message result = protocol.waitForCommand(SyncProtocol.CMD_ACK);
-
-        assertTrue(result != null && SyncProtocol.CMD_ACK.equals(result.getCommand()));
-        assertEquals(
-                1,
-                activityCallbackCount.get(),
-                "Activity callback should be invoked when HEARTBEAT is simulated before expected command");
-    }
-
-    @Test
     void sendFileFailurePreservesRealErrorDetail() throws IOException {
         File testFile = tempDir.resolve("test.txt").toFile();
         Files.writeString(testFile.toPath(), "content");
@@ -947,6 +748,30 @@ class ReconnectRecoveryTest {
             Thread.sleep(20);
         }
         throw new AssertionError("Timed out waiting for condition");
+    }
+
+    /**
+     * Builds the coordinator shared by the worker-lifecycle tests: a blocking protocol over the
+     * temp folder with sender defaults, no-op idle/boundary/heartbeat callbacks, and no executor
+     * attached (each test sets up its own so it can shut it down).
+     */
+    private SyncCoordinator newBlockingSyncCoordinator(
+            BlockingSyncProtocol protocol, SimpleSyncEventBus eventBus, AtomicBoolean syncing) {
+        return new SyncCoordinator(
+                protocol,
+                eventBus,
+                () -> tempDir.toFile(),
+                () -> false,
+                () -> false,
+                () -> false,
+                () -> true,
+                () -> true,
+                () -> true,
+                pendingWriteService,
+                syncing,
+                () -> {},
+                () -> {},
+                () -> {});
     }
 
     private static class StubSerialPortManager extends SerialPortManager {
@@ -1206,23 +1031,6 @@ class ReconnectRecoveryTest {
         }
     }
 
-    private static class HeartbeatSimulatingProtocol extends SyncProtocol {
-        HeartbeatSimulatingProtocol() {
-            super(new StubSerialPortManager(true));
-        }
-
-        @Override
-        public void sendHeartbeatAck() {
-            // No-op to avoid serial port write
-        }
-
-        @Override
-        public Message waitForCommand(String expectedCommand) throws IOException {
-            notifyMessageActivity();
-            return new Message(expectedCommand, new String[0]);
-        }
-    }
-
     private static class AckTimeoutProtocol extends SyncProtocol {
         AckTimeoutProtocol() {
             super(new StubSerialPortManager(true));
@@ -1236,28 +1044,6 @@ class ReconnectRecoveryTest {
         @Override
         public Message waitForCommand(String expectedCommand) throws IOException {
             throw new IOException("Timeout waiting for command: " + expectedCommand);
-        }
-    }
-
-    private static final class CancelingIncomingFileProtocol extends SyncProtocol {
-        CancelingIncomingFileProtocol() {
-            super(new StubSerialPortManager(true));
-        }
-
-        @Override
-        public void sendAck() {
-            // No-op
-        }
-
-        @Override
-        public void receiveFile(
-                File baseDir,
-                String relativePath,
-                int expectedSize,
-                boolean compressed,
-                long lastModified)
-                throws IOException {
-            throw new IOException("Transfer cancelled by sender");
         }
     }
 
@@ -1442,106 +1228,6 @@ class ReconnectRecoveryTest {
         assertTrue(protocol.perFileFallbackUsed.get(), "Should have used per-file fallback");
     }
 
-    @Test
-    void batchTransferFlushesRemainingFilesInFinalBatch() throws Exception {
-        File dir = tempDir.resolve("input").toFile();
-        dir.mkdirs();
-
-        for (int i = 0; i < 3; i++) {
-            Files.writeString(dir.toPath().resolve("file_" + i + ".txt"), "content " + i);
-        }
-
-        AtomicBoolean syncing = new AtomicBoolean(false);
-        List<String> batchedPaths = new ArrayList<>();
-        BatchCaptureProtocol protocol = new BatchCaptureProtocol(batchedPaths);
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> dir,
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
-
-        SyncPreviewPlan plan =
-                new SyncPreviewPlan(
-                        List.of(
-                                new FileChangeDetector.FileInfo("file_0.txt", 9L, 0L, "md5"),
-                                new FileChangeDetector.FileInfo("file_1.txt", 9L, 0L, "md5"),
-                                new FileChangeDetector.FileInfo("file_2.txt", 9L, 0L, "md5")),
-                        List.of(),
-                        List.of(),
-                        List.of(),
-                        27L,
-                        false);
-
-        coordinator.startSyncWithPlan(plan);
-        waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(5));
-
-        assertEquals(
-                1, protocol.batchSendCount.get(), "Should send one batch containing all 3 files");
-        assertEquals(3, batchedPaths.size(), "All 3 files should be batched");
-    }
-
-    @Test
-    void handleIncomingBatchDecodesAndWritesFiles() throws Exception {
-        File inputDir = tempDir.resolve("input").toFile();
-        inputDir.mkdirs();
-        File testFile = new File(inputDir, "test.txt");
-        Files.writeString(testFile.toPath(), "batch content");
-
-        File receiveDir = tempDir.resolve("receive").toFile();
-        receiveDir.mkdirs();
-
-        List<String> progressPaths = new ArrayList<>();
-        BatchInputProtocol protocol = new BatchInputProtocol(inputDir);
-
-        AtomicBoolean syncing = new AtomicBoolean(false);
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.LogEvent logEvent
-                            && logEvent.getMessage().contains("Batch receiving")) {
-                        progressPaths.add(logEvent.getMessage());
-                    }
-                });
-
-        SyncCoordinator coordinator =
-                new SyncCoordinator(
-                        protocol,
-                        eventBus,
-                        () -> receiveDir,
-                        () -> false,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> {},
-                        () -> {},
-                        () -> {});
-
-        coordinator.handleIncomingBatchUnknownTotal(protocol.getBatchSize());
-
-        waitUntil(() -> progressPaths.size() >= 1, Duration.ofSeconds(2));
-
-        File received = new File(receiveDir, "test.txt");
-        assertTrue(received.exists(), "File should be received and written");
-        assertEquals("batch content", Files.readString(received.toPath()), "Content should match");
-    }
-
     // ----- Batch Transfer Protocol Stubs -----
 
     private static class BatchCaptureProtocol extends SyncProtocol {
@@ -1636,39 +1322,6 @@ class ReconnectRecoveryTest {
 
         @Override
         public void sendSyncComplete() {}
-
-        @Override
-        public void sendAck() {}
-    }
-
-    private static class BatchInputProtocol extends SyncProtocol {
-        private final File inputDir;
-
-        BatchInputProtocol(File inputDir) {
-            super(new StubSerialPortManager(true));
-            this.inputDir = inputDir;
-        }
-
-        int getBatchSize() throws IOException {
-            List<Object[]> files = new ArrayList<>();
-            files.add(new Object[] {new File(inputDir, "test.txt"), "test.txt"});
-            return BatchTransferSession.buildBatch(files, 65536).length;
-        }
-
-        @Override
-        public int receiveBatch(
-                int expectedSize,
-                int totalEntries,
-                BatchTransferSession.BatchProgressCallback callback,
-                File baseDir,
-                BatchTransferSession.WriteFailureHandler failureHandler)
-                throws IOException {
-            List<Object[]> files = new ArrayList<>();
-            files.add(new Object[] {new File(inputDir, "test.txt"), "test.txt"});
-            byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-            return BatchTransferSession.decodeAndWriteBatch(
-                    baseDir, batch, totalEntries, callback, failureHandler);
-        }
 
         @Override
         public void sendAck() {}

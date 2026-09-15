@@ -212,43 +212,25 @@ class DeltaProtocolTest {
     }
 
     @Test
-    void receiveFileDelta_nullSourceMd5SkipsVerification() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
+    void receiveFileDelta_blankSourceMd5SkipsVerification() throws IOException {
         byte[] base = randomBytes(BLOCK * 2, 6);
         byte[] source = base.clone();
         source[0] = (byte) ~source[0];
         byte[] delta = buildDelta(base, source);
 
+        // Both null and "" skip the verification branch (!isEmpty() short-circuit) and still
+        // write the reconstructed file.
         Path existing = tempDir.resolve("big.bin");
-        Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
+        for (String blankMd5 : new String[] {null, ""}) {
+            ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+            SyncProtocol protocol = new SyncProtocol(serial);
+            Files.write(existing, base);
+            serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
 
-        // sourceMd5=null skips the verification branch and still writes the reconstructed file.
-        protocol.receiveFileDelta(
-                tempDir.toFile(), "big.bin", delta.length, false, 0L, source.length, null);
-        assertArrayEquals(source, Files.readAllBytes(existing));
-    }
-
-    @Test
-    void receiveFileDelta_emptySourceMd5SkipsVerification() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        byte[] base = randomBytes(BLOCK * 2, 8);
-        byte[] source = base.clone();
-        source[0] = (byte) ~source[0];
-        byte[] delta = buildDelta(base, source);
-
-        Path existing = tempDir.resolve("big.bin");
-        Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
-
-        // sourceMd5="" hits the !isEmpty()==false short-circuit, skipping verification.
-        protocol.receiveFileDelta(
-                tempDir.toFile(), "big.bin", delta.length, false, 0L, source.length, "");
-        assertArrayEquals(source, Files.readAllBytes(existing));
+            protocol.receiveFileDelta(
+                    tempDir.toFile(), "big.bin", delta.length, false, 0L, source.length, blankMd5);
+            assertArrayEquals(source, Files.readAllBytes(existing), "sourceMd5=" + blankMd5);
+        }
     }
 
     @Test

@@ -333,6 +333,8 @@ class FileSyncManagerTest {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
         try {
             fsm.startListening("TEST");
 
@@ -372,6 +374,10 @@ class FileSyncManagerTest {
             assertTrue(
                     Arrays.equals(result, expected),
                     "Bytes received via XMODEM should match the scripted payload");
+            assertTrue(
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
+                            + " completes");
         } finally {
             stopQuietly(fsm);
         }
@@ -423,64 +429,6 @@ class FileSyncManagerTest {
             assertFalse(
                     fsm.isTransferBusy(),
                     "isTransferBusy must be false after the XMODEM content transfer completes");
-        } finally {
-            stopQuietly(fsm);
-        }
-    }
-
-    @Test
-    void fetchRemoteFileContent_xmodemXferResponse_postsSyncControlRefresh() throws Exception {
-        File folder = tempDir.resolve("root-xfer-refresh").toFile();
-        folder.mkdirs();
-
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        fsm.setSyncFolder(folder);
-        List<SyncEvent> events = new CopyOnWriteArrayList<>();
-        fsm.getEventBus().register(events::add);
-        try {
-            fsm.startListening("TEST");
-
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
-
-            byte[] expected = new byte[100];
-            for (int i = 0; i < expected.length; i++) {
-                expected[i] = (byte) i;
-            }
-
-            // Mirror the responder's sendFileContentViaXmodem: the announcement carries the size
-            // as the sole first parameter (index 0), followed by the raw XMODEM byte stream.
-            Thread feeder =
-                    new Thread(
-                            () -> {
-                                waitUntil(
-                                        () ->
-                                                serial.getWrittenLines().stream()
-                                                        .anyMatch(
-                                                                l ->
-                                                                        l.contains(
-                                                                                "FILE_CONTENT_REQ")),
-                                        Duration.ofSeconds(5));
-                                serial.feedLine(
-                                        "[[SYNC:FILE_CONTENT_XFER:" + expected.length + "]]");
-                                serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(expected));
-                            },
-                            "fsm-test-feeder-xfer-refresh");
-            feeder.start();
-
-            byte[] result = fsm.fetchRemoteFileContent("big.bin");
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertTrue(result != null, "fetchRemoteFileContent should return XMODEM content");
-            assertTrue(
-                    Arrays.equals(result, expected),
-                    "Bytes received via XMODEM should match the scripted payload");
-            assertTrue(
-                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
-                    "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
-                            + " completes");
         } finally {
             stopQuietly(fsm);
         }

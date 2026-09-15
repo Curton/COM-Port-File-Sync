@@ -91,12 +91,10 @@ class FileChangeDetectorCaseRenameTest {
         assertTrue(
                 FileChangeDetector.getFilesToDelete(sender, receiver).isEmpty(),
                 "The sender still has the file, so it is not an obsolete receiver-only path");
-    }
 
-    @Test
-    void caseOnlyRenameInSubdirectoryIsNotADeletion() {
-        FileManifest sender = manifest(false, files(file("docs/Readme.md", 10, "same")));
-        FileManifest receiver = manifest(false, files(file("docs/README.md", 10, "same")));
+        // A path nested below the root must converge the same way as a root-level one.
+        sender = manifest(false, files(file("docs/Readme.md", 10, "same")));
+        receiver = manifest(false, files(file("docs/README.md", 10, "same")));
 
         assertTrue(FileChangeDetector.getChangedFiles(sender, receiver).isEmpty());
         assertTrue(FileChangeDetector.getFilesToDelete(sender, receiver).isEmpty());
@@ -131,7 +129,8 @@ class FileChangeDetectorCaseRenameTest {
     // --- directories: rmdir is recursive, so the same rule has to hold ------
 
     @Test
-    void caseOnlyDirectoryRenameIsNeitherCreatedNorDeletedOnCaseInsensitiveFilesystem() {
+    void caseOnlyDirectoryRenameIsMirroredOnlyOnCaseSensitiveFilesystem() {
+        // Case-insensitive receiver: Bin and bin are one and the same directory.
         FileManifest sender = emptyDirs(false, "bin");
         FileManifest receiver = emptyDirs(false, "Bin");
 
@@ -141,12 +140,10 @@ class FileChangeDetectorCaseRenameTest {
         assertTrue(
                 FileChangeDetector.getEmptyDirectoriesToCreate(sender, receiver).isEmpty(),
                 "The receiver already has that directory, under the other spelling");
-    }
 
-    @Test
-    void caseOnlyDirectoryRenameIsStillMirroredOnCaseSensitiveFilesystem() {
-        FileManifest sender = emptyDirs(true, "bin");
-        FileManifest receiver = emptyDirs(true, "Bin");
+        // Case-sensitive receiver: two entries, so the rename is mirrored both ways.
+        sender = emptyDirs(true, "bin");
+        receiver = emptyDirs(true, "Bin");
 
         assertEquals(
                 List.of("Bin"), FileChangeDetector.getEmptyDirectoriesToDelete(sender, receiver));

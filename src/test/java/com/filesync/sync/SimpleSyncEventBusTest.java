@@ -9,17 +9,6 @@ import org.junit.jupiter.api.Test;
 class SimpleSyncEventBusTest {
 
     @Test
-    void registerAndPostDeliversEventToListener() {
-        SimpleSyncEventBus bus = new SimpleSyncEventBus();
-        AtomicInteger eventCount = new AtomicInteger(0);
-
-        bus.register(event -> eventCount.incrementAndGet());
-
-        bus.post(new SyncEvent.SyncStartedEvent());
-        assertEquals(1, eventCount.get());
-    }
-
-    @Test
     void postNullEventDoesNotDeliverToListeners() {
         SimpleSyncEventBus bus = new SimpleSyncEventBus();
         AtomicInteger eventCount = new AtomicInteger(0);
@@ -36,14 +25,31 @@ class SimpleSyncEventBusTest {
         SimpleSyncEventBus bus = new SimpleSyncEventBus();
         AtomicInteger count1 = new AtomicInteger(0);
         AtomicInteger count2 = new AtomicInteger(0);
+        AtomicInteger syncStartedCount = new AtomicInteger(0);
+        AtomicInteger syncCompleteCount = new AtomicInteger(0);
 
         bus.register(event -> count1.incrementAndGet());
         bus.register(event -> count2.incrementAndGet());
+        bus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SyncStartedEvent) {
+                        syncStartedCount.incrementAndGet();
+                    } else if (event instanceof SyncEvent.SyncCompleteEvent) {
+                        syncCompleteCount.incrementAndGet();
+                    }
+                });
 
         bus.post(new SyncEvent.SyncStartedEvent());
 
         assertEquals(1, count1.get());
         assertEquals(1, count2.get());
+
+        // Different event types are dispatched to the matching listener branches.
+        bus.post(new SyncEvent.SyncCompleteEvent());
+        bus.post(new SyncEvent.SyncStartedEvent());
+
+        assertEquals(2, syncStartedCount.get());
+        assertEquals(1, syncCompleteCount.get());
     }
 
     @Test
@@ -108,28 +114,5 @@ class SimpleSyncEventBusTest {
         bus.register(null);
 
         bus.post(new SyncEvent.SyncStartedEvent());
-    }
-
-    @Test
-    void differentEventTypesArePostedCorrectly() {
-        SimpleSyncEventBus bus = new SimpleSyncEventBus();
-        AtomicInteger syncStartedCount = new AtomicInteger(0);
-        AtomicInteger syncCompleteCount = new AtomicInteger(0);
-
-        bus.register(
-                event -> {
-                    if (event instanceof SyncEvent.SyncStartedEvent) {
-                        syncStartedCount.incrementAndGet();
-                    } else if (event instanceof SyncEvent.SyncCompleteEvent) {
-                        syncCompleteCount.incrementAndGet();
-                    }
-                });
-
-        bus.post(new SyncEvent.SyncStartedEvent());
-        bus.post(new SyncEvent.SyncCompleteEvent());
-        bus.post(new SyncEvent.SyncStartedEvent());
-
-        assertEquals(2, syncStartedCount.get());
-        assertEquals(1, syncCompleteCount.get());
     }
 }

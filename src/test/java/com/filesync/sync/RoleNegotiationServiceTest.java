@@ -77,21 +77,18 @@ class RoleNegotiationServiceTest {
     void confirmCurrentRoleIfNeededSetsRoleWhenNotNegotiated() {
         roleNegotiated.set(false);
 
-        boolean result = service.confirmCurrentRoleIfNeeded(false);
+        boolean senderResult = service.confirmCurrentRoleIfNeeded(true);
 
-        assertTrue(result);
-        assertFalse(service.isSender());
+        assertTrue(senderResult);
+        assertTrue(service.isSender());
         assertTrue(service.isRoleNegotiated());
-    }
 
-    @Test
-    void confirmCurrentRoleIfNeededReturnsTrueAndSetsSender() {
         roleNegotiated.set(false);
 
-        boolean result = service.confirmCurrentRoleIfNeeded(true);
+        boolean receiverResult = service.confirmCurrentRoleIfNeeded(false);
 
-        assertTrue(result);
-        assertTrue(service.isSender());
+        assertTrue(receiverResult);
+        assertFalse(service.isSender());
         assertTrue(service.isRoleNegotiated());
     }
 
@@ -183,33 +180,27 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
-    void onNegotiatedCallbackRunsWhenNegotiationCompletes() throws IOException {
+    void onNegotiatedCallbackRunsViaAllEntryPoints() throws IOException {
         AtomicInteger callbackCount = new AtomicInteger();
         service.setOnNegotiated(callbackCount::incrementAndGet);
 
         service.handleRoleNegotiate(1000L);
 
         assertEquals(1, callbackCount.get(), "Callback should fire once negotiation completes");
-    }
 
-    @Test
-    void onNegotiatedCallbackRunsOnDirectionChange() {
-        AtomicInteger callbackCount = new AtomicInteger();
-        service.setOnNegotiated(callbackCount::incrementAndGet);
-
+        // Direction change finalizes the role; restore the unnegotiated sender state first.
+        roleNegotiated.set(false);
+        isSender.set(true);
         service.handleDirectionChange(true);
 
-        assertEquals(1, callbackCount.get(), "Direction change finalizes the role");
-    }
+        assertEquals(2, callbackCount.get(), "Direction change finalizes the role");
 
-    @Test
-    void onNegotiatedCallbackRunsOnSetSender() {
-        AtomicInteger callbackCount = new AtomicInteger();
-        service.setOnNegotiated(callbackCount::incrementAndGet);
-
+        // Manual direction set finalizes the role the same way.
+        roleNegotiated.set(false);
+        isSender.set(true);
         service.setSender(false);
 
-        assertEquals(1, callbackCount.get(), "Manual direction set finalizes the role");
+        assertEquals(3, callbackCount.get(), "Manual direction set finalizes the role");
     }
 
     @Test
@@ -269,18 +260,6 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
-    void handleDirectionChangePostsEventWhenRoleActuallyChanges() {
-        isSender.set(false);
-        roleNegotiated.set(true);
-        eventBus.clearEvents();
-
-        service.handleDirectionChange(false);
-
-        assertTrue(service.isSender(), "Receiver becoming sender is a real role change");
-        assertTrue(eventBus.hasDirectionEvent(true));
-    }
-
-    @Test
     void handleRoleNegotiateWithHigherPriorityBecomesSender() throws IOException {
         roleNegotiated.set(false);
         isSender.set(false);
@@ -333,10 +312,7 @@ class RoleNegotiationServiceTest {
         assertFalse(service.isSender());
         assertTrue(service.isRoleNegotiated());
         assertTrue(eventBus.hasDirectionEvent(false));
-    }
 
-    @Test
-    void handleDirectionChangeFromReceiverMakesSender() {
         isSender.set(false);
         roleNegotiated.set(false);
 
@@ -344,6 +320,16 @@ class RoleNegotiationServiceTest {
 
         assertTrue(service.isSender());
         assertTrue(service.isRoleNegotiated());
+        assertTrue(eventBus.hasDirectionEvent(true));
+
+        // Already-negotiated side of the same branch: a real role change still posts the event.
+        isSender.set(false);
+        roleNegotiated.set(true);
+        eventBus.clearEvents();
+
+        service.handleDirectionChange(false);
+
+        assertTrue(service.isSender(), "Receiver becoming sender is a real role change");
         assertTrue(eventBus.hasDirectionEvent(true));
     }
 

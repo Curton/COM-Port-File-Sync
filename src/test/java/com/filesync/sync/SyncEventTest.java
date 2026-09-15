@@ -7,6 +7,12 @@ import org.junit.jupiter.api.Test;
 class SyncEventTest {
 
     @Test
+    void eventTypeEnumHasNoUnexpectedValues() {
+        // Guards against a new SyncEventType constant being added without an event test here.
+        assertEquals(16, SyncEventType.values().length);
+    }
+
+    @Test
     void connectionEventStoresConnectedState() {
         SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(true);
         assertTrue(event.isConnected());

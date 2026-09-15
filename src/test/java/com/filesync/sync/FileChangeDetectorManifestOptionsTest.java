@@ -59,30 +59,18 @@ class FileChangeDetectorManifestOptionsTest {
     }
 
     @Test
-    void builderThreadPoolSizeMinimumIsOne() {
-        FileChangeDetector.ManifestGenerationOptions options =
+    void builderThreadPoolSizeBelowOneBecomesOne() {
+        FileChangeDetector.ManifestGenerationOptions zero =
                 FileChangeDetector.ManifestGenerationOptions.builder()
                         .withHashThreadPoolSize(0)
                         .build();
+        assertEquals(1, zero.getHashThreadPoolSize());
 
-        assertEquals(1, options.getHashThreadPoolSize());
-    }
-
-    @Test
-    void builderThreadPoolSizeNegativeBecomesOne() {
-        FileChangeDetector.ManifestGenerationOptions options =
+        FileChangeDetector.ManifestGenerationOptions negative =
                 FileChangeDetector.ManifestGenerationOptions.builder()
                         .withHashThreadPoolSize(-5)
                         .build();
-
-        assertEquals(1, options.getHashThreadPoolSize());
-    }
-
-    @Test
-    void builderBuilderMethodReturnsNewBuilder() {
-        FileChangeDetector.ManifestGenerationOptions.Builder builder =
-                FileChangeDetector.ManifestGenerationOptions.builder();
-        assertNotNull(builder);
+        assertEquals(1, negative.getHashThreadPoolSize());
     }
 
     @Test

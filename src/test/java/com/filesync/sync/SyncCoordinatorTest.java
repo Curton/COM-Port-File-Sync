@@ -21,6 +21,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -266,7 +267,8 @@ class SyncCoordinatorTest {
     // ========== Medium tests: startSync (no executor) ==========
 
     @Test
-    void startSync_noExecutor_callsPerformSyncDirectly() throws IOException {
+    void startSync_noExecutor_callsPerformSyncDirectly_andPostsTimeSyncMarkerAfterSyncStarted()
+            throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         coordinator.setExecutor(null);
@@ -282,22 +284,6 @@ class SyncCoordinatorTest {
 
         // Since no executor, performSync runs synchronously and posts SyncStartedEvent
         verify(mockEventBus).post(isA(SyncEvent.SyncStartedEvent.class));
-    }
-
-    @Test
-    void startSync_noExecutor_postsTimeSyncMarkerAfterSyncStarted() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        coordinator.setExecutor(null);
-
-        // Mock protocol methods to avoid actual file operations
-        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
-        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString())).thenReturn(mockManifestMsg);
-        when(mockProtocol.receiveManifest(anyInt()))
-                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
-
-        coordinator.startSync();
 
         int startedIndex = -1;
         int markerIndex = -1;
@@ -368,56 +354,22 @@ class SyncCoordinatorTest {
     }
 
     @Test
-    void startSyncWithPlan_postsError_whenSyncFolderNotSelected() {
-        // Use a supplier that returns null
-        File nullFolder = null;
-        SyncCoordinator coordinatorWithNullFolder =
-                new SyncCoordinator(
-                        mockProtocol,
-                        mockEventBus,
-                        () -> nullFolder,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> syncIdleCalls.incrementAndGet(),
-                        () -> syncBoundaryCalls.incrementAndGet(),
-                        () -> heartbeatTouches.incrementAndGet());
+    void startSyncWithPlan_postsError_whenSyncFolderNotSelectedOrMissing() {
+        // A null folder supplier is rejected before the sync starts
+        SyncCoordinator coordinatorWithNullFolder = createCoordinatorAt(null);
 
         coordinatorWithNullFolder.startSyncWithPlan(null);
 
         verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Please select a sync folder first", getLastErrorMessage());
-    }
 
-    @Test
-    void startSyncWithPlan_postsError_whenSyncFolderDoesNotExist() {
-        // Use a supplier that returns non-existent folder
+        // A folder that does not exist on disk is rejected the same way
         File nonExistentFolder = new File("C:/non_existent_folder_12345");
-        SyncCoordinator coordinatorWithNonExistentFolder =
-                new SyncCoordinator(
-                        mockProtocol,
-                        mockEventBus,
-                        () -> nonExistentFolder,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> syncIdleCalls.incrementAndGet(),
-                        () -> syncBoundaryCalls.incrementAndGet(),
-                        () -> heartbeatTouches.incrementAndGet());
+        SyncCoordinator coordinatorWithNonExistentFolder = createCoordinatorAt(nonExistentFolder);
 
         coordinatorWithNonExistentFolder.startSyncWithPlan(null);
 
-        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
+        verify(mockEventBus, times(2)).post(isA(SyncEvent.ErrorEvent.class));
         assertEquals("Please select a sync folder first", getLastErrorMessage());
     }
 
@@ -722,26 +674,6 @@ class SyncCoordinatorTest {
     }
 
     @Test
-    void handleFileDelete_postsError_whenDeletionFails() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        // handleFileDelete only deletes files (isFile() check), not directories.
-        // To trigger an error, we need a path that exists as a directory but is passed as a file.
-        // Since handleFileDelete silently skips directories (isFile() returns false),
-        // we test the error path by verifying the code path: there's no reliable way to
-        // force file.delete() to fail in a temp directory. Instead, verify no error is posted
-        // for a directory path (the code silently skips it).
-        Path dirPath = tempDir.resolve("aDir");
-        Files.createDirectories(dirPath);
-        String relativePath = "aDir";
-
-        coordinator.handleFileDelete(relativePath);
-
-        // handleFileDelete skips directories (isFile() returns false), no error posted
-        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
-    }
-
-    @Test
     void handleFileDelete_doesNothing_whenFileDoesNotExist() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
@@ -763,8 +695,9 @@ class SyncCoordinatorTest {
 
         coordinator.handleFileDelete(relativePath);
 
-        // isFile() returns false for directory, so nothing is deleted
+        // isFile() returns false for directory, so nothing is deleted and no error is posted
         assertTrue(Files.exists(dirPath));
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
     }
 
     @Test
@@ -836,9 +769,10 @@ class SyncCoordinatorTest {
     // ========== Complex tests: handleManifestRequest ==========
 
     @Test
-    void handleManifestRequest_sendsManifest() throws IOException {
+    void handleManifestRequest_sendsManifest_logsDiagnostics_andResetsSyncing() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        Files.createDirectory(tempDir.resolve("emptyDir"));
         Path testFile = tempDir.resolve("manifestTest.txt");
         Files.writeString(testFile, "content");
 
@@ -847,6 +781,25 @@ class SyncCoordinatorTest {
         verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
         assertEquals(1, heartbeatTouches.get());
         assertEquals(1, syncIdleCalls.get());
+        // After manifest request, syncing should be set to false (in finally block)
+        assertFalse(syncing.get());
+        assertTrue(
+                postedEvents.stream()
+                        .anyMatch(
+                                e ->
+                                        e instanceof SyncEvent.LogEvent le
+                                                && le.getMessage().contains("empty dirs")),
+                "Manifest completion must report the empty directory count");
+        assertTrue(
+                postedEvents.stream()
+                        .anyMatch(
+                                e ->
+                                        e instanceof SyncEvent.LogEvent le
+                                                && le.getMessage().startsWith("TIME-SYNC")
+                                                && TimeSyncMarker.parseEpochMs(le.getMessage())
+                                                        != null),
+                "handleManifestRequest must log a TIME-SYNC marker at entry so the receiver's log"
+                        + " can be aligned with the sender's");
     }
 
     @Test
@@ -990,64 +943,10 @@ class SyncCoordinatorTest {
         verify(mockProtocol).sendError("Sync folder not configured");
     }
 
-    @Test
-    void handleManifestRequest_logsEmptyDirectoryCount() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        Files.createDirectory(tempDir.resolve("emptyDir"));
-        Path testFile = tempDir.resolve("manifestTest.txt");
-        Files.writeString(testFile, "content");
-
-        coordinator.handleManifestRequest(null, null);
-
-        verify(mockProtocol).sendManifest(isA(FileChangeDetector.FileManifest.class));
-        assertTrue(
-                postedEvents.stream()
-                        .anyMatch(
-                                e ->
-                                        e instanceof SyncEvent.LogEvent le
-                                                && le.getMessage().contains("empty dirs")),
-                "Manifest completion must report the empty directory count");
-    }
-
-    @Test
-    void handleManifestRequest_setsSyncingToTrue() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        Path testFile = tempDir.resolve("manifestTest.txt");
-        Files.writeString(testFile, "content");
-
-        coordinator.handleManifestRequest(null, null);
-
-        // After manifest request, syncing should be set to false (in finally block)
-        assertFalse(syncing.get());
-    }
-
-    @Test
-    void handleManifestRequest_postsTimeSyncMarkerAtEntry() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        Path testFile = tempDir.resolve("manifestTest.txt");
-        Files.writeString(testFile, "content");
-
-        coordinator.handleManifestRequest(null, null);
-
-        assertTrue(
-                postedEvents.stream()
-                        .anyMatch(
-                                e ->
-                                        e instanceof SyncEvent.LogEvent le
-                                                && le.getMessage().startsWith("TIME-SYNC")
-                                                && TimeSyncMarker.parseEpochMs(le.getMessage())
-                                                        != null),
-                "handleManifestRequest must log a TIME-SYNC marker at entry so the receiver's log"
-                        + " can be aligned with the sender's");
-    }
-
     // ========== Complex tests: handleIncomingBatch ==========
 
     @Test
-    void handleIncomingBatch_callsProtocolReceiveBatch() throws IOException {
+    void handleIncomingBatch_callsProtocolReceiveBatch_logsAndResetsSyncing() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
 
@@ -1062,18 +961,9 @@ class SyncCoordinatorTest {
                         isA(BatchTransferSession.WriteFailureHandler.class));
         // handleIncomingBatch doesn't call touchHeartbeat() in success path
         assertEquals(0, heartbeatTouches.get());
-    }
-
-    @Test
-    void handleIncomingBatch_setsSyncingToTrue() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        syncing.set(false);
-
-        coordinator.handleIncomingBatch(100, 10);
-
         // After method completes, syncing should be false (in finally block)
         assertFalse(syncing.get());
+        verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
     }
 
     @Test
@@ -1108,20 +998,11 @@ class SyncCoordinatorTest {
                         isA(BatchTransferSession.WriteFailureHandler.class));
     }
 
-    @Test
-    void handleIncomingBatch_logsBatchReceived() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.handleIncomingBatch(100, 10);
-
-        verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
-    }
-
     // ========== Complex tests: handleIncomingBatchUnknownTotal ==========
 
     @Test
-    void handleIncomingBatchUnknownTotal_callsProtocolReceiveBatch() throws IOException {
+    void handleIncomingBatchUnknownTotal_callsProtocolReceiveBatch_andResetsSyncing()
+            throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
 
@@ -1134,23 +1015,13 @@ class SyncCoordinatorTest {
                         isA(BatchTransferSession.BatchProgressCallback.class),
                         isA(File.class),
                         isA(BatchTransferSession.WriteFailureHandler.class));
-    }
-
-    @Test
-    void handleIncomingBatchUnknownTotal_setsSyncingToTrue() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        syncing.set(false);
-
-        coordinator.handleIncomingBatchUnknownTotal(100);
-
         assertFalse(syncing.get());
     }
 
     // ========== Complex tests: handleIncomingFileData ==========
 
     @Test
-    void handleIncomingFileData_postsLogEvent() throws IOException {
+    void handleIncomingFileData_success_logsReceivesAndMarksWritten() throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
@@ -1163,22 +1034,9 @@ class SyncCoordinatorTest {
 
         // handleIncomingFileData posts 2 LogEvents: "Receiving file" + "File received"
         verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
-    }
-
-    @Test
-    void handleIncomingFileData_callsProtocolReceiveFile() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
-        when(mockMsg.getParam(0)).thenReturn("test.txt");
-        when(mockMsg.getParamAsInt(1)).thenReturn(100);
-        when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
-        when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
-
-        coordinator.handleIncomingFileData(mockMsg);
-
         verify(mockProtocol)
                 .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+        verify(pendingWriteService).markWritten("test.txt");
     }
 
     @Test
@@ -1318,36 +1176,16 @@ class SyncCoordinatorTest {
                 .enqueue(any(), anyString(), any(), anyLong(), anyString());
     }
 
-    @Test
-    void handleIncomingFileData_success_marksWritten() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        SyncProtocol.Message mockMsg = mock(SyncProtocol.Message.class);
-        when(mockMsg.getParam(0)).thenReturn("test.txt");
-        when(mockMsg.getParamAsInt(1)).thenReturn(100);
-        when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
-        when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
-
-        coordinator.handleIncomingFileData(mockMsg);
-
-        verify(pendingWriteService).markWritten("test.txt");
-    }
-
     // ========== Complex tests: createSyncPreviewPlan ==========
 
     @Test
     void createSyncPreviewPlan_generatesManifest() throws IOException {
-        when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncCoordinator coordinator =
                 createCoordinator(
                         () -> true, () -> true, () -> true, null, () -> false, () -> true);
         Path testFile = tempDir.resolve("previewTest.txt");
         Files.writeString(testFile, "content");
-        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
-        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
-        when(mockProtocol.receiveManifest(anyInt()))
-                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+        stubManifestExchangeForPreview();
 
         SyncPreviewPlan plan = coordinator.createSyncPreviewPlan();
 
@@ -1359,18 +1197,13 @@ class SyncCoordinatorTest {
 
     @Test
     void createSyncPreviewPlan_postsManifestProgressAndWaitingMarker() throws IOException {
-        when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncCoordinator coordinator =
                 createCoordinator(
                         () -> true, () -> true, () -> true, null, () -> false, () -> true);
         for (int i = 0; i < 3; i++) {
             Files.writeString(tempDir.resolve("progress" + i + ".txt"), "content-" + i);
         }
-        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
-        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
-        when(mockProtocol.receiveManifest(anyInt()))
-                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+        stubManifestExchangeForPreview();
 
         coordinator.createSyncPreviewPlan();
 
@@ -1427,17 +1260,12 @@ class SyncCoordinatorTest {
     void createSyncPreviewPlan_extendsTimeoutDuringManifestExchange() throws IOException {
         // Verify the protocol timeout is temporarily extended to 10 minutes for the manifest
         // exchange and then restored afterwards.
-        when(mockProtocol.getTimeout()).thenReturn(30000);
         SyncCoordinator coordinator =
                 createCoordinator(
                         () -> true, () -> true, () -> true, null, () -> false, () -> true);
         Path testFile = tempDir.resolve("timeoutTest.txt");
         Files.writeString(testFile, "content");
-        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
-        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
-        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
-        when(mockProtocol.receiveManifest(anyInt()))
-                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+        stubManifestExchangeForPreview();
 
         coordinator.createSyncPreviewPlan();
 
@@ -1750,7 +1578,21 @@ class SyncCoordinatorTest {
                         + ")");
     }
 
-    // ========== Helper method ==========
+    // ========== Helper methods ==========
+
+    /**
+     * Stubs the manifest exchange shared by the {@code createSyncPreviewPlan} happy-path tests: the
+     * protocol timeout is readable, the manifest wait returns immediately, and the remote manifest
+     * mirrors the sync folder's current contents.
+     */
+    private void stubManifestExchangeForPreview() throws IOException {
+        when(mockProtocol.getTimeout()).thenReturn(30000);
+        SyncProtocol.Message mockManifestMsg = mock(SyncProtocol.Message.class);
+        when(mockManifestMsg.getParams()).thenReturn(new String[] {"0"});
+        when(mockProtocol.waitForCommand(anyString(), anyLong())).thenReturn(mockManifestMsg);
+        when(mockProtocol.receiveManifest(anyInt()))
+                .thenReturn(FileChangeDetector.generateManifest(syncFolder, false, true));
+    }
 
     private String getLastErrorMessage() {
         for (int i = postedEvents.size() - 1; i >= 0; i--) {

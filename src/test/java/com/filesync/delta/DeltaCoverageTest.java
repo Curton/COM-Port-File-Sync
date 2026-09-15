@@ -348,12 +348,44 @@ class DeltaCoverageTest {
     // ---------- SignatureUtil branches ----------
 
     @Test
+    void signatureUtil_chooseBlockSizeClampsToRange() {
+        assertEquals(512, SignatureUtil.chooseBlockSize(0));
+        assertEquals(512, SignatureUtil.chooseBlockSize(1));
+        assertEquals(512, SignatureUtil.chooseBlockSize(100));
+        // sqrt(1MB) = 1024
+        assertEquals(1024, SignatureUtil.chooseBlockSize(1024 * 1024));
+        // sqrt(100MB) ~ 10000 -> clamped to 8192
+        assertEquals(8192, SignatureUtil.chooseBlockSize(100L * 1024 * 1024));
+        assertEquals(8192, SignatureUtil.chooseBlockSize(1L * 1024 * 1024 * 1024));
+    }
+
+    @Test
     void signatureUtil_nonPositiveBlockSizeThrows() {
         assertThrows(
                 IllegalArgumentException.class, () -> SignatureUtil.compute("x", new byte[200], 0));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> SignatureUtil.compute("x", new byte[200], -1));
+    }
+
+    @Test
+    void signatureUtil_computeWithExplicitBlockSizeProducesFullBlocksOnly() throws IOException {
+        byte[] data = new byte[BLOCK * 3 + 17]; // 17 trailing bytes < one block
+        new java.util.Random(42).nextBytes(data);
+
+        // The explicit-block-size overload excludes the trailing partial block.
+        FileSignatures sigs = SignatureUtil.compute("a.bin", data, BLOCK);
+        assertEquals(BLOCK, sigs.getBlockSize());
+        assertEquals(3, sigs.getBlockCount());
+        assertEquals(data.length, sigs.getSourceSize());
+        assertEquals(3, sigs.getSignatures().size());
+        // Block indices are 0..2, each with a truncated strong hash.
+        for (int i = 0; i < sigs.getSignatures().size(); i++) {
+            assertEquals(i, sigs.getSignatures().get(i).getBlockIndex());
+            assertEquals(
+                    BlockSignature.STRONG_HASH_LENGTH,
+                    sigs.getSignatures().get(i).getStrongHash().length);
+        }
     }
 
     @Test
@@ -367,5 +399,12 @@ class DeltaCoverageTest {
         assertEquals(SignatureUtil.chooseBlockSize(data.length), sigs.getBlockSize());
         assertTrue(sigs.getBlockCount() > 0);
         assertEquals(data.length, sigs.getSourceSize());
+
+        // A file smaller than one adaptive block yields no full blocks at all.
+        Path tiny = tmp.resolve("tiny.bin");
+        Files.write(tiny, new byte[10]);
+        FileSignatures tinySigs = SignatureUtil.compute("tiny.bin", tiny.toFile());
+        assertEquals(0, tinySigs.getBlockCount());
+        assertTrue(tinySigs.getSignatures().isEmpty());
     }
 }

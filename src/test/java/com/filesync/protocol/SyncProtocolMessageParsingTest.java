@@ -207,110 +207,43 @@ class SyncProtocolMessageParsingTest {
 
     // ========== Send convenience methods ==========
 
-    @Test
-    void sendAck_framedCorrectly() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendAck();
-        assertEquals("[[SYNC:ACK]]", serialPort.getLastSentLine());
+    @FunctionalInterface
+    private interface Sender {
+        void send(SyncProtocol protocol) throws IOException;
     }
 
-    @Test
-    void sendHeartbeat_framedCorrectly() throws IOException {
+    /**
+     * Every send* convenience delegates to {@code sendCommand}. One pass over their framed output:
+     * the line must be a complete frame containing the expected marker and parameters (for the
+     * parameterless commands the expected fragment is the whole frame, so the marker checks make
+     * that an exact-match).
+     */
+    private static void assertFramed(Sender sender, String... expectedFragments)
+            throws IOException {
         RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
         SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendHeartbeat();
-        assertEquals("[[SYNC:HEARTBEAT]]", serialPort.getLastSentLine());
-    }
-
-    @Test
-    void sendHeartbeatAck_framedCorrectly() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendHeartbeatAck();
-        assertEquals("[[SYNC:HEARTBEAT_ACK]]", serialPort.getLastSentLine());
-    }
-
-    @Test
-    void sendDisconnect_framedCorrectly() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendDisconnect();
-        assertEquals("[[SYNC:DISCONNECT]]", serialPort.getLastSentLine());
-    }
-
-    @Test
-    void sendError_framedWithMessage() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendError("something failed");
+        sender.send(protocol);
         String line = serialPort.getLastSentLine();
         assertNotNull(line);
-        assertTrue(line.contains("ERROR"));
-        assertTrue(line.contains("something failed"));
+        assertTrue(line.startsWith("[[SYNC:"), "line must start a frame: " + line);
+        assertTrue(line.endsWith("]]"), "line must end the frame: " + line);
+        for (String fragment : expectedFragments) {
+            assertTrue(line.contains(fragment), line + " must contain: " + fragment);
+        }
     }
 
     @Test
-    void sendDirectionChange_framedWithBoolean() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendDirectionChange(true);
-        String line = serialPort.getLastSentLine();
-        assertNotNull(line);
-        assertTrue(line.contains("DIRECTION_CHANGE"));
-        assertTrue(line.contains("true"));
-    }
-
-    @Test
-    void sendRoleNegotiate_framedWithPriorityAndTieBreaker() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendRoleNegotiate(100L, 200L);
-        String line = serialPort.getLastSentLine();
-        assertNotNull(line);
-        assertTrue(line.contains("ROLE_NEGOTIATE"));
-        assertTrue(line.contains("100"));
-        assertTrue(line.contains("200"));
-    }
-
-    @Test
-    void sendFileDelete_framedWithPath() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendFileDelete("sub/file.txt");
-        String line = serialPort.getLastSentLine();
-        assertNotNull(line);
-        assertTrue(line.contains("FILE_DELETE"));
-        assertTrue(line.contains("sub/file.txt"));
-    }
-
-    @Test
-    void sendMkdir_framedWithPath() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendMkdir("newdir");
-        String line = serialPort.getLastSentLine();
-        assertNotNull(line);
-        assertTrue(line.contains("MKDIR"));
-        assertTrue(line.contains("newdir"));
-    }
-
-    @Test
-    void sendRmdir_framedWithPath() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendRmdir("olddir");
-        String line = serialPort.getLastSentLine();
-        assertNotNull(line);
-        assertTrue(line.contains("RMDIR"));
-        assertTrue(line.contains("olddir"));
-    }
-
-    @Test
-    void sendCancelCommand_framedCorrectly() throws IOException {
-        RecordingSerialPortManager serialPort = new RecordingSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serialPort);
-        protocol.sendCancelCommand();
-        assertEquals("[[SYNC:CANCEL]]", serialPort.getLastSentLine());
+    void sendConvenienceMethods_frameCommandsCorrectly() throws IOException {
+        assertFramed(SyncProtocol::sendAck, "[[SYNC:ACK]]");
+        assertFramed(SyncProtocol::sendHeartbeat, "[[SYNC:HEARTBEAT]]");
+        assertFramed(SyncProtocol::sendHeartbeatAck, "[[SYNC:HEARTBEAT_ACK]]");
+        assertFramed(SyncProtocol::sendDisconnect, "[[SYNC:DISCONNECT]]");
+        assertFramed(SyncProtocol::sendCancelCommand, "[[SYNC:CANCEL]]");
+        assertFramed(p -> p.sendError("something failed"), "ERROR", "something failed");
+        assertFramed(p -> p.sendDirectionChange(true), "DIRECTION_CHANGE", "true");
+        assertFramed(p -> p.sendRoleNegotiate(100L, 200L), "ROLE_NEGOTIATE", "100", "200");
+        assertFramed(p -> p.sendFileDelete("sub/file.txt"), "FILE_DELETE", "sub/file.txt");
+        assertFramed(p -> p.sendMkdir("newdir"), "MKDIR", "newdir");
+        assertFramed(p -> p.sendRmdir("olddir"), "RMDIR", "olddir");
     }
 }
