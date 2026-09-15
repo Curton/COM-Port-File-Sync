@@ -168,11 +168,8 @@ public class SyncPreviewRenderer {
                         previewSorter,
                         searchField);
 
-        // Auto-default: launch the git-based selection off the EDT right before showing the modal
-        // dialog. The SwingWorker's done() is dispatched by the modal dialog's nested event pump,
-        // flipping checkboxes to git's changed set (or leaving them unchecked on failure/timeout).
-        triggerGitBasedSelection(previewModel, rows, syncFolder, selectionSummary, previewSorter);
-
+        // Every row starts unchecked. No git query is issued when the dialog opens: the sync set is
+        // whatever the user picks (individually, Select All, or the "Select Changes (git)" button).
         int response = showPreviewOptionDialog(previewPanel);
 
         if (response != 0) {
@@ -435,8 +432,8 @@ public class SyncPreviewRenderer {
      * checkboxes to exactly the reported paths (matching rows are checked, all others unchecked).
      * Errors (git not installed / not a repository / timeout) are reported inline via {@code
      * summaryLabel} so the modal dialog is not disrupted, and every outcome is additionally written
-     * to {@code logSink} — the git selection must never fail silently. Used both by the "Select
-     * Changes (git)" button and as the dialog's auto-default selection.
+     * to {@code logSink} — the git selection must never fail silently. Invoked only by the "Select
+     * Changes (git)" button: opening the dialog never selects anything on the user's behalf.
      */
     private void triggerGitBasedSelection(
             DefaultTableModel previewModel,
@@ -584,8 +581,9 @@ public class SyncPreviewRenderer {
                         return column == 0 || column == PREVIEW_COLUMN;
                     }
                 };
-        // All rows start unchecked; the git-based auto-default (and the "Select Changes (git)"
-        // button) flips checkboxes after the dialog opens. No size-based pre-selection heuristic.
+        // All rows start unchecked and stay that way until the user acts: no git query at open, no
+        // size-based pre-selection heuristic. Only the batch buttons (Select All / Select Changes
+        // (git) / Deselect All) and individual checkbox clicks change the selection.
         // The Size column holds raw byte counts (Long) so sorting is numeric; the cell renderer
         // displays the formatted sizeText instead.
         for (SyncPreviewRow row : rows) {

@@ -44,7 +44,7 @@ Review the plan before anything is written:
 - **Sortable Columns** - Click a column header to sort; files selected for transfer move to the top by default, and rows never jump while you tick individual boxes
 - **Search Bar** - Type an extension (`java`, `txt`) or any part of a file name to re-order the list: rows whose **extension** matches move to the top, then rows whose **file name** contains the text, then everything else. Matches are highlighted in yellow. The search is live and case-insensitive
 - **Select All / Deselect All** - Bulk-toggle the transfer set
-- **Select Changes (git)** - Selects exactly the files git reports as changed in the sync folder; this is also the default selection when the preview opens. If git is unavailable, or the folder is not a repository, the reason is shown in the dialog and written to the log
+- **Select Changes (git)** - Selects exactly the files git reports as changed in the sync folder. Nothing is selected when the preview opens; this button is the only thing that consults git. If git is unavailable, or the folder is not a repository, the reason is shown in the dialog and written to the log
 
 ### File Filtering
 - **`.gitignore` Support** - Respects `.gitignore` patterns to exclude files from synchronization
@@ -139,7 +139,7 @@ Click the **Settings** button to configure COM port parameters:
 
 The preview is a dry run: nothing is written until you confirm it.
 
-- **Choose what to send** - Tick rows individually, use **Select All** / **Deselect All**, or press **Select Changes (git)** to pick up exactly what git reports as changed in the sync folder.
+- **Choose what to send** - Everything starts unchecked. Tick rows individually, use **Select All** / **Deselect All**, or press **Select Changes (git)** to pick up exactly what git reports as changed in the sync folder.
 - **Inspect before sending** - Click the preview button on a row to compare the local and remote copies side by side.
 - **Find a file fast** - Type in the search bar to re-rank the list by extension match, then by file-name match, with hits highlighted.
 - **Sort** - Click any column header; folders keep their contents grouped together.
