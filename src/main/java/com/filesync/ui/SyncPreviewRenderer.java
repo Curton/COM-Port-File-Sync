@@ -882,22 +882,28 @@ public class SyncPreviewRenderer {
                         modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
                 if (previewRow != null && !isSelected) {
                     Color color = typeColor(previewRow.getOperationType());
-                    if (color != null) {
-                        setForeground(color);
-                    }
+                    // One renderer instance paints the whole column, and DefaultTableCellRenderer
+                    // reuses the last setForeground value as its unselected foreground. Types
+                    // without a dedicated colour must therefore reset explicitly, or they inherit
+                    // whatever colour the previously rendered row left behind.
+                    setForeground(color != null ? color : table.getForeground());
                 }
                 return this;
             }
+        };
+    }
 
-            private Color typeColor(SyncPreviewOperationType type) {
-                return switch (type) {
-                    case CONFLICT -> new Color(200, 0, 0);
-                    case NEW, CREATE_DIR -> new Color(0, 128, 0);
-                    case MODIFIED -> new Color(0, 0, 180);
-                    case APPEND -> new Color(0, 128, 128);
-                    default -> null;
-                };
-            }
+    /** Colour for a Type-column label; null means the table's default foreground. */
+    static Color typeColor(SyncPreviewOperationType type) {
+        return switch (type) {
+            case CONFLICT -> new Color(200, 0, 0);
+            // Same hue as CONFLICT but desaturated, so deletions read as red without being
+            // mistaken for a conflict.
+            case DELETE_FILE -> new Color(216, 96, 96);
+            case NEW, CREATE_DIR -> new Color(0, 128, 0);
+            case MODIFIED -> new Color(0, 0, 180);
+            case APPEND -> new Color(0, 128, 128);
+            default -> null;
         };
     }
 
