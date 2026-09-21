@@ -4,8 +4,21 @@ import com.filesync.sync.FileSyncManager;
 
 /** Mutable UI/runtime state shared by the MainFrame collaborators. */
 public class MainFrameState {
+    /**
+     * Lifecycle of a user-initiated connection attempt. The serial work behind CONNECTING and
+     * DISCONNECTING runs on background threads, so the phase is what keeps those attempts
+     * single-flight: a second Connect/Disconnect click while one is in flight would race it (two
+     * concurrent opens on one SerialPortManager, two non-reentrant teardowns).
+     */
+    public enum ConnectionPhase {
+        IDLE,
+        CONNECTING,
+        CONNECTED,
+        DISCONNECTING
+    }
+
     private volatile boolean isSender = true;
-    private volatile boolean isConnected = false;
+    private volatile ConnectionPhase phase = ConnectionPhase.IDLE;
     private volatile boolean isPreviewInProgress = false;
     private volatile boolean suppressFolderSelectionEvents = false;
     private volatile String pendingMappingRemotePath;
@@ -18,12 +31,32 @@ public class MainFrameState {
         this.isSender = sender;
     }
 
-    public boolean isConnected() {
-        return isConnected;
+    public ConnectionPhase getPhase() {
+        return phase;
     }
 
+    public void setPhase(ConnectionPhase phase) {
+        this.phase = phase;
+    }
+
+    public boolean isConnected() {
+        return phase == ConnectionPhase.CONNECTED;
+    }
+
+    /**
+     * Link state as reported by the connection service (heartbeat) or by a failed attempt. A
+     * teardown the user started is never overwritten here: its completion callback owns the
+     * transition back to IDLE, otherwise a late link-loss event could strand the UI in the
+     * "Disconnecting..." state.
+     */
     public void setConnected(boolean connected) {
-        this.isConnected = connected;
+        if (connected) {
+            if (phase == ConnectionPhase.IDLE || phase == ConnectionPhase.CONNECTING) {
+                phase = ConnectionPhase.CONNECTED;
+            }
+        } else if (phase == ConnectionPhase.CONNECTED || phase == ConnectionPhase.CONNECTING) {
+            phase = ConnectionPhase.IDLE;
+        }
     }
 
     public boolean isPreviewInProgress() {

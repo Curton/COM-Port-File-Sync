@@ -12,7 +12,8 @@ import javax.swing.SwingUtilities;
 public class ConnectionController {
     private static final String CONNECT_TEXT = "Connect";
     private static final String DISCONNECT_TEXT = "Disconnect";
-    private static final String CANCEL_TEXT = "Cancel";
+    private static final String CONNECTING_TEXT = "Connecting...";
+    private static final String DISCONNECTING_TEXT = "Disconnecting...";
 
     private final JFrame owner;
     private final MainFrameComponents components;
@@ -83,7 +84,7 @@ public class ConnectionController {
 
             SwingUtilities.invokeLater(
                     () -> {
-                        if (!state.isConnected()) {
+                        if (state.getPhase() == MainFrameState.ConnectionPhase.IDLE) {
                             logController.log(
                                     "Only one COM port found ("
                                             + singlePort
@@ -117,7 +118,7 @@ public class ConnectionController {
 
         SwingUtilities.invokeLater(
                 () -> {
-                    if (!state.isConnected()) {
+                    if (state.getPhase() == MainFrameState.ConnectionPhase.IDLE) {
                         logController.log("Attempting auto-connect to " + lastPort + "...");
                         connect();
                     }
@@ -125,14 +126,29 @@ public class ConnectionController {
     }
 
     private void toggleConnection() {
-        if (state.isConnected()) {
-            disconnect();
-        } else {
-            connect();
+        // The button label cannot drive the decision: while an attempt is in flight the link is not
+        // up yet (or is being torn down), so isConnected() would send a second click into connect()
+        // again. The phase is the single-flight lock.
+        switch (state.getPhase()) {
+            case CONNECTED:
+                disconnect();
+                return;
+            case CONNECTING:
+            case DISCONNECTING:
+                // An attempt is already running; a second one would race it.
+                return;
+            case IDLE:
+            default:
+                connect();
         }
     }
 
     private void connect() {
+        if (state.getPhase() != MainFrameState.ConnectionPhase.IDLE) {
+            // Single-flight: auto-connect or a double click must not start a second open on a
+            // SerialPortManager whose fields the losing attempt would null out.
+            return;
+        }
         String selectedPort = (String) components.getPortComboBox().getSelectedItem();
         if (selectedPort == null || selectedPort.isEmpty()) {
             JOptionPane.showMessageDialog(
@@ -163,7 +179,11 @@ public class ConnectionController {
     }
 
     private void applyConnectingState() {
-        components.getConnectButton().setText(CANCEL_TEXT);
+        state.setPhase(MainFrameState.ConnectionPhase.CONNECTING);
+        components.getConnectButton().setText(CONNECTING_TEXT);
+        // The native open cannot be interrupted, so there is nothing for a second click to cancel;
+        // disabling the button keeps the label honest instead of offering a "Cancel" that connects.
+        components.getConnectButton().setEnabled(false);
         components.getStatusLabel().setText("Connecting...");
         components.getStatusLabel().setForeground(Color.ORANGE);
         setPortControlsEnabled(false);
@@ -179,8 +199,14 @@ public class ConnectionController {
     }
 
     private void onPortOpened(String selectedPort) {
+        if (state.getPhase() != MainFrameState.ConnectionPhase.CONNECTING) {
+            // The attempt was abandoned while the port was opening; do not leave it open.
+            serialPort.close();
+            return;
+        }
         state.setConnected(true);
-        components.getConnectButton().setText(CANCEL_TEXT);
+        components.getConnectButton().setText(DISCONNECT_TEXT);
+        components.getConnectButton().setEnabled(true);
         components.getStatusLabel().setText("Connecting...");
         components.getStatusLabel().setForeground(Color.ORANGE);
         setPortControlsEnabled(false);
@@ -212,10 +238,18 @@ public class ConnectionController {
                                             updateSyncButtonState.run();
                                             logController.log("Connected to " + selectedPort);
                                         } else {
+                                            if (state.getPhase()
+                                                    != MainFrameState.ConnectionPhase.CONNECTED) {
+                                                // The user already disconnected: that teardown
+                                                // owns the link, so this timeout must not stop
+                                                // the listener and close the port underneath it.
+                                                return;
+                                            }
                                             syncManager.stopListening();
                                             serialPort.close();
                                             state.setConnected(false);
                                             components.getConnectButton().setText(CONNECT_TEXT);
+                                            components.getConnectButton().setEnabled(true);
                                             components.getStatusLabel().setText("Disconnected");
                                             components.getStatusLabel().setForeground(Color.RED);
                                             components.getPortComboBox().setEnabled(true);
@@ -243,6 +277,7 @@ public class ConnectionController {
     private void onPortOpenFailed(String selectedPort) {
         state.setConnected(false);
         components.getConnectButton().setText(CONNECT_TEXT);
+        components.getConnectButton().setEnabled(true);
         components.getStatusLabel().setText("Disconnected");
         components.getStatusLabel().setForeground(Color.RED);
         components.getPortComboBox().setEnabled(true);
@@ -261,6 +296,15 @@ public class ConnectionController {
     }
 
     private void disconnect() {
+        if (state.getPhase() != MainFrameState.ConnectionPhase.CONNECTED) {
+            // Single-flight: a second teardown would run stopListening(), the port close and the
+            // executor shutdown concurrently, and a late one could null out the executor a fresh
+            // startListening() has just installed.
+            return;
+        }
+        state.setPhase(MainFrameState.ConnectionPhase.DISCONNECTING);
+        components.getConnectButton().setText(DISCONNECTING_TEXT);
+        components.getConnectButton().setEnabled(false);
         // Teardown waits on the executor's awaitTermination (up to 2 s) and on closing the serial
         // port, so it must not run on the event dispatch thread.
         Thread teardownThread =
@@ -275,8 +319,9 @@ public class ConnectionController {
     }
 
     private void applyDisconnectedState() {
-        state.setConnected(false);
+        state.setPhase(MainFrameState.ConnectionPhase.IDLE);
         components.getConnectButton().setText(CONNECT_TEXT);
+        components.getConnectButton().setEnabled(true);
         components.getStatusLabel().setText("Disconnected");
         components.getStatusLabel().setForeground(Color.RED);
         components.getPortComboBox().setEnabled(true);
