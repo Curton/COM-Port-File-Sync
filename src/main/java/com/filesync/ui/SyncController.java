@@ -584,11 +584,17 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     public void onFileProgress(int currentFile, int totalFiles, String fileName) {
-        components.getProgressBar().setIndeterminate(false);
-        components.getProgressBar().setValue((int) ((double) currentFile / totalFiles * 100));
-        components
-                .getProgressBar()
-                .setString("File " + currentFile + "/" + totalFiles + ": " + fileName);
+        javax.swing.JProgressBar bar = components.getProgressBar();
+        if (totalFiles <= 0) {
+            // The receiver's unknown-total batch path reports 0; a percentage of zero is
+            // Infinity, which used to slam the bar to 100% and report "File 3/0".
+            bar.setIndeterminate(true);
+            bar.setString("File " + currentFile + (fileName != null ? ": " + fileName : ""));
+            return;
+        }
+        bar.setIndeterminate(false);
+        bar.setValue((int) Math.min(100L, (long) currentFile * 100 / totalFiles));
+        bar.setString("File " + currentFile + "/" + totalFiles + ": " + fileName);
     }
 
     public void onTransferProgress(

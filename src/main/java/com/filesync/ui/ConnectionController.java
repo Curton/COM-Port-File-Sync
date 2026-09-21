@@ -140,89 +140,141 @@ public class ConnectionController {
             return;
         }
 
-        if (serialPort.open(selectedPort)) {
-            state.setConnected(true);
-            components.getConnectButton().setText(CANCEL_TEXT);
-            components.getStatusLabel().setText("Connecting...");
-            components.getStatusLabel().setForeground(Color.ORANGE);
-            components.getPortComboBox().setEnabled(false);
-            components.getRefreshPortsButton().setEnabled(false);
-            components.getSettingsButton().setEnabled(false);
-            components.getSyncButton().setEnabled(false);
-            components.getPreviewSyncButton().setEnabled(false);
-            components.getDirectionButton().setEnabled(false);
+        // Opening the port sleeps between its attempts and calls into the native driver, so it
+        // must not run on the event dispatch thread. The connecting state is shown up front and
+        // restored if the open fails.
+        applyConnectingState();
+        Thread openThread =
+                new Thread(
+                        () -> {
+                            boolean opened = serialPort.open(selectedPort);
+                            SwingUtilities.invokeLater(
+                                    () -> {
+                                        if (opened) {
+                                            onPortOpened(selectedPort);
+                                        } else {
+                                            onPortOpenFailed(selectedPort);
+                                        }
+                                    });
+                        },
+                        "SerialPortOpen");
+        openThread.setDaemon(true);
+        openThread.start();
+    }
 
-            settings.setLastPort(selectedPort);
-            settings.save();
+    private void applyConnectingState() {
+        components.getConnectButton().setText(CANCEL_TEXT);
+        components.getStatusLabel().setText("Connecting...");
+        components.getStatusLabel().setForeground(Color.ORANGE);
+        setPortControlsEnabled(false);
+    }
 
-            logController.log("Connecting to " + selectedPort + "...");
-            syncManager.startListening(selectedPort);
+    private void setPortControlsEnabled(boolean enabled) {
+        components.getPortComboBox().setEnabled(enabled);
+        components.getRefreshPortsButton().setEnabled(enabled);
+        components.getSettingsButton().setEnabled(enabled);
+        components.getSyncButton().setEnabled(enabled);
+        components.getPreviewSyncButton().setEnabled(enabled);
+        components.getDirectionButton().setEnabled(enabled);
+    }
 
-            Thread connectThread =
-                    new Thread(
-                            () -> {
-                                boolean connected =
-                                        syncManager.waitForConnection(
-                                                FileSyncManager.getInitialConnectTimeoutMs());
-                                SwingUtilities.invokeLater(
-                                        () -> {
-                                            if (connected) {
-                                                components
-                                                        .getConnectButton()
-                                                        .setText(DISCONNECT_TEXT);
-                                                components.getStatusLabel().setText("Connected");
-                                                components
-                                                        .getStatusLabel()
-                                                        .setForeground(new Color(0, 128, 0));
-                                                components.getDirectionButton().setEnabled(true);
-                                                components.getPortComboBox().setEnabled(false);
-                                                components
-                                                        .getRefreshPortsButton()
-                                                        .setEnabled(false);
-                                                components.getSettingsButton().setEnabled(false);
-                                                updateSyncButtonState.run();
-                                                logController.log("Connected to " + selectedPort);
-                                            } else {
-                                                syncManager.stopListening();
-                                                serialPort.close();
-                                                state.setConnected(false);
-                                                components.getConnectButton().setText(CONNECT_TEXT);
-                                                components.getStatusLabel().setText("Disconnected");
-                                                components
-                                                        .getStatusLabel()
-                                                        .setForeground(Color.RED);
-                                                components.getPortComboBox().setEnabled(true);
-                                                components.getRefreshPortsButton().setEnabled(true);
-                                                components.getSettingsButton().setEnabled(true);
-                                                components.getDirectionButton().setEnabled(true);
-                                                updateSyncButtonState.run();
-                                                if (!syncManager.wasManuallyDisconnected()) {
-                                                    logController.log(
-                                                            "Connection timeout - other side not responding");
-                                                    JOptionPane.showMessageDialog(
-                                                            owner,
-                                                            "Connection timeout - other side not responding",
-                                                            "Connection Error",
-                                                            JOptionPane.ERROR_MESSAGE);
-                                                }
+    private void onPortOpened(String selectedPort) {
+        state.setConnected(true);
+        components.getConnectButton().setText(CANCEL_TEXT);
+        components.getStatusLabel().setText("Connecting...");
+        components.getStatusLabel().setForeground(Color.ORANGE);
+        setPortControlsEnabled(false);
+
+        settings.setLastPort(selectedPort);
+        settings.save();
+
+        logController.log("Connecting to " + selectedPort + "...");
+        syncManager.startListening(selectedPort);
+
+        Thread connectThread =
+                new Thread(
+                        () -> {
+                            boolean connected =
+                                    syncManager.waitForConnection(
+                                            FileSyncManager.getInitialConnectTimeoutMs());
+                            SwingUtilities.invokeLater(
+                                    () -> {
+                                        if (connected) {
+                                            components.getConnectButton().setText(DISCONNECT_TEXT);
+                                            components.getStatusLabel().setText("Connected");
+                                            components
+                                                    .getStatusLabel()
+                                                    .setForeground(new Color(0, 128, 0));
+                                            components.getDirectionButton().setEnabled(true);
+                                            components.getPortComboBox().setEnabled(false);
+                                            components.getRefreshPortsButton().setEnabled(false);
+                                            components.getSettingsButton().setEnabled(false);
+                                            updateSyncButtonState.run();
+                                            logController.log("Connected to " + selectedPort);
+                                        } else {
+                                            syncManager.stopListening();
+                                            serialPort.close();
+                                            state.setConnected(false);
+                                            components.getConnectButton().setText(CONNECT_TEXT);
+                                            components.getStatusLabel().setText("Disconnected");
+                                            components.getStatusLabel().setForeground(Color.RED);
+                                            components.getPortComboBox().setEnabled(true);
+                                            components.getRefreshPortsButton().setEnabled(true);
+                                            components.getSettingsButton().setEnabled(true);
+                                            components.getDirectionButton().setEnabled(true);
+                                            updateSyncButtonState.run();
+                                            if (!syncManager.wasManuallyDisconnected()) {
+                                                logController.log(
+                                                        "Connection timeout - other side not responding");
+                                                JOptionPane.showMessageDialog(
+                                                        owner,
+                                                        "Connection timeout - other side not responding",
+                                                        "Connection Error",
+                                                        JOptionPane.ERROR_MESSAGE);
                                             }
-                                        });
-                            },
-                            "ConnectionWaiter");
-            connectThread.setDaemon(true);
-            connectThread.start();
-        } else {
-            JOptionPane.showMessageDialog(
-                    owner,
-                    "Failed to open " + selectedPort,
-                    "Connection Error",
-                    JOptionPane.ERROR_MESSAGE);
-            logController.log("Failed to connect to " + selectedPort);
-        }
+                                        }
+                                    });
+                        },
+                        "ConnectionWaiter");
+        connectThread.setDaemon(true);
+        connectThread.start();
+    }
+
+    private void onPortOpenFailed(String selectedPort) {
+        state.setConnected(false);
+        components.getConnectButton().setText(CONNECT_TEXT);
+        components.getStatusLabel().setText("Disconnected");
+        components.getStatusLabel().setForeground(Color.RED);
+        components.getPortComboBox().setEnabled(true);
+        components.getRefreshPortsButton().setEnabled(true);
+        components.getSettingsButton().setEnabled(true);
+        components.getDirectionButton().setEnabled(true);
+        // The sync controls follow connection state, so let the authoritative method decide
+        // instead of enabling them here.
+        updateSyncButtonState.run();
+        JOptionPane.showMessageDialog(
+                owner,
+                "Failed to open " + selectedPort,
+                "Connection Error",
+                JOptionPane.ERROR_MESSAGE);
+        logController.log("Failed to connect to " + selectedPort);
     }
 
     private void disconnect() {
-        syncManager.disconnect(true);
+        // Teardown waits on the executor's awaitTermination (up to 2 s) and on closing the serial
+        // port, so it must not run on the event dispatch thread.
+        Thread teardownThread =
+                new Thread(
+                        () -> {
+                            syncManager.disconnect(true);
+                            SwingUtilities.invokeLater(this::applyDisconnectedState);
+                        },
+                        "DisconnectWorker");
+        teardownThread.setDaemon(true);
+        teardownThread.start();
+    }
+
+    private void applyDisconnectedState() {
         state.setConnected(false);
         components.getConnectButton().setText(CONNECT_TEXT);
         components.getStatusLabel().setText("Disconnected");

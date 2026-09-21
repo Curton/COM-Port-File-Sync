@@ -161,6 +161,25 @@ public class SharedTextController {
             logController.log("Cannot send shared text - not connected");
             return;
         }
-        syncManager.sendSharedText(components.getSharedTextArea().getText());
+        String text = components.getSharedTextArea().getText();
+        // The send either writes a frame inline or runs a whole XMODEM transfer, so it must not
+        // run on the event dispatch thread. The button stays disabled until the send returns.
+        components.getSendSharedTextButton().setEnabled(false);
+        Thread sender =
+                new Thread(
+                        () -> {
+                            try {
+                                syncManager.sendSharedText(text);
+                            } finally {
+                                SwingUtilities.invokeLater(
+                                        () ->
+                                                components
+                                                        .getSendSharedTextButton()
+                                                        .setEnabled(true));
+                            }
+                        },
+                        "SharedTextSend");
+        sender.setDaemon(true);
+        sender.start();
     }
 }
