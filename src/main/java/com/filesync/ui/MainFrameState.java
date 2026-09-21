@@ -88,7 +88,7 @@ public class MainFrameState {
     }
 
     public boolean canSync(FileSyncManager syncManager) {
-        return isConnected
+        return isConnected()
                 && syncManager.getSyncFolder() != null
                 && isSender
                 && syncManager.isConnectionAlive();
