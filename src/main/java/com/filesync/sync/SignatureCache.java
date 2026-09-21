@@ -10,7 +10,10 @@ import com.google.gson.reflect.TypeToken;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -166,18 +169,41 @@ public final class SignatureCache {
         if (!dirty) {
             return;
         }
+        Path path = cacheFile.toPath();
+        Path temp = null;
         try {
-            File parent = cacheFile.getParentFile();
+            Path parent = path.toAbsolutePath().getParent();
             if (parent != null) {
-                Files.createDirectories(parent.toPath());
+                Files.createDirectories(parent);
             }
             JsonObject root = new JsonObject();
             root.addProperty("schemaVersion", SCHEMA_VERSION);
             root.add("entries", GSON.toJsonTree(entries, ENTRY_MAP_TYPE.getType()));
-            Files.writeString(cacheFile.toPath(), GSON.toJson(root));
+            // Write beside the target and move it into place: a crash mid-write would otherwise
+            // leave a truncated JSON that the next load discards.
+            temp = Files.createTempFile(parent, "signatures", ".tmp");
+            Files.writeString(temp, GSON.toJson(root));
+            try {
+                Files.move(
+                        temp,
+                        path,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Some filesystems (and some network shares) cannot move atomically.
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
             dirty = false;
         } catch (IOException e) {
             // Best effort: a failed cache write only costs a signature exchange next time.
+        } finally {
+            if (temp != null) {
+                try {
+                    Files.deleteIfExists(temp);
+                } catch (IOException ignored) {
+                    // The move already consumed it, or nothing can be done about it.
+                }
+            }
         }
     }
 

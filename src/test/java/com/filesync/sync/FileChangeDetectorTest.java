@@ -1,6 +1,7 @@
 package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -32,6 +33,117 @@ import org.junit.jupiter.api.io.TempDir;
 class FileChangeDetectorTest {
 
     @TempDir Path tempDir;
+
+    /**
+     * A cancelled preview interrupts the worker inside {@code waitForHashes}, which throws out of
+     * manifest generation. The hash pool must not survive that: its threads are non-daemon by
+     * default, so they keep the JVM alive after the window closes.
+     */
+    @Test
+    void hashPoolIsShutDownWhenManifestGenerationFails() throws IOException {
+        File tree = tempDir.resolve("tree").toFile();
+        tree.mkdirs();
+        Files.writeString(tree.toPath().resolve("a.txt"), "content to hash");
+
+        int nonDaemonBefore = countNonDaemonThreads();
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                FileChangeDetector.generateManifest(
+                                        tree,
+                                        false,
+                                        false,
+                                        new FileChangeDetector.ManifestProgressCallback() {
+                                            @Override
+                                            public void onFileProcessed(String fileName) {
+                                                throw new RuntimeException(
+                                                        "simulated cancel mid-walk");
+                                            }
+                                        }));
+        assertTrue(
+                thrown.getMessage().contains("simulated cancel mid-walk"),
+                "the callback failure must surface, got: " + thrown.getMessage());
+
+        assertEquals(
+                nonDaemonBefore,
+                countNonDaemonThreads(),
+                "a failed manifest must not leave hash pool threads behind");
+    }
+
+    @Test
+    void hashPoolThreadsAreDaemon() throws Exception {
+        java.util.concurrent.ExecutorService pool = FileChangeDetector.createHashExecutor(2);
+        java.util.concurrent.atomic.AtomicBoolean daemon =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        try {
+            pool.submit(() -> daemon.set(Thread.currentThread().isDaemon())).get();
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertTrue(daemon.get(), "hash threads must be daemon threads");
+    }
+
+    private static int countNonDaemonThreads() {
+        int count = 0;
+        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+            if (thread.isAlive() && !thread.isDaemon()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * The persisted manifest is a pure optimization. A cache write that fails (read-only cache
+     * directory, full disk, an antivirus holding the file) must not turn a perfectly good manifest
+     * into a failed sync preview.
+     */
+    @Test
+    void persistedManifestWriteFailureDoesNotFailGeneration() throws IOException {
+        File tree = tempDir.resolve("tree").toFile();
+        tree.mkdirs();
+        Files.writeString(tree.toPath().resolve("a.txt"), "content");
+
+        // A plain file where the cache directory should be: every write below it fails.
+        File occupied = tempDir.resolve("not-a-dir").toFile();
+        Files.writeString(occupied.toPath(), "occupied");
+
+        FileChangeDetector.ManifestGenerationOptions options =
+                FileChangeDetector.ManifestGenerationOptions.builder()
+                        .withPersistResult(true)
+                        .withPersistedManifestFile(new File(occupied, "manifest.json"))
+                        .build();
+
+        FileChangeDetector.FileManifest manifest =
+                FileChangeDetector.generateManifest(tree, options);
+
+        assertNotNull(manifest, "the manifest must survive a cache write failure");
+        assertTrue(manifest.getFiles().containsKey("a.txt"), "the walk must have completed");
+    }
+
+    /** The cache is written through a temporary file, so no partial state is ever observable. */
+    @Test
+    void persistedManifestLeavesNoTemporaryFilesBehind() throws IOException {
+        File tree = tempDir.resolve("tree").toFile();
+        tree.mkdirs();
+        Files.writeString(tree.toPath().resolve("a.txt"), "content");
+        File cacheDir = tempDir.resolve("cache").toFile();
+        File manifestFile = new File(cacheDir, "manifest.json");
+
+        FileChangeDetector.ManifestGenerationOptions options =
+                FileChangeDetector.ManifestGenerationOptions.builder()
+                        .withPersistResult(true)
+                        .withPersistedManifestFile(manifestFile)
+                        .build();
+
+        FileChangeDetector.generateManifest(tree, options);
+
+        assertTrue(manifestFile.exists(), "the cache file must be written");
+        String[] leftovers = cacheDir.list((dir, name) -> name.endsWith(".tmp"));
+        assertEquals(0, leftovers.length, "no temporary file may survive the write");
+    }
 
     @Test
     void manifestSkipsLargeTransferStagingFiles() throws IOException {
@@ -144,9 +256,10 @@ class FileChangeDetectorTest {
         FileChangeDetector.FileManifest manifest =
                 FileChangeDetector.generateManifest(tempDir.toFile(), options);
         assertNotNull(manifest);
-        assertTrue(
-                hashingThreads.stream().anyMatch(name -> name.contains("pool")),
-                "Hashing should occur on worker threads");
+        assertFalse(
+                hashingThreads.contains(Thread.currentThread().getName()),
+                "Hashing should occur on worker threads, got: " + hashingThreads);
+        assertFalse(hashingThreads.isEmpty(), "The tracking hasher should have been used");
     }
 
     @Test

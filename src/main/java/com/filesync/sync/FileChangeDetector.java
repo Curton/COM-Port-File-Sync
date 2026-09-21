@@ -11,11 +11,12 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.DosFileAttributes;
 import java.security.MessageDigest;
@@ -363,15 +364,13 @@ public class FileChangeDetector {
 
         // Always create a hash pool: even in quick mode, text files are hashed (with line-ending
         // normalization) so CRLF/LF differences are ignored; binary/unknown files skip hashing.
-        ExecutorService hashExecutor =
-                Executors.newFixedThreadPool(resolvedOptions.getHashThreadPoolSize());
+        ExecutorService hashExecutor = createHashExecutor(resolvedOptions.getHashThreadPoolSize());
         List<Future<?>> hashTasks = new ArrayList<>();
         // Files whose hash could not be computed (locked by another process, permission denied,
         // ...). Recorded by the hash tasks, reported once after the walk completes.
         List<String> hashFailures = Collections.synchronizedList(new ArrayList<>());
 
-        Files.walkFileTree(
-                basePath,
+        SimpleFileVisitor<Path> manifestVisitor =
                 new SimpleFileVisitor<Path>() {
                     @Override
                     public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
@@ -527,11 +526,16 @@ public class FileChangeDetector {
 
                         return FileVisitResult.CONTINUE;
                     }
-                });
+                };
 
-        waitForHashes(hashTasks);
-        if (hashExecutor != null) {
-            hashExecutor.shutdown();
+        try {
+            Files.walkFileTree(basePath, manifestVisitor);
+            waitForHashes(hashTasks);
+        } finally {
+            // A cancelled sync interrupts the worker inside waitForHashes, so the shutdown must
+            // not be conditional on reaching it: without this the pool's threads outlive the
+            // manifest and, being non-daemon by default, keep the JVM alive.
+            hashExecutor.shutdownNow();
         }
 
         if (!hashFailures.isEmpty() && progressCallback != null) {
@@ -547,7 +551,18 @@ public class FileChangeDetector {
 
         FileManifest manifest = new FileManifest(files, emptyDirectories, caseSensitive);
         if (resolvedOptions.isPersistResult()) {
-            persistManifest(resolvedOptions.getPersistedManifestFile(), manifest);
+            try {
+                persistManifest(resolvedOptions.getPersistedManifestFile(), manifest);
+            } catch (IOException e) {
+                // The cache is an optimization: an unwritable cache directory, a full disk or an
+                // antivirus holding the file must not fail a manifest that was built correctly.
+                // The next generation simply pays for a full re-hash.
+                System.err.println(
+                        "Failed to persist manifest cache: "
+                                + resolvedOptions.getPersistedManifestFile()
+                                + " - "
+                                + e.getMessage());
+            }
         }
 
         if (progressCallback != null) {
@@ -1364,16 +1379,43 @@ public class FileChangeDetector {
             return;
         }
         Path path = manifestFile.toPath();
-        Path parent = path.getParent();
+        Path parent = path.toAbsolutePath().getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Files.writeString(
-                path,
-                PERSIST_GSON.toJson(manifest),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING);
+        // Write beside the target and move it into place: a crash mid-write would otherwise leave
+        // a truncated JSON that the next generation silently discards.
+        Path temp = Files.createTempFile(parent, "manifest", ".tmp");
+        try {
+            Files.writeString(temp, PERSIST_GSON.toJson(manifest), StandardCharsets.UTF_8);
+            try {
+                Files.move(
+                        temp,
+                        path,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Some filesystems (and some network shares) cannot move atomically.
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    /**
+     * Pool used to hash files during manifest generation. The threads are daemon threads so that a
+     * pool that outlives its manifest (a cancelled sync abandons it mid-walk) cannot keep the JVM
+     * alive after the last window closes.
+     */
+    static ExecutorService createHashExecutor(int poolSize) {
+        return Executors.newFixedThreadPool(
+                poolSize,
+                runnable -> {
+                    Thread thread = new Thread(runnable, "FileSync-Hash");
+                    thread.setDaemon(true);
+                    return thread;
+                });
     }
 
     private static void waitForHashes(List<Future<?>> hashTasks) throws IOException {

@@ -121,6 +121,22 @@ public class SettingsManager {
         prefs.putBoolean(PREF_RESPECT_GITIGNORE, respectGitignore);
         prefs.putBoolean(PREF_FAST_MODE, fastMode);
         prefs.putBoolean(PREF_DEBUG_MODE, debugMode);
+        persistPreferences();
+    }
+
+    /**
+     * Flush the preferences node to its backing store. {@link #save} must do this too: on the
+     * Windows registry the difference is invisible, but on a file-backed backend (Linux/macOS)
+     * {@code put} only updates the in-memory node, so without the flush the last port, folder,
+     * recent list and every flag are lost on an abnormal exit.
+     */
+    void persistPreferences() {
+        try {
+            prefs.flush();
+        } catch (Exception ignored) {
+            // A failed flush costs the settings on the next abnormal exit; there is nothing
+            // actionable to report from here.
+        }
     }
 
     // Getters and Setters
@@ -341,10 +357,7 @@ public class SettingsManager {
             prefs.remove(key + i + "." + PREF_FOLDER_MAPPING_RECEIVER);
         }
 
-        try {
-            prefs.flush();
-        } catch (Exception ignored) {
-        }
+        persistPreferences();
     }
 
     private List<String[]> dedupeAndCapRememberedFolderMappings(List<String[]> mappings) {

@@ -940,14 +940,15 @@ public class SyncCoordinator {
             return;
         }
         syncing.set(true);
-        String relativePath = msg.getParam(0);
-        int size = msg.getParamAsInt(1);
-        boolean compressed = msg.getParamAsBoolean(2);
-        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-
-        eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
-        protocol.sendAck();
+        FileWriteException lockedTarget = null;
         try {
+            String relativePath = msg.getParam(0);
+            int size = msg.getParamAsInt(1);
+            boolean compressed = msg.getParamAsBoolean(2);
+            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+
+            eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
+            protocol.sendAck();
             resolveSafe(syncFolder, relativePath);
             protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
             eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
@@ -957,23 +958,26 @@ public class SyncCoordinator {
         } catch (FileWriteException e) {
             // The transfer succeeded but the target file is locked by another program: queue it
             // for a user decision instead of dropping it or tearing down the connection.
+            lockedTarget = e;
+        } finally {
+            // Cleared on every exit path, success included: the sender sends no CMD_SYNC_COMPLETE
+            // for a single file, so a flag left set would keep the receiver's Sync Control button
+            // in its Cancel state and suppress heartbeats and connection-loss detection for the
+            // rest of the session.
             syncing.set(false);
             onSyncIdle.run();
+        }
+        if (lockedTarget != null) {
             // Transfer-progress events left the Sync Control button in its "Cancel" state.
             // Now that syncing is false, refresh it so the user sees "Start Sync" while the
             // pending-write dialog is open instead of a stale, enabled "Cancel" button.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             pendingFileWriteService.enqueue(
                     syncFolder,
-                    e.getRelativePath(),
-                    e.getData(),
-                    e.getLastModified(),
-                    e.getMessage());
-        } catch (IOException e) {
-            syncing.set(false);
-            onSyncIdle.run();
-            // Re-throw so the listenLoop's catch(IOException) handles it (may restart)
-            throw e;
+                    lockedTarget.getRelativePath(),
+                    lockedTarget.getData(),
+                    lockedTarget.getLastModified(),
+                    lockedTarget.getMessage());
         }
     }
 
@@ -1030,16 +1034,17 @@ public class SyncCoordinator {
             return;
         }
         syncing.set(true);
-        String relativePath = msg.getParam(0);
-        int size = msg.getParamAsInt(1);
-        boolean compressed = msg.getParamAsBoolean(2);
-        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-        long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
-        String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
-
-        eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
-        protocol.sendAck();
+        FileWriteException lockedTarget = null;
         try {
+            String relativePath = msg.getParam(0);
+            int size = msg.getParamAsInt(1);
+            boolean compressed = msg.getParamAsBoolean(2);
+            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+            long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+            String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
+
+            eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
+            protocol.sendAck();
             resolveSafe(syncFolder, relativePath);
             protocol.receiveFileDelta(
                     syncFolder,
@@ -1055,23 +1060,23 @@ public class SyncCoordinator {
             flushSharedTextBetweenOperations();
         } catch (FileWriteException e) {
             // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
+            lockedTarget = e;
+        } finally {
+            // See handleIncomingFileData: the flag must not survive a successful single-file
+            // receive, because nothing else clears it for this path.
             syncing.set(false);
             onSyncIdle.run();
+        }
+        if (lockedTarget != null) {
             // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
             // delta transfer left it as an enabled "Cancel", but syncing is now false.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             pendingFileWriteService.enqueue(
                     syncFolder,
-                    e.getRelativePath(),
-                    e.getData(),
-                    e.getLastModified(),
-                    e.getMessage());
-        } catch (IOException e) {
-            syncing.set(false);
-            onSyncIdle.run();
-            // Re-throw: an MD5 mismatch or decode error aborts/restarts the sync; the file is
-            // recompared against fresh manifests on the next attempt and sent fully if needed.
-            throw e;
+                    lockedTarget.getRelativePath(),
+                    lockedTarget.getData(),
+                    lockedTarget.getLastModified(),
+                    lockedTarget.getMessage());
         }
     }
 
@@ -1090,17 +1095,18 @@ public class SyncCoordinator {
             return;
         }
         syncing.set(true);
-        String relativePath = msg.getParam(0);
-        int size = msg.getParamAsInt(1);
-        boolean compressed = msg.getParamAsBoolean(2);
-        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-        long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
-        long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
-        String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
-
-        eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
-        protocol.sendAck();
+        FileWriteException lockedTarget = null;
         try {
+            String relativePath = msg.getParam(0);
+            int size = msg.getParamAsInt(1);
+            boolean compressed = msg.getParamAsBoolean(2);
+            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+            long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+            long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
+            String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
+
+            eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
+            protocol.sendAck();
             resolveSafe(syncFolder, relativePath);
             protocol.receiveFileAppend(
                     syncFolder,
@@ -1117,23 +1123,23 @@ public class SyncCoordinator {
             flushSharedTextBetweenOperations();
         } catch (FileWriteException e) {
             // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
+            lockedTarget = e;
+        } finally {
+            // See handleIncomingFileData: the flag must not survive a successful single-file
+            // receive, because nothing else clears it for this path.
             syncing.set(false);
             onSyncIdle.run();
+        }
+        if (lockedTarget != null) {
             // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
             // append transfer left it as an enabled "Cancel", but syncing is now false.
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             pendingFileWriteService.enqueue(
                     syncFolder,
-                    e.getRelativePath(),
-                    e.getData(),
-                    e.getLastModified(),
-                    e.getMessage());
-        } catch (IOException e) {
-            syncing.set(false);
-            onSyncIdle.run();
-            // Re-throw: a verification failure aborts/restarts the sync; the file is recompared
-            // against fresh manifests on the next attempt and sent fully if needed.
-            throw e;
+                    lockedTarget.getRelativePath(),
+                    lockedTarget.getData(),
+                    lockedTarget.getLastModified(),
+                    lockedTarget.getMessage());
         }
     }
 

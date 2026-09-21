@@ -186,6 +186,52 @@ class SyncCoordinatorTest {
         assertTrue(coordinator.isSyncing());
     }
 
+    // ========== Single-file receive handlers clear the syncing flag ==========
+
+    /**
+     * The single-file receive paths are the normal wire routes (large files and every batch
+     * fallback), and the sender sends no SYNC_COMPLETE for them. If the success path leaves {@code
+     * syncing} set, the receiver keeps the Sync Control button in its Cancel state and suppresses
+     * heartbeats and connection-loss detection for the rest of the session.
+     */
+    @Test
+    void handleIncomingFileData_clearsSyncingFlagOnSuccess() throws IOException {
+        SyncCoordinator coordinator = createCoordinatorAt(syncFolder);
+        syncing.set(true);
+
+        coordinator.handleIncomingFileData(
+                new SyncProtocol.Message(
+                        SyncProtocol.CMD_FILE_DATA, new String[] {"a.txt", "5", "false", "0"}));
+
+        assertFalse(syncing.get(), "a completed single-file receive must clear syncing");
+    }
+
+    @Test
+    void handleIncomingFileDelta_clearsSyncingFlagOnSuccess() throws IOException {
+        SyncCoordinator coordinator = createCoordinatorAt(syncFolder);
+        syncing.set(true);
+
+        coordinator.handleIncomingFileDelta(
+                new SyncProtocol.Message(
+                        SyncProtocol.CMD_FILE_DELTA,
+                        new String[] {"a.txt", "5", "false", "0", "10", "md5"}));
+
+        assertFalse(syncing.get(), "a completed delta receive must clear syncing");
+    }
+
+    @Test
+    void handleIncomingFileAppend_clearsSyncingFlagOnSuccess() throws IOException {
+        SyncCoordinator coordinator = createCoordinatorAt(syncFolder);
+        syncing.set(true);
+
+        coordinator.handleIncomingFileAppend(
+                new SyncProtocol.Message(
+                        SyncProtocol.CMD_FILE_APPEND,
+                        new String[] {"a.txt", "5", "false", "0", "10", "15", "md5"}));
+
+        assertFalse(syncing.get(), "a completed append receive must clear syncing");
+    }
+
     // ========== Easy tests: cancelOngoingSync ==========
 
     @Test

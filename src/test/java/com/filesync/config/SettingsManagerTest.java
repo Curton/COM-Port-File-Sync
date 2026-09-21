@@ -346,4 +346,44 @@ class SettingsManagerTest {
         settings.setDebugMode(false);
         settings.save();
     }
+
+    /**
+     * {@code saveRememberedFolderMappings} flushes the preferences node but {@code save} never did,
+     * so on a file-backed backend (Linux/macOS) the last port, folder, recent list and every flag
+     * could be lost on an abnormal exit. Both paths must go through the same persist step.
+     */
+    @Test
+    void save_flushesPreferences() {
+        CountingSettingsManager settings = new CountingSettingsManager(true);
+
+        settings.setLastPort("COM7");
+        settings.save();
+
+        assertTrue(settings.persistCalls > 0, "save() must flush the preferences node");
+    }
+
+    @Test
+    void setRememberedFolderMapping_flushesPreferences() {
+        CountingSettingsManager settings = new CountingSettingsManager(true);
+
+        settings.setRememberedFolderMapping("COM7", "C:/local", "D:/remote");
+
+        assertTrue(
+                settings.persistCalls > 0,
+                "the mapping writer must still flush the preferences node");
+    }
+
+    /** Records how often the persist step runs, without touching the real backing store. */
+    private static final class CountingSettingsManager extends SettingsManager {
+        int persistCalls;
+
+        CountingSettingsManager(boolean testMode) {
+            super(testMode);
+        }
+
+        @Override
+        void persistPreferences() {
+            persistCalls++;
+        }
+    }
 }
