@@ -106,6 +106,25 @@ public final class ConflictInfo {
         return localContentBytes;
     }
 
+    /**
+     * Whether the local content is actually available. A file larger than {@link
+     * #MAX_FULL_READ_BYTES}, or one that cannot be read, has no content, and callers must treat
+     * that as "unknown" rather than as an empty file: a merge built from an empty local side
+     * silently discards the local version when the result is written back.
+     */
+    public boolean isLocalContentAvailable() {
+        getLocalContent();
+        return localContentBytes != null;
+    }
+
+    /** Size of the local file, for reporting why its content is unavailable. */
+    public long getLocalFileSize() {
+        if (localInfo != null) {
+            return localInfo.getSize();
+        }
+        return localFile != null ? localFile.length() : 0;
+    }
+
     public byte[] getRemoteContent() {
         return remoteContent;
     }

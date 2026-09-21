@@ -309,6 +309,16 @@ public class XModemTransfer {
                         }
                     } catch (IOException ignored) {
                     }
+                    // The mismatch itself must consume a retry too: a sender whose resends stay
+                    // aligned to a header byte re-enters this branch indefinitely otherwise, and
+                    // the transfer would only end once the read timeouts exhaust another path's
+                    // budget.
+                    retryCount++;
+                    if (retryCount > MAX_RETRIES) {
+                        reportError("Too many block number errors, aborting transfer");
+                        sendCancel();
+                        return -1;
+                    }
                     serialPort.write(NAK);
                     continue;
                 }

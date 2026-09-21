@@ -103,6 +103,39 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
+    void receiveAbortsAfterRepeatedBlockNumberMismatches() throws IOException {
+        // Minimal input that keeps the receive loop inside the block-number-mismatch branch: each
+        // round is SOH + a block number + a complement that does not sum to 255, followed by
+        // exactly the blockSize + 2 bytes that path drains, so the next round starts on a fresh
+        // header byte. A peer resending a corrupt block at a fixed stride produces this shape, and
+        // it is the one shape in which the mismatch path can be re-entered indefinitely.
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        for (int i = 0; i < 500; i++) {
+            stream.write(XModemTransfer.SOH);
+            stream.write(1);
+            stream.write(0); // 1 + 0 != 255
+            stream.write(new byte[130], 0, 130);
+        }
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(stream.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(128, sink);
+
+        assertEquals(-1, written, "Repeated block number mismatches must abort the transfer");
+        assertEquals(0, sink.size(), "Nothing may be written for a rejected block");
+        assertTrue(
+                transfer.getLastErrorMessage().contains("block number"),
+                "The mismatch path must be the one that gives up, got: "
+                        + transfer.getLastErrorMessage());
+        assertTrue(
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.NAK}) <= 20,
+                "A handful of NAKs must be enough to abort, not one per resent block");
+    }
+
+    @Test
+    @Timeout(20)
     void receiveFailureResendsCancelSoOneLostCanDoesNotOrphanTheSender() {
         // The block data read hitting end-of-stream escapes receiveInto as an IOException.
         // That exit must tell the sender to stop with several spaced-out abort signals: a

@@ -62,6 +62,7 @@ public class TextMergePanel extends JPanel {
     private int currentHunkIndex = 0;
     private java.util.List<DiffHunk> hunks;
     private ConflictInfo currentConflict;
+    private final boolean mergeAvailable;
 
     public TextMergePanel(ConflictInfo conflict) {
         setLayout(new BorderLayout(8, 8));
@@ -71,6 +72,9 @@ public class TextMergePanel extends JPanel {
         DiffResult diffResult = conflict.getDiffResult();
         this.hunks = diffResult != null ? diffResult.getHunks() : java.util.Collections.emptyList();
         this.currentConflict = conflict;
+        // Without the local version there is nothing to merge against: offering a merge built
+        // from an empty local side would write the remote version over the user's file.
+        this.mergeAvailable = conflict.isLocalContentAvailable();
 
         // Header with change count
         JPanel headerPanel = new JPanel(new BorderLayout(4, 4));
@@ -83,7 +87,16 @@ public class TextMergePanel extends JPanel {
 
         changeCountLabel = new JLabel();
         updateChangeCountLabel();
-        headerPanel.add(changeCountLabel, BorderLayout.SOUTH);
+        headerPanel.add(changeCountLabel, BorderLayout.CENTER);
+        if (!mergeAvailable) {
+            JLabel warningLabel =
+                    new JLabel(
+                            "<html>The local version could not be loaded ("
+                                    + UiFormatting.formatBytes(conflict.getLocalFileSize())
+                                    + "), so it cannot be merged. Choose Keep Local or Keep Remote.</html>");
+            warningLabel.setForeground(new Color(160, 60, 60));
+            headerPanel.add(warningLabel, BorderLayout.SOUTH);
+        }
         add(headerPanel, BorderLayout.NORTH);
 
         // Navigation buttons
@@ -160,12 +173,23 @@ public class TextMergePanel extends JPanel {
 
         mergeRadio.addActionListener(
                 e -> {
+                    if (!mergeAvailable) {
+                        mergeRadio.setSelected(false);
+                        keepLocalRadio.setSelected(true);
+                        return;
+                    }
                     mergePanel.setVisible(true);
                     // Show full file with git-merge-style conflict markers
                     mergeTextArea.setText(buildFullFileGitStyleMergeContent(conflict));
                     revalidate();
                     repaint();
                 });
+
+        if (!mergeAvailable) {
+            mergeRadio.setEnabled(false);
+            mergeRadio.setToolTipText(
+                    "The local version could not be loaded, so it cannot be merged.");
+        }
 
         keepLocalRadio.addActionListener(e -> mergePanel.setVisible(false));
         keepRemoteRadio.addActionListener(e -> mergePanel.setVisible(false));
@@ -303,7 +327,14 @@ public class TextMergePanel extends JPanel {
     }
 
     private void displayFullFiles(ConflictInfo conflict) {
-        localDiffPane.setText(conflict.getLocalContentAsString());
+        if (!conflict.isLocalContentAvailable()) {
+            localDiffPane.setText(
+                    "(local version could not be loaded: "
+                            + UiFormatting.formatBytes(conflict.getLocalFileSize())
+                            + ")");
+        } else {
+            localDiffPane.setText(conflict.getLocalContentAsString());
+        }
         remoteDiffPane.setText(conflict.getRemoteContentAsString());
     }
 
@@ -313,6 +344,10 @@ public class TextMergePanel extends JPanel {
      * REMOTE markers. Uses LCS-based diff to accurately identify conflict regions.
      */
     private String buildFullFileGitStyleMergeContent(ConflictInfo conflict) {
+        if (!conflict.isLocalContentAvailable()) {
+            // Never fabricate a merge from an empty local side.
+            return conflict.getLocalContentAsString();
+        }
         String localContent = conflict.getLocalContentAsString();
         String remoteContent = conflict.getRemoteContentAsString();
 
@@ -417,10 +452,19 @@ public class TextMergePanel extends JPanel {
     }
 
     public String getMergedContent() {
+        if (!mergeAvailable) {
+            // A merge built from content that was never read must never reach the caller.
+            return null;
+        }
         if (mergeRadio.isSelected()) {
             return mergeTextArea.getText();
         }
         return null;
+    }
+
+    /** Whether the manual merge option is offered for this conflict. */
+    public boolean isMergeAvailable() {
+        return mergeAvailable;
     }
 
     /**

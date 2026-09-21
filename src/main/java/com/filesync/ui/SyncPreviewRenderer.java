@@ -1325,28 +1325,43 @@ public class SyncPreviewRenderer {
      * @param rows the rows list matching the model
      * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
      */
-    public boolean resolveConflictsForSelectedFiles(
-            SyncPreviewPlan plan, DefaultTableModel previewModel, List<SyncPreviewRow> rows) {
-        return resolveConflictsForSelectedFiles(plan, null, previewModel, rows);
-    }
-
     /**
      * Resolve conflicts for selected files in one unified window. Fetches remote content for text
      * conflicts, then shows ConflictResolutionDialog with Next/Previous navigation and progress
      * indicator.
      *
+     * <p>The fetch runs on a worker thread: it is a blocking serial round trip per file (a 10 s
+     * timeout each, possibly a whole XMODEM transfer), so doing it on the event dispatch thread
+     * would freeze the UI for as long as the slowest answer takes.
+     *
+     * @param plan the sync plan with conflicts
+     * @param previewModel the table model to refresh after resolution
+     * @param rows the rows list matching the model
+     * @param onComplete invoked on the event dispatch thread with true when every conflict was
+     *     resolved (the user did not cancel), false when the user cancelled
+     */
+    public void resolveConflictsForSelectedFiles(
+            SyncPreviewPlan plan,
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows,
+            java.util.function.Consumer<Boolean> onComplete) {
+        resolveConflictsForSelectedFiles(plan, null, previewModel, rows, onComplete);
+    }
+
+    /**
      * @param plan the sync plan with conflicts
      * @param resolver provider to fetch remote content for merge UI (may be null to use injected
      *     resolver)
      * @param previewModel the table model to refresh after resolution
      * @param rows the rows list matching the model
-     * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
+     * @param onComplete invoked on the event dispatch thread with the resolution outcome
      */
-    public boolean resolveConflictsForSelectedFiles(
+    public void resolveConflictsForSelectedFiles(
             SyncPreviewPlan plan,
             ConflictResolver resolver,
             DefaultTableModel previewModel,
-            List<SyncPreviewRow> rows) {
+            List<SyncPreviewRow> rows,
+            java.util.function.Consumer<Boolean> onComplete) {
 
         ConflictResolver effectiveResolver = resolver != null ? resolver : conflictResolver;
         if (effectiveResolver == null) {
@@ -1354,7 +1369,8 @@ public class SyncPreviewRenderer {
         }
 
         if (plan.getConflicts().isEmpty()) {
-            return true;
+            onComplete.accept(true);
+            return;
         }
 
         // Collect unresolved conflicts in transfer order
@@ -1367,19 +1383,67 @@ public class SyncPreviewRenderer {
         }
 
         if (toResolve.isEmpty()) {
-            return true;
+            onComplete.accept(true);
+            return;
         }
 
-        // Fetch remote content and filter trivial conflicts one at a time to bound memory
-        List<ConflictInfo> nonTrivial = new ArrayList<>();
-        for (ConflictInfo conflict : toResolve) {
-            byte[] remoteContent = effectiveResolver.fetchRemoteContent(conflict.getPath());
-            if (remoteContent != null) {
-                conflict.setRemoteContent(remoteContent);
-            }
-        }
+        SwingWorker<List<ConflictInfo>, Void> fetchWorker =
+                new SwingWorker<>() {
+                    @Override
+                    protected List<ConflictInfo> doInBackground() {
+                        List<ConflictInfo> fetched = new ArrayList<>(toResolve.size());
+                        for (int i = 0; i < toResolve.size(); i++) {
+                            ConflictInfo conflict = toResolve.get(i);
+                            logSink.accept(
+                                    "Fetching remote version "
+                                            + (i + 1)
+                                            + " of "
+                                            + toResolve.size()
+                                            + ": "
+                                            + conflict.getPath());
+                            byte[] remoteContent =
+                                    effectiveResolver.fetchRemoteContent(conflict.getPath());
+                            if (remoteContent != null) {
+                                conflict.setRemoteContent(remoteContent);
+                            }
+                            fetched.add(conflict);
+                        }
+                        return fetched;
+                    }
 
+                    @Override
+                    protected void done() {
+                        boolean resolved;
+                        try {
+                            resolved = finishConflictResolution(get(), previewModel, rows);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            resolved = false;
+                        } catch (Exception e) {
+                            Throwable cause = e.getCause() != null ? e.getCause() : e;
+                            logSink.accept(
+                                    "Conflict resolution failed - "
+                                            + (cause.getMessage() != null
+                                                    ? cause.getMessage()
+                                                    : cause.getClass().getSimpleName()));
+                            resolved = false;
+                        }
+                        onComplete.accept(resolved);
+                    }
+                };
+        fetchWorker.execute();
+    }
+
+    /**
+     * Filter the trivial conflicts, show the resolution dialog for the rest, and refresh the
+     * preview table. Runs on the event dispatch thread once the remote content is available.
+     */
+    private boolean finishConflictResolution(
+            List<ConflictInfo> toResolve,
+            DefaultTableModel previewModel,
+            List<SyncPreviewRow> rows) {
         // Filter out trivial conflicts (whitespace-only changes) after remote content is available
+        List<ConflictInfo> nonTrivial = new ArrayList<>();
         ConflictAnalyzer.filterTrivialConflicts(toResolve);
         for (ConflictInfo conflict : toResolve) {
             if (conflict.isResolved()

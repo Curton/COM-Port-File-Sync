@@ -1,6 +1,7 @@
 package com.filesync.protocol;
 
 import com.filesync.sync.CompressionUtil;
+import com.filesync.sync.SafePaths;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -234,9 +235,10 @@ public class BatchTransferSession {
             byte[] pathBytes = new byte[pathLen];
             readFully(in, pathBytes);
             String relativePath = new String(pathBytes, StandardCharsets.UTF_8);
-            if (relativePath.contains("..")) {
-                throw new IOException("Path traversal in batch entry: " + relativePath);
-            }
+            // Containment is checked canonically, exactly as every other remote-supplied path in
+            // the protocol. A substring test for ".." both rejects legitimate names such as
+            // "notes..txt" (failing the whole batch) and misses forms the canonical check catches.
+            java.io.File targetFile = SafePaths.resolveWithin(baseDir, relativePath);
 
             // LAST_MODIFIED
             byte[] lmBuf = new byte[8];
@@ -273,7 +275,6 @@ public class BatchTransferSession {
 
             // Write file; a failure (e.g. target locked by another program) is reported through
             // the failure handler and the rest of the batch still proceeds.
-            java.io.File targetFile = new java.io.File(baseDir, relativePath);
             java.io.File parentDir = targetFile.getParentFile();
             if (parentDir != null && !parentDir.exists()) {
                 parentDir.mkdirs();

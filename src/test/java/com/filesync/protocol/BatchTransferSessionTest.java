@@ -1,6 +1,7 @@
 package com.filesync.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -516,6 +517,62 @@ class BatchTransferSessionTest {
         assertTrue(
                 thrown.getMessage().contains("Invalid path length"),
                 "Should reject oversized path length, got: " + thrown.getMessage());
+    }
+
+    // ========== Path containment ==========
+
+    /**
+     * A substring test for {@code ".."} rejects legitimate names such as {@code notes..txt}, which
+     * aborts the whole batch transfer and fails the sync for a file that is perfectly safe.
+     */
+    @Test
+    void decodeBatchAllowsPathsContainingDoubleDotsInsideAName() throws IOException {
+        byte[] batch =
+                buildBatch(
+                        new String[] {"notes..txt", "dir..name/data.txt"}, new String[] {"A", "B"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 2, null);
+        assertEquals(2, written, "A '..' inside a name is not a traversal and must be extracted");
+        assertEquals("A", Files.readString(new File(extractDir, "notes..txt").toPath()));
+        assertEquals("B", Files.readString(new File(extractDir, "dir..name/data.txt").toPath()));
+    }
+
+    /**
+     * Backslash-separated paths are what the manifest walk produces on Windows, so the containment
+     * check must normalize separators before rejecting anything.
+     */
+    @Test
+    void decodeBatchAcceptsBackslashSeparatedRelativePaths() throws IOException {
+        byte[] batch = buildBatch(new String[] {"sub\\nested\\file.txt"}, new String[] {"A"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
+        assertEquals(1, written, "Windows-style relative paths must be accepted");
+        assertEquals("A", Files.readString(new File(extractDir, "sub\\nested\\file.txt").toPath()));
+    }
+
+    @Test
+    void decodeBatchRejectsPathsThatDoNotResolveInsideTheBaseDirectory() throws IOException {
+        byte[] batch = buildBatch(new String[] {"\\evil.txt"}, new String[] {"A"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
+        assertTrue(
+                thrown.getMessage().contains("Path traversal rejected"),
+                "Should report a traversal rejection, got: " + thrown.getMessage());
+        assertFalse(
+                new File(extractDir, "evil.txt").exists(),
+                "Nothing may be written for a rejected path");
     }
 
     // ========== Per-entry write failures (locked files) ==========

@@ -262,6 +262,12 @@ public class ConflictAnalyzer {
         if (conflict.isBinary()) {
             return; // No diff for binary files
         }
+        if (!conflict.isLocalContentAvailable()) {
+            // The local side could not be read (too large or unreadable). Diffing "" against the
+            // remote text would report the whole remote file as an addition and let the merge
+            // view discard the local version, so no diff is computed at all.
+            return;
+        }
         String localText = conflict.getLocalContentAsString();
         String remoteText = conflict.getRemoteContentAsString();
         if (localText != null && remoteText != null) {

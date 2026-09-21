@@ -2,12 +2,14 @@ package com.filesync.ui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import java.lang.reflect.Method;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class TextMergePanelTest {
 
@@ -217,6 +219,96 @@ class TextMergePanelTest {
     }
 
     // Helper methods
+
+    /**
+     * A local text file larger than {@code ConflictInfo.MAX_FULL_READ_BYTES} cannot be loaded, and
+     * the local side used to be reported as an empty string. The merge view was then built from ""
+     * plus the remote content, and applying it overwrote the local file with remote-only data.
+     */
+    @Test
+    void mergeIsUnavailableWhenTheLocalVersionCannotBeLoaded(@TempDir java.nio.file.Path tempDir)
+            throws Exception {
+        StringBuilder local = new StringBuilder();
+        while (local.length() <= 1024 * 1024) {
+            local.append("local line that must not be lost\n");
+        }
+        java.nio.file.Path localFile = tempDir.resolve("big.txt");
+        java.nio.file.Files.writeString(localFile, local.toString());
+
+        ConflictInfo conflict = createLazyConflictInfo(localFile);
+        conflict.setRemoteContent(
+                "remote line\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertFalse(
+                conflict.isLocalContentAvailable(),
+                "An oversized local file must be reported as unavailable");
+        assertTrue(
+                conflict.getLocalContentAsString().isEmpty(),
+                "Documents the silent-empty behaviour the fix has to guard against");
+
+        TextMergePanel panel = new TextMergePanel(conflict);
+
+        assertFalse(
+                panel.isMergeAvailable(), "MERGE must not be offered without the local version");
+        assertTrue(
+                containsLabelMentioning(panel, "could not be loaded"),
+                "The user must be told why merging is unavailable");
+        assertNull(
+                panel.getMergedContent(),
+                "No merge content may be produced from a local version that was never read");
+    }
+
+    /** An unreadable local file is the same situation as an oversized one: no merge. */
+    @Test
+    void mergeIsUnavailableWhenTheLocalFileCannotBeRead(@TempDir java.nio.file.Path tempDir)
+            throws Exception {
+        ConflictInfo conflict = createLazyConflictInfo(tempDir.resolve("missing.txt"));
+        conflict.setRemoteContent(
+                "remote line\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertFalse(conflict.isLocalContentAvailable(), "A missing local file is not available");
+
+        TextMergePanel panel = new TextMergePanel(conflict);
+        assertFalse(
+                panel.isMergeAvailable(), "MERGE must not be offered without the local version");
+    }
+
+    /** Regression guard: an ordinary conflict still offers the manual merge. */
+    @Test
+    void mergeIsAvailableForAnOrdinaryConflict() throws Exception {
+        ConflictInfo conflict = createConflictInfo("local\n", "remote\n");
+
+        TextMergePanel panel = new TextMergePanel(conflict);
+
+        assertTrue(panel.isMergeAvailable(), "A normal text conflict must still offer MERGE");
+    }
+
+    private ConflictInfo createLazyConflictInfo(java.nio.file.Path localFile) {
+        ConflictInfo conflict =
+                new ConflictInfo(
+                        "big.txt",
+                        new FileChangeDetector.FileInfo("big.txt", 0, 0, null),
+                        new FileChangeDetector.FileInfo("big.txt", 0, 0, null),
+                        false,
+                        (byte[]) null);
+        conflict.setLazyLocalFile(localFile.toFile());
+        return conflict;
+    }
+
+    private boolean containsLabelMentioning(java.awt.Container container, String text) {
+        for (java.awt.Component component : container.getComponents()) {
+            if (component instanceof javax.swing.JLabel
+                    && ((javax.swing.JLabel) component).getText() != null
+                    && ((javax.swing.JLabel) component).getText().contains(text)) {
+                return true;
+            }
+            if (component instanceof java.awt.Container
+                    && containsLabelMentioning((java.awt.Container) component, text)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private ConflictInfo createConflictInfo(String localContent, String remoteContent) {
         ConflictInfo conflict =

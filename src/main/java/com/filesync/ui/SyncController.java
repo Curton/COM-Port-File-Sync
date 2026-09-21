@@ -379,42 +379,48 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                                             + ", filesToTransfer="
                                             + selectedPlan.getFilesToTransfer().size());
 
-                            // Resolve conflicts for selected files before starting sync
+                            // Resolve conflicts for selected files before starting sync. The
+                            // remote content is fetched on a worker thread, so the flow
+                            // continues from the callback instead of inline.
                             if (!selectedPlan.getConflicts().isEmpty()) {
                                 logController.log(
                                         "[DEBUG] runSyncPreview: calling resolveConflictsForSelectedFiles");
-                                boolean conflictsResolved =
-                                        previewRenderer.resolveConflictsForSelectedFiles(
-                                                selectedPlan, previewModel, previewRows);
-                                logController.log(
-                                        "[DEBUG] runSyncPreview: conflictsResolved="
-                                                + conflictsResolved);
-                                if (!conflictsResolved) {
-                                    logController.log(
-                                            "[DEBUG] runSyncPreview: user cancelled conflict resolution");
-                                    // User cancelled conflict resolution; restore the button
-                                    // state so the sync controls are usable again.
-                                    updateSyncButtonState();
-                                    return;
-                                }
-                                // Re-create filtered plan now that conflicts have resolutions
-                                // (SKIP/KEEP_REMOTE exclude from transfer)
-                                logController.log(
-                                        "[DEBUG] runSyncPreview: re-creating filtered plan");
-                                selectedPlan =
-                                        previewRenderer.createFilteredSyncPlan(
-                                                syncPreview, previewModel, previewRows);
-                                logController.log(
-                                        "[DEBUG] runSyncPreview: after resolution filesToTransfer="
-                                                + selectedPlan.getFilesToTransfer().size());
+                                SyncPreviewPlan planToResolve = selectedPlan;
+                                previewRenderer.resolveConflictsForSelectedFiles(
+                                        planToResolve,
+                                        previewModel,
+                                        previewRows,
+                                        conflictsResolved -> {
+                                            logController.log(
+                                                    "[DEBUG] runSyncPreview: conflictsResolved="
+                                                            + conflictsResolved);
+                                            if (!conflictsResolved) {
+                                                logController.log(
+                                                        "[DEBUG] runSyncPreview: user cancelled conflict resolution");
+                                                // User cancelled conflict resolution; restore
+                                                // the button state so the sync controls are
+                                                // usable again.
+                                                updateSyncButtonState();
+                                                return;
+                                            }
+                                            // Re-create filtered plan now that conflicts have
+                                            // resolutions (SKIP/KEEP_REMOTE exclude from
+                                            // transfer)
+                                            logController.log(
+                                                    "[DEBUG] runSyncPreview: re-creating filtered plan");
+                                            SyncPreviewPlan filteredPlan =
+                                                    previewRenderer.createFilteredSyncPlan(
+                                                            syncPreview, previewModel, previewRows);
+                                            logController.log(
+                                                    "[DEBUG] runSyncPreview: after resolution filesToTransfer="
+                                                            + filteredPlan
+                                                                    .getFilesToTransfer()
+                                                                    .size());
+                                            startSyncWithPlan(filteredPlan);
+                                        });
+                                return;
                             }
-
-                            logController.log("[DEBUG] runSyncPreview: calling initiateSync");
-                            components.getSyncButton().setEnabled(false);
-                            components.getPreviewSyncButton().setEnabled(false);
-                            components.getProgressBar().setValue(0);
-                            syncManager.initiateSync(selectedPlan);
-                            logController.log("[DEBUG] runSyncPreview: initiateSync returned");
+                            startSyncWithPlan(selectedPlan);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             String message = "Sync preview was interrupted";
@@ -451,6 +457,16 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     }
                 };
         previewWorker.execute();
+    }
+
+    /** Disable the sync controls and start the sync with the (already filtered) plan. */
+    private void startSyncWithPlan(SyncPreviewPlan plan) {
+        logController.log("[DEBUG] runSyncPreview: calling initiateSync");
+        components.getSyncButton().setEnabled(false);
+        components.getPreviewSyncButton().setEnabled(false);
+        components.getProgressBar().setValue(0);
+        syncManager.initiateSync(plan);
+        logController.log("[DEBUG] runSyncPreview: initiateSync returned");
     }
 
     public void onSyncStarted() {
