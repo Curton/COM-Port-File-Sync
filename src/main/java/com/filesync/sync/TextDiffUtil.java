@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * Utility for computing line-by-line differences between two text files, similar to git diff. Uses
- * LCS (Longest Common Subsequence) algorithm for diff computation.
+ * Myers' O(ND) diff algorithm, bounded so that huge files cannot exhaust the heap.
  */
 public final class TextDiffUtil {
 
@@ -89,14 +89,6 @@ public final class TextDiffUtil {
 
         public List<DiffLine> getLines() {
             return lines;
-        }
-
-        public int getLocalStartLine() {
-            return localStartLine;
-        }
-
-        public int getRemoteStartLine() {
-            return remoteStartLine;
         }
 
         /** Number of lines in local version covered by this hunk. */
@@ -200,6 +192,27 @@ public final class TextDiffUtil {
 
     /** Number of context lines to include around each change. */
     private static final int DEFAULT_CONTEXT_LINES = 3;
+
+    /**
+     * Maximum number of greedy search steps run against a single diff range. The trace kept for the
+     * backtrack stores only the diagonals in scope at each step, so this bounds that trace at
+     * O(steps^2) ints (about 4 MiB at the default). Beyond it, the range is split rather than
+     * traced.
+     */
+    private static final int MAX_SEARCH_STEPS = 1024;
+
+    /**
+     * Maximum recursion depth when splitting a diff range. Splits normally balance well below this;
+     * the limit exists so pathological input cannot nest unboundedly.
+     */
+    private static final int MAX_SPLIT_DEPTH = 64;
+
+    /**
+     * Upper bound on greedy work (line comparisons and diagonal steps) for a single diff. Spending
+     * it degrades the remaining ranges to "everything changed", which keeps worst-case time bounded
+     * for files that share almost nothing.
+     */
+    private static final long MAX_DIFF_WORK = 400_000_000L;
 
     private TextDiffUtil() {
         // Utility class
@@ -340,8 +353,10 @@ public final class TextDiffUtil {
     }
 
     /**
-     * Myers' O(ND) diff algorithm. Returns diff lines directly, avoiding the quadratic-space LCS
-     * table. Time: O((N+M)*D), Space: O(D*(N+M)) where D is the edit distance.
+     * Myers' O(ND) diff algorithm, bounded variant. The greedy sweep runs per diff range and the
+     * trace keeps only the diagonals in scope at each step, so memory stays at O((N+M) + steps^2)
+     * instead of O(D*(N+M)); a range whose distance outruns the step budget is split at the greedy
+     * frontier instead of being traced. Time is O((N+M)*D) with a hard work budget.
      */
     private static List<DiffLine> myersDiff(String[] a, String[] b) {
         int n = a.length;
@@ -350,112 +365,373 @@ public final class TextDiffUtil {
         if (n == 0 && m == 0) {
             return List.of();
         }
+        List<DiffLine> result = new ArrayList<>(Math.min(n + m, 1024));
         if (n == 0) {
-            List<DiffLine> result = new ArrayList<>();
-            for (int j = 0; j < m; j++) {
-                result.add(new DiffLine(DiffLineType.ADDED, b[j], -1, j + 1));
-            }
+            appendRange(result, DiffLineType.ADDED, b, 0, m);
             return result;
         }
         if (m == 0) {
-            List<DiffLine> result = new ArrayList<>();
-            for (int i = 0; i < n; i++) {
-                result.add(new DiffLine(DiffLineType.REMOVED, a[i], i + 1, -1));
-            }
+            appendRange(result, DiffLineType.REMOVED, a, 0, n);
             return result;
         }
-
-        int max = n + m;
-        int offset = max;
-        int[] v = new int[2 * max + 1];
-        Arrays.fill(v, -1);
-        v[offset + 1] = 0;
-
-        List<int[]> trace = new ArrayList<>();
-        int foundD = -1;
-
-        forward:
-        for (int d = 0; d <= max; d++) {
-            trace.add(v.clone());
-            for (int k = -d; k <= d; k += 2) {
-                int x;
-                if (k == -d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
-                    x = v[k + 1 + offset];
-                } else {
-                    x = v[k - 1 + offset] + 1;
-                }
-                int y = x - k;
-
-                while (x < n && y < m && a[x].equals(b[y])) {
-                    x++;
-                    y++;
-                }
-
-                v[k + offset] = x;
-
-                if (x >= n && y >= m) {
-                    foundD = d;
-                    break forward;
-                }
-            }
-        }
-
-        if (foundD == -1) {
-            return List.of();
-        }
-
-        // Backtrack through the trace to produce diff lines
-        List<DiffLine> result = new ArrayList<>();
-        int cx = n, cy = m;
-
-        for (int d = foundD; d > 0; d--) {
-            int[] vPrev = trace.get(d);
-            int k = cx - cy;
-
-            boolean fromAbove;
-            if (k == -d) {
-                fromAbove = true;
-            } else if (k == d) {
-                fromAbove = false;
-            } else {
-                fromAbove = vPrev[k - 1 + offset] < vPrev[k + 1 + offset];
-            }
-
-            int prevK = fromAbove ? k + 1 : k - 1;
-            int prevX = vPrev[prevK + offset];
-            int prevY = prevX - prevK;
-
-            int midX = fromAbove ? prevX : prevX + 1;
-            int midY = fromAbove ? prevY + 1 : prevY;
-
-            // Snake from (midX, midY) to (cx, cy) — all UNCHANGED
-            int sx = cx, sy = cy;
-            while (sx > midX && sy > midY) {
-                sx--;
-                sy--;
-                result.add(new DiffLine(DiffLineType.UNCHANGED, a[sx], sx + 1, sy + 1));
-            }
-
-            // The edit step
-            if (fromAbove) {
-                result.add(new DiffLine(DiffLineType.ADDED, b[prevY], -1, prevY + 1));
-            } else {
-                result.add(new DiffLine(DiffLineType.REMOVED, a[prevX], prevX + 1, -1));
-            }
-
-            cx = prevX;
-            cy = prevY;
-        }
-
-        // Initial snake from (0, 0) to (cx, cy)
-        while (cx > 0 && cy > 0) {
-            cx--;
-            cy--;
-            result.add(new DiffLine(DiffLineType.UNCHANGED, a[cx], cx + 1, cy + 1));
-        }
-
-        Collections.reverse(result);
+        new MyersRangeDiff(a, b, result).diffRange(0, n, 0, m, 0);
         return result;
+    }
+
+    /** Appends the lines of {@code [from, to)} as pure additions or removals. */
+    private static void appendRange(
+            List<DiffLine> out, DiffLineType type, String[] lines, int from, int to) {
+        if (type == DiffLineType.ADDED) {
+            for (int j = from; j < to; j++) {
+                out.add(new DiffLine(DiffLineType.ADDED, lines[j], -1, j + 1));
+            }
+        } else {
+            for (int i = from; i < to; i++) {
+                out.add(new DiffLine(DiffLineType.REMOVED, lines[i], i + 1, -1));
+            }
+        }
+    }
+
+    /** Copies the diagonals in scope at step {@code d} (k in [-d, d]) into a compact slice. */
+    private static int[] copyDiagonals(int[] v, int d, int offset) {
+        int[] slice = new int[2 * d + 1];
+        for (int k = -d; k <= d; k++) {
+            slice[k + d] = v[k + offset];
+        }
+        return slice;
+    }
+
+    /**
+     * Emits diff lines for a[a0, aEnd) against b[b0, bEnd). Trims the common prefix and suffix
+     * before searching, since a localized edit otherwise walks the full file through the greedy.
+     */
+    private static final class MyersRangeDiff {
+        private final String[] a;
+        private final String[] b;
+        private final List<DiffLine> out;
+        private long workLeft;
+
+        MyersRangeDiff(String[] a, String[] b, List<DiffLine> out) {
+            this.a = a;
+            this.b = b;
+            this.out = out;
+            this.workLeft = MAX_DIFF_WORK;
+        }
+
+        void diffRange(int a0, int aEnd, int b0, int bEnd, int depth) {
+            int n = aEnd - a0;
+            int m = bEnd - b0;
+            if (n == 0 && m == 0) {
+                return;
+            }
+            if (n == 0) {
+                appendRange(out, DiffLineType.ADDED, b, b0, bEnd);
+                return;
+            }
+            if (m == 0) {
+                appendRange(out, DiffLineType.REMOVED, a, a0, aEnd);
+                return;
+            }
+
+            int prefix = 0;
+            while (prefix < n && prefix < m && a[a0 + prefix].equals(b[b0 + prefix])) {
+                prefix++;
+                workLeft--;
+            }
+            for (int i = 0; i < prefix; i++) {
+                out.add(
+                        new DiffLine(
+                                DiffLineType.UNCHANGED, a[a0 + i], a0 + i + 1, b0 + i + 1));
+            }
+            int suffix = 0;
+            while (suffix < n - prefix
+                    && suffix < m - prefix
+                    && a[aEnd - 1 - suffix].equals(b[bEnd - 1 - suffix])) {
+                suffix++;
+                workLeft--;
+            }
+
+            int midA0 = a0 + prefix;
+            int midA1 = aEnd - suffix;
+            int midB0 = b0 + prefix;
+            int midB1 = bEnd - suffix;
+            if (midA1 == midA0) {
+                appendRange(out, DiffLineType.ADDED, b, midB0, midB1);
+            } else if (midB1 == midB0) {
+                appendRange(out, DiffLineType.REMOVED, a, midA0, midA1);
+            } else {
+                diffMiddle(midA0, midA1, midB0, midB1, depth);
+            }
+
+            // The suffix lines match and follow the middle, so they are all unchanged.
+            for (int i = 0; i < suffix; i++) {
+                int ai = midA1 + i;
+                int bi = midB1 + i;
+                out.add(new DiffLine(DiffLineType.UNCHANGED, a[ai], ai + 1, bi + 1));
+            }
+        }
+
+        /**
+         * Runs the greedy sweep for one middle range. If the sweep reaches both ends within the step
+         * budget, the trace is walked back into the full diff. If the distance outruns the budget,
+         * the range is split at the middle snake instead — a snake on an optimal path, so the two
+         * halves' optimal distances add back up to this range's and no slack accumulates down the
+         * recursion. Spending the work budget or the split depth reports the range as fully changed
+         * instead, which bounds worst-case time.
+         */
+        private void diffMiddle(int a0, int aEnd, int b0, int bEnd, int depth) {
+            int n = aEnd - a0;
+            int m = bEnd - b0;
+            int[] v = new int[2 * MAX_SEARCH_STEPS + 5];
+            int offset = MAX_SEARCH_STEPS + 2;
+            Arrays.fill(v, -1);
+            v[offset + 1] = 0;
+
+            List<int[]> trace = null;
+            int foundD = -1;
+            int limit = Math.min(n + m, MAX_SEARCH_STEPS);
+            if (workLeft > 0) {
+                trace = new ArrayList<>(limit + 1);
+                search:
+                for (int d = 0; d <= limit; d++) {
+                    trace.add(copyDiagonals(v, d, offset));
+                    for (int k = -d; k <= d; k += 2) {
+                        int x;
+                        if (k == -d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
+                            x = v[k + 1 + offset];
+                        } else {
+                            x = v[k - 1 + offset] + 1;
+                        }
+                        int y = x - k;
+
+                        while (x < n && y < m && a[a0 + x].equals(b[b0 + y])) {
+                            x++;
+                            y++;
+                            workLeft--;
+                        }
+                        workLeft--;
+                        if (workLeft <= 0) {
+                            break search;
+                        }
+                        v[k + offset] = x;
+
+                        if (x >= n && y >= m) {
+                            foundD = d;
+                            break search;
+                        }
+                    }
+                }
+            }
+
+            if (foundD >= 0) {
+                List<DiffLine> reversed = backtrack(trace, foundD, a0, aEnd, b0, bEnd);
+                Collections.reverse(reversed);
+                out.addAll(reversed);
+                return;
+            }
+            if (workLeft <= 0 || depth >= MAX_SPLIT_DEPTH) {
+                appendRange(out, DiffLineType.REMOVED, a, a0, aEnd);
+                appendRange(out, DiffLineType.ADDED, b, b0, bEnd);
+                return;
+            }
+
+            // Distance outruns the trace budget, so tracing the whole range as one piece is out.
+            // Split at the middle snake instead. Its search is bounded by half the range's rows —
+            // the step at which the two frontiers are guaranteed to have crossed — so a range whose
+            // rows outrun that bound is halved first rather than burning the budget on a search that
+            // cannot succeed.
+            int snakeBudget = Math.min(MAX_SEARCH_STEPS, (n + m + 1) / 2);
+            int[] snake = findMiddleSnake(a0, aEnd, b0, bEnd, snakeBudget);
+            if (snake == null
+                    || snake[0] < 0
+                    || snake[1] < 0
+                    || snake[0] > n
+                    || snake[1] > m
+                    || snake[2] > n
+                    || snake[3] > m
+                    || snake[2] < snake[0]
+                    || snake[3] < snake[1]
+                    || (snake[2] == n && snake[3] == m)
+                    || (snake[0] == 0 && snake[1] == 0)) {
+                // No usable snake inside this range: halve the rows and recurse.
+                int midA = a0 + (n + 1) / 2;
+                int midB = b0 + (m + 1) / 2;
+                diffRange(a0, midA, b0, midB, depth + 1);
+                diffRange(midA, aEnd, midB, bEnd, depth + 1);
+                return;
+            }
+            diffRange(a0, a0 + snake[0], b0, b0 + snake[1], depth + 1);
+            for (int i = snake[0]; i < snake[2]; i++) {
+                out.add(
+                        new DiffLine(
+                                DiffLineType.UNCHANGED,
+                                a[a0 + i],
+                                a0 + i + 1,
+                                b0 + (i - snake[0] + snake[1]) + 1));
+            }
+            diffRange(a0 + snake[2], aEnd, b0 + snake[3], bEnd, depth + 1);
+        }
+
+        /**
+         * Finds a snake on an optimal path for a[a0, aEnd) vs b[b0, bEnd) by running the greedy
+         * edit-graph search forward from (0, 0) and, in lockstep, forward over the reversed strings
+         * — which is the same search run backward from (n, m). The first diagonal where the forward
+         * frontier has reached the backward frontier's point is where the two paths cross, and the
+         * common run there lies on an optimal path. Returns {startX, startY, endX, endY} in
+         * range-local coordinates, or null when the frontiers do not cross within the budget.
+         */
+        private int[] findMiddleSnake(int a0, int aEnd, int b0, int bEnd, int budget) {
+            int n = aEnd - a0;
+            int m = bEnd - b0;
+            int delta = n - m;
+            int off = budget + 2;
+            // vf[k]: furthest x on diagonal k (x - y) reached from (0, 0).
+            // vb[kr]: furthest x reached from (n, m), held in the reversed strings' own diagonal
+            // space, so a reversed diagonal kr is original diagonal (delta - kr).
+            int[] vf = new int[2 * budget + 5];
+            int[] vb = new int[2 * budget + 5];
+            Arrays.fill(vf, -1);
+            Arrays.fill(vb, -1);
+            vf[off + 1] = 0;
+            vb[off + 1] = 0;
+
+            for (int d = 0; d <= budget; d++) {
+                for (int k = -d; k <= d; k += 2) {
+                    int x = greedyBest(vf, off, k, d);
+                    int y = x - k;
+                    while (x < n && y < m && a[a0 + x].equals(b[b0 + y])) {
+                        x++;
+                        y++;
+                    }
+                    vf[k + off] = x;
+                }
+                for (int k = -d; k <= d; k += 2) {
+                    int x = greedyBest(vb, off, k, d);
+                    int y = x - k;
+                    while (x < n && y < m && a[aEnd - 1 - x].equals(b[bEnd - 1 - y])) {
+                        x++;
+                        y++;
+                    }
+                    vb[k + off] = x;
+                }
+                // A diagonal both frontiers cover now holds the forward frontier at or past the
+                // backward frontier's point: the paths have crossed on it.
+                for (int k = -d; k <= d; k += 2) {
+                    int kr = delta - k;
+                    if (kr < -d || kr > d) {
+                        continue;
+                    }
+                    int xf = vf[k + off];
+                    int xr = vb[kr + off];
+                    if (xf < 0 || xr < 0) {
+                        continue;
+                    }
+                    int bx = n - xr;
+                    int by = m - (xr - kr);
+                    if (xf < bx) {
+                        continue;
+                    }
+                    // Walk the actual common run through the crossing, so the emitted snake is
+                    // equal lines by construction whatever the frontier arithmetic says.
+                    int sx = bx;
+                    int sy = by;
+                    while (sx > 0 && sy > 0 && a[a0 + sx - 1].equals(b[b0 + sy - 1])) {
+                        sx--;
+                        sy--;
+                    }
+                    int ex = bx;
+                    int ey = by;
+                    while (ex < n && ey < m && a[a0 + ex].equals(b[b0 + ey])) {
+                        ex++;
+                        ey++;
+                    }
+                    if (ex == sx && ey == sy) {
+                        continue;
+                    }
+                    return new int[] {sx, sy, ex, ey};
+                }
+            }
+            return null;
+        }
+
+        /** Greedy best x for diagonal k at step d — the standard Myers table step. */
+        private static int greedyBest(int[] v, int off, int k, int d) {
+            if (k == -d || (k != d && v[k - 1 + off] < v[k + 1 + off])) {
+                return v[k + 1 + off];
+            }
+            return v[k - 1 + off] + 1;
+        }
+
+        /**
+         * Walks the trace backwards from (n, m) to (0, 0), emitting lines in reverse order. Reads
+         * only the diagonals recorded at each step's own offset, since the slices are compact.
+         */
+        private List<DiffLine> backtrack(
+                List<int[]> trace, int foundD, int a0, int aEnd, int b0, int bEnd) {
+            List<DiffLine> reversed = new ArrayList<>();
+            int cx = aEnd - a0;
+            int cy = bEnd - b0;
+
+            for (int d = foundD; d > 0; d--) {
+                int[] vPrev = trace.get(d);
+                int k = cx - cy;
+                int traceOffset = d;
+
+                boolean fromAbove;
+                if (k == -d) {
+                    fromAbove = true;
+                } else if (k == d) {
+                    fromAbove = false;
+                } else {
+                    fromAbove = vPrev[k - 1 + traceOffset] < vPrev[k + 1 + traceOffset];
+                }
+
+                int prevK = fromAbove ? k + 1 : k - 1;
+                int prevX = vPrev[prevK + traceOffset];
+                int prevY = prevX - prevK;
+
+                int midX = fromAbove ? prevX : prevX + 1;
+                int midY = fromAbove ? prevY + 1 : prevY;
+
+                // Snake from (midX, midY) to (cx, cy) — all UNCHANGED
+                int sx = cx;
+                int sy = cy;
+                while (sx > midX && sy > midY) {
+                    sx--;
+                    sy--;
+                    reversed.add(
+                            new DiffLine(
+                                    DiffLineType.UNCHANGED,
+                                    a[a0 + sx],
+                                    a0 + sx + 1,
+                                    b0 + sy + 1));
+                }
+
+                // The edit step
+                if (fromAbove) {
+                    reversed.add(
+                            new DiffLine(
+                                    DiffLineType.ADDED, b[b0 + prevY], -1, b0 + prevY + 1));
+                } else {
+                    reversed.add(
+                            new DiffLine(
+                                    DiffLineType.REMOVED, a[a0 + prevX], a0 + prevX + 1, -1));
+                }
+
+                cx = prevX;
+                cy = prevY;
+            }
+
+            // Initial snake from (0, 0) to (cx, cy)
+            while (cx > 0 && cy > 0) {
+                cx--;
+                cy--;
+                reversed.add(
+                        new DiffLine(
+                                DiffLineType.UNCHANGED, a[a0 + cx], a0 + cx + 1, b0 + cy + 1));
+            }
+            return reversed;
+        }
     }
 
     /** Group diff lines into hunks with context lines around changes. */

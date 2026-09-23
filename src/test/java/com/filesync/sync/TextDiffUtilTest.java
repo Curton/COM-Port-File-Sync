@@ -219,6 +219,78 @@ class TextDiffUtilTest {
         assertEquals(3, result.getRemovedCount());
     }
 
+    // ========== large conflicting texts stay bounded ==========
+
+    /** Drops the trailing newline so line counts read directly, without the shared empty last line. */
+    private static String textOf(StringBuilder sb) {
+        sb.setLength(sb.length() - 1);
+        return sb.toString();
+    }
+
+    /**
+     * A conflict whose edit distance outruns the per-range step budget used to make its own
+     * correction. The trace the greedy sweep keeps must stay O(steps^2) rather than growing with
+     * the distance times the text size, and the result must still be a valid script.
+     */
+    @Test
+    void largeConflictingTextsDoNotExhaustMemory() {
+        // ~1000 lines with every other line rewritten: distance ~ n, well over the step budget.
+        int lines = 2000;
+        StringBuilder local = new StringBuilder();
+        StringBuilder remote = new StringBuilder();
+        for (int i = 0; i < lines; i++) {
+            local.append("base line ").append(i).append('\n');
+            remote.append(i % 2 == 0 ? "changed line " : "base line ").append(i).append('\n');
+        }
+        DiffResult result =
+                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        assertEquals(lines / 2, result.getAddedCount());
+        assertEquals(lines / 2, result.getRemovedCount());
+        assertEquals(lines / 2, result.getUnchangedCount());
+    }
+
+    /**
+     * The same shape at a distance the greedy sweep cannot reach at all, which is the case that
+     * used to store a trace slice per step over the whole text and exhaust the heap.
+     */
+    @Test
+    void largeFullyRewrittenTextsDoNotExhaustMemory() {
+        int lines = 3000;
+        StringBuilder local = new StringBuilder();
+        StringBuilder remote = new StringBuilder();
+        for (int i = 0; i < lines; i++) {
+            local.append("local content number ").append(i).append('\n');
+            remote.append("remote content number ").append(i).append('\n');
+        }
+        DiffResult result =
+                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        assertTrue(result.hasChanges());
+        assertEquals(lines, result.getAddedCount());
+        assertEquals(lines, result.getRemovedCount());
+        assertEquals(0, result.getUnchangedCount());
+    }
+
+    /**
+     * A big shared backbone with a scattered set of edits: the common prefix and suffix collapse
+     * away, so only the middle needs searching, and the diff must stay minimal.
+     */
+    @Test
+    void largeTextWithScatteredEditsStaysMinimal() {
+        int lines = 4000;
+        int edits = lines / 400;
+        StringBuilder local = new StringBuilder();
+        StringBuilder remote = new StringBuilder();
+        for (int i = 0; i < lines; i++) {
+            boolean changed = (i % 400) == 200;
+            local.append("stable line ").append(i).append('\n');
+            remote.append(changed ? "edited line " : "stable line ").append(i).append('\n');
+        }
+        DiffResult result =
+                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        assertEquals(2 * edits, result.getChangeCount());
+        assertEquals(lines - edits, result.getUnchangedCount());
+    }
+
     // ========== hasMeaningfulDifferences streaming pre-check ==========
 
     @Test
