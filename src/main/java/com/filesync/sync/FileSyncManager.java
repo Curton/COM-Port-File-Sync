@@ -440,14 +440,6 @@ public class FileSyncManager {
         syncCoordinator.startSync(plan);
     }
 
-    /**
-     * Initiate synchronization using a pre-computed preview plan. Skips manifest roundtrip when
-     * plan is valid for current state.
-     */
-    public void initiateSyncWithPlan(SyncPreviewPlan plan) {
-        initiateSync(plan);
-    }
-
     public void cancelSync() {
         syncCoordinator.cancelOngoingSync();
         syncCancelInProgress.set(true);

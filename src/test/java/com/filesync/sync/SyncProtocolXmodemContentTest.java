@@ -151,15 +151,15 @@ class SyncProtocolXmodemContentTest {
     // ========== Remote log transfer entry points ==========
 
     @Test
-    void sendLogRequest_writesLogReqFrame() throws IOException {
+    void logReqCommand_writesLogReqFrame() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         SyncProtocol protocol = new SyncProtocol(serial);
 
-        protocol.sendLogRequest();
+        protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
 
         assertTrue(
                 serial.getWrittenLines().contains("[[SYNC:LOG_REQ]]"),
-                "sendLogRequest must write a bare LOG_REQ frame");
+                "the LOG_REQ command must be written as a bare LOG_REQ frame");
     }
 
     @Test

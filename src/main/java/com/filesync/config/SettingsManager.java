@@ -256,18 +256,6 @@ public class SettingsManager {
     }
 
     /**
-     * Get remembered folder mapping for the given port context. Returns the most recent two-element
-     * array [senderPath, receiverPath], or null if no mapping stored.
-     */
-    public String[] getRememberedFolderMapping(String port) {
-        List<String[]> mappings = getRememberedFolderMappings(port);
-        if (mappings.isEmpty()) {
-            return null;
-        }
-        return mappings.get(0);
-    }
-
-    /**
      * Get remembered folder mappings for the given port context. Entry 0 is the most recent
      * mapping.
      */
@@ -453,26 +441,6 @@ public class SettingsManager {
             }
         }
         return 0;
-    }
-
-    /** Get the index of a baud rate in BAUD_RATES array */
-    public static int getBaudRateIndex(int value) {
-        for (int i = 0; i < BAUD_RATES.length; i++) {
-            if (BAUD_RATES[i] == value) {
-                return i;
-            }
-        }
-        return 9; // Default to 115200 index
-    }
-
-    /** Get the index of data bits in DATA_BITS_OPTIONS array */
-    public static int getDataBitsIndex(int value) {
-        for (int i = 0; i < DATA_BITS_OPTIONS.length; i++) {
-            if (DATA_BITS_OPTIONS[i] == value) {
-                return i;
-            }
-        }
-        return 3; // Default to 8 bits index
     }
 
     private void loadRecentFolders() {

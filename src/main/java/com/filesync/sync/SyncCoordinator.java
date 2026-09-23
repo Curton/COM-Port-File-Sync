@@ -831,55 +831,6 @@ public class SyncCoordinator {
         protocol.sendFile(syncFolder, relativePath);
     }
 
-    public void handleIncomingBatch(int expectedSize, int totalOperations) throws IOException {
-        File syncFolder = syncFolderSupplier.get();
-        if (syncFolder == null) {
-            syncing.set(false);
-            onSyncIdle.run();
-            return;
-        }
-        syncing.set(true);
-        try {
-            int[] failedCount = new int[1];
-            BatchTransferSession.BatchProgressCallback callback =
-                    (idx, total, relPath) -> {
-                        pendingFileWriteService.markWritten(relPath);
-                        eventBus.post(
-                                new SyncEvent.LogEvent(
-                                        "Batch receiving ["
-                                                + (idx + 1)
-                                                + "/"
-                                                + totalOperations
-                                                + "]: "
-                                                + relPath));
-                        touchHeartbeat();
-                    };
-            BatchTransferSession.WriteFailureHandler failureHandler =
-                    (path, data, lastModified, message) -> {
-                        failedCount[0]++;
-                        pendingFileWriteService.enqueue(
-                                syncFolder, path, data, lastModified, message);
-                    };
-            int written =
-                    protocol.receiveBatch(
-                            expectedSize, totalOperations, callback, syncFolder, failureHandler);
-            if (failedCount[0] > 0) {
-                eventBus.post(
-                        new SyncEvent.LogEvent(
-                                "Batch received ("
-                                        + written
-                                        + " files, "
-                                        + failedCount[0]
-                                        + " waiting for user decision)"));
-            } else {
-                eventBus.post(new SyncEvent.LogEvent("Batch received successfully"));
-            }
-        } finally {
-            syncing.set(false);
-            onSyncIdle.run();
-        }
-    }
-
     /**
      * Receive a batch when the total operation count is unknown (e.g., receiver-initiated sync).
      * Uses the batch entry count for progress reporting instead of overall operation count.

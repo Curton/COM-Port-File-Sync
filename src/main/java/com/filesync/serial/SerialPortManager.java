@@ -54,16 +54,6 @@ public class SerialPortManager {
         return portNames;
     }
 
-    /** Get list of available COM ports with descriptions */
-    public static List<String> getAvailablePortsWithDescription() {
-        List<String> portDescs = new ArrayList<>();
-        SerialPort[] ports = SerialPort.getCommPorts();
-        for (SerialPort port : ports) {
-            portDescs.add(port.getSystemPortName() + " - " + port.getDescriptivePortName());
-        }
-        return portDescs;
-    }
-
     /**
      * Open the specified COM port.
      *

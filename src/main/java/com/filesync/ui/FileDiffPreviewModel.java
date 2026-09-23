@@ -25,19 +25,9 @@ public final class FileDiffPreviewModel {
     /** Which version of the file a preview side shows. */
     public enum Side {
         /** The version the sync will send (the local file when this device is the sender). */
-        SOURCE("New Version"),
+        SOURCE,
         /** The version currently on the peer (the receiver's file). */
-        BASE("Previous Version");
-
-        private final String label;
-
-        Side(String label) {
-            this.label = label;
-        }
-
-        public String getLabel() {
-            return label;
-        }
+        BASE;
     }
 
     private final String path;
@@ -225,14 +215,6 @@ public final class FileDiffPreviewModel {
      */
     public boolean isBaseAvailable() {
         return baseAvailable;
-    }
-
-    public String getSourceUnavailableReason() {
-        return sourceUnavailableReason;
-    }
-
-    public String getBaseUnavailableReason() {
-        return baseUnavailableReason;
     }
 
     public boolean isText() {

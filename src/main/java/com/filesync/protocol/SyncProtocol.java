@@ -227,7 +227,7 @@ public class SyncProtocol {
     /**
      * Receive and parse a command message with an explicit per-read timeout, leaving {@link
      * #timeoutMs} untouched for subsequent reads. The native port timeout is narrowed to the slice
-     * and restored afterwards (same dance as {@link #tryReceiveCommand}).
+     * and restored afterwards.
      */
     public Message receiveCommand(int readTimeoutMs) throws IOException {
         serialPort.setReadTimeout(readTimeoutMs);
@@ -1244,11 +1244,6 @@ public class SyncProtocol {
                 baseDir, batch, totalEntries, batchProgressCallback, failureHandler);
     }
 
-    /** Request a specific file */
-    public void requestFile(String relativePath) throws IOException {
-        sendCommand(CMD_FILE_REQ, relativePath);
-    }
-
     /**
      * Send file data. Performs limited retries around the underlying XMODEM transfer so that
      * transient handshake issues do not abort the entire sync. The sender includes its lastModified
@@ -1945,11 +1940,6 @@ public class SyncProtocol {
         }
     }
 
-    /** Request the remote peer's log text (used by the combined-log save). */
-    public void sendLogRequest() throws IOException {
-        sendCommand(CMD_LOG_REQ);
-    }
-
     /**
      * Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the combined-log
      * save can align the two machines' clocks. The peer answers with an ACK once the marker has
@@ -2340,24 +2330,6 @@ public class SyncProtocol {
                 START_MARKER.length() + CMD_SHARED_TEXT.length() + END_MARKER.length() + 2L;
         long limit = budgetBytes - framingBytes;
         return (int) Math.max(limit, MIN_SHARED_TEXT_INLINE_ENCODED_CHARS);
-    }
-
-    /**
-     * Try to receive a command with short timeout for heartbeat check Returns null if no data
-     * available or timeout
-     */
-    public Message tryReceiveCommand(int shortTimeoutMs) throws IOException {
-        int originalTimeout = timeoutMs;
-        try {
-            serialPort.setReadTimeout(shortTimeoutMs);
-            if (serialPort.available() > 0) {
-                String line = serialPort.readLine(shortTimeoutMs);
-                return parseMessage(line);
-            }
-            return null;
-        } finally {
-            serialPort.setReadTimeout(originalTimeout);
-        }
     }
 
     /**

@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -232,115 +231,6 @@ class ConflictAnalyzerTest {
         assertTrue(
                 ConflictAnalyzer.contentDiffers(local, remoteDiffTime),
                 "Different time beyond window should differ");
-    }
-
-    @Test
-    void readFileContent_readsFileCorrectly() throws IOException {
-        Path testFile = tempDir.resolve("test.txt");
-        String content = "test content";
-        Files.writeString(testFile, content);
-
-        byte[] result = ConflictAnalyzer.readFileContent(testFile.toFile());
-
-        assertNotNull(result);
-        assertEquals(content, new String(result));
-    }
-
-    @Test
-    void readFileContent_returnsNullForNonexistentFile() {
-        byte[] result = ConflictAnalyzer.readFileContent(new File("nonexistent.txt"));
-        assertNull(result);
-    }
-
-    // ========== isLikelyBinary tests ==========
-
-    @Test
-    void isLikelyBinary_returnsFalseForNull() {
-        assertFalse(ConflictAnalyzer.isLikelyBinary(null));
-    }
-
-    @Test
-    void isLikelyBinary_returnsFalseForEmpty() {
-        assertFalse(ConflictAnalyzer.isLikelyBinary(new byte[0]));
-    }
-
-    @Test
-    void isLikelyBinary_returnsFalseForPureText() {
-        // ASCII text with tabs, newlines, carriage returns - all allowed
-        String text = "Hello\t\nWorld\r\nLine3\nLine4\r\n";
-        assertFalse(ConflictAnalyzer.isLikelyBinary(text.getBytes()));
-    }
-
-    @Test
-    void isLikelyBinary_returnsTrueForBinaryData() {
-        // Null bytes and high ratio of control chars indicate binary
-        byte[] binary = new byte[100];
-        for (int i = 0; i < 50; i++) {
-            binary[i] = 0; // null byte - non-text
-        }
-        for (int i = 50; i < 100; i++) {
-            binary[i] = 1; // control char - non-text
-        }
-        assertTrue(ConflictAnalyzer.isLikelyBinary(binary));
-    }
-
-    @Test
-    void isLikelyBinary_boundaryAt10Percent() {
-        // 10% non-text should be false (threshold is > 10%)
-        byte[] data = new byte[1000];
-        for (int i = 0; i < 100; i++) {
-            data[i] = 0; // 10% null bytes
-        }
-        for (int i = 100; i < 1000; i++) {
-            data[i] = 'a'; // text
-        }
-        assertFalse(ConflictAnalyzer.isLikelyBinary(data), "Exactly 10%% non-text should be false");
-
-        // 11% non-text should be true
-        for (int i = 100; i < 110; i++) {
-            data[i] = 0; // 11% null bytes
-        }
-        assertTrue(ConflictAnalyzer.isLikelyBinary(data), "11%% non-text should be true");
-    }
-
-    // ========== readFileSample tests ==========
-
-    @Test
-    void readFileSample_readsUpTo4096Bytes(@TempDir Path tempDir) throws IOException {
-        Path testFile = tempDir.resolve("large.bin");
-        byte[] data = new byte[5000];
-        for (int i = 0; i < 5000; i++) {
-            data[i] = (byte) (i % 256);
-        }
-        Files.write(testFile, data);
-
-        byte[] sample = ConflictAnalyzer.readFileSample(testFile.toFile());
-
-        assertEquals(4096, sample.length);
-    }
-
-    @Test
-    void readFileSample_returnsEmptyForNonexistentFile() {
-        byte[] sample = ConflictAnalyzer.readFileSample(new File("nonexistent.bin"));
-        assertEquals(0, sample.length);
-    }
-
-    @Test
-    void readFileSample_returnsEmptyForDirectory(@TempDir Path tempDir) {
-        byte[] sample = ConflictAnalyzer.readFileSample(tempDir.toFile());
-        assertEquals(0, sample.length);
-    }
-
-    @Test
-    void readFileSample_handlesPartialRead(@TempDir Path tempDir) throws IOException {
-        // File smaller than 4096 - should return all content
-        Path testFile = tempDir.resolve("small.txt");
-        Files.writeString(testFile, "abc");
-
-        byte[] sample = ConflictAnalyzer.readFileSample(testFile.toFile());
-
-        assertEquals(3, sample.length);
-        assertEquals("abc", new String(sample));
     }
 
     // ========== exemptPrefixShapedConflicts tests ==========

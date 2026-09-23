@@ -54,11 +54,10 @@ class SettingsManagerTest {
     }
 
     @Test
-    void getRememberedFolderMapping_returnsNullWhenEmpty() {
+    void getRememberedFolderMappings_returnsEmptyWhenNothingStored() {
         SettingsManager settings = new SettingsManager(true);
         String port = "COM99_TEST_EMPTY_" + System.currentTimeMillis();
-        String[] result = settings.getRememberedFolderMapping(port);
-        assertNull(result);
+        assertTrue(settings.getRememberedFolderMappings(port).isEmpty());
     }
 
     @Test
@@ -66,8 +65,9 @@ class SettingsManagerTest {
         SettingsManager settings = new SettingsManager(true);
         String port = "COM99_TEST_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver");
-        String[] result = settings.getRememberedFolderMapping(port);
-        assertArrayEquals(new String[] {"C:/sender", "D:/receiver"}, result);
+        List<String[]> result = settings.getRememberedFolderMappings(port);
+        assertEquals(1, result.size());
+        assertArrayEquals(new String[] {"C:/sender", "D:/receiver"}, result.get(0));
     }
 
     @Test
@@ -78,7 +78,7 @@ class SettingsManagerTest {
         settings.setRememberedFolderMapping(port, "C:/sender", "");
         settings.setRememberedFolderMapping(port, null, "D:/receiver");
         settings.setRememberedFolderMapping(port, "C:/sender", null);
-        assertNull(settings.getRememberedFolderMapping(port));
+        assertTrue(settings.getRememberedFolderMappings(port).isEmpty());
     }
 
     @Test
@@ -256,34 +256,6 @@ class SettingsManagerTest {
         folders.add("C:/added_after");
 
         assertEquals(initialSize, settings.getRecentFolders().size());
-    }
-
-    @Test
-    void getBaudRateIndex_returnsCorrectIndex() {
-        assertEquals(0, SettingsManager.getBaudRateIndex(300));
-        assertEquals(9, SettingsManager.getBaudRateIndex(115200));
-        assertEquals(12, SettingsManager.getBaudRateIndex(921600));
-    }
-
-    @Test
-    void getBaudRateIndex_returnsDefaultForUnknownValue() {
-        assertEquals(4, SettingsManager.getBaudRateIndex(9600));
-        assertEquals(9, SettingsManager.getBaudRateIndex(123456));
-        assertEquals(9, SettingsManager.getBaudRateIndex(0));
-        assertEquals(9, SettingsManager.getBaudRateIndex(-1));
-    }
-
-    @Test
-    void getDataBitsIndex_returnsCorrectIndex() {
-        assertEquals(0, SettingsManager.getDataBitsIndex(5));
-        assertEquals(3, SettingsManager.getDataBitsIndex(8));
-    }
-
-    @Test
-    void getDataBitsIndex_returnsDefaultForUnknownValue() {
-        assertEquals(3, SettingsManager.getDataBitsIndex(4));
-        assertEquals(3, SettingsManager.getDataBitsIndex(0));
-        assertEquals(3, SettingsManager.getDataBitsIndex(-1));
     }
 
     @Test

@@ -347,10 +347,6 @@ public class MainFrameComponents {
         return statusLabel;
     }
 
-    public JLabel getSettingsLabel() {
-        return settingsLabel;
-    }
-
     public void setSettingsLabel(String text) {
         settingsLabel.setText(text);
     }

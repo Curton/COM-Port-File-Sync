@@ -2,7 +2,6 @@ package com.filesync.sync;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -21,9 +20,6 @@ import java.util.Set;
 public class ConflictAnalyzer {
 
     private static final Set<String> BINARY_EXTENSIONS = new HashSet<>();
-
-    // 50MB threshold - files larger than this will use sampling for content analysis
-    private static final long MAX_FULL_READ_BYTES = 1024 * 1024;
 
     static {
         // Common binary file extensions (no duplicates)
@@ -313,77 +309,5 @@ public class ConflictAnalyzer {
         }
         String ext = path.substring(lastDot + 1).toLowerCase();
         return BINARY_EXTENSIONS.contains(ext);
-    }
-
-    /**
-     * Check if content appears to be binary based on byte analysis. Uses the same logic as
-     * CompressionUtil.isLikelyBinaryContent.
-     */
-    public static boolean isLikelyBinary(byte[] data) {
-        if (data == null || data.length == 0) {
-            return false;
-        }
-
-        int sampleLength = Math.min(data.length, 4096);
-        int nonTextCount = 0;
-
-        for (int i = 0; i < sampleLength; i++) {
-            int b = data[i] & 0xFF;
-            // Non-text: null bytes, or control chars (except tab, newline, carriage return)
-            if (b == 0 || (b < 32 && b != 9 && b != 10 && b != 13) || b == 127) {
-                nonTextCount++;
-            }
-        }
-
-        return (double) nonTextCount / sampleLength > 0.10; // More than 10% non-text bytes
-    }
-
-    /**
-     * Read file content, with a size limit for memory protection. Files larger than
-     * MAX_FULL_READ_BYTES will return null; use readFileSample() instead.
-     */
-    public static byte[] readFileContent(File file) {
-        if (file == null || !file.exists() || !file.isFile()) {
-            return null;
-        }
-
-        try {
-            long fileSize = file.length();
-            if (fileSize > MAX_FULL_READ_BYTES) {
-                return null; // File too large, use sample instead
-            }
-            if (fileSize > Integer.MAX_VALUE) {
-                return null; // File too large
-            }
-
-            return Files.readAllBytes(file.toPath());
-        } catch (IOException e) {
-            return null;
-        }
-    }
-
-    /** Read a small sample of file content for binary detection. */
-    public static byte[] readFileSample(File file) {
-        if (file == null || !file.exists() || !file.isFile()) {
-            return new byte[0];
-        }
-
-        try {
-            long fileSize = file.length();
-            int toRead = (int) Math.min(fileSize, 4096);
-
-            byte[] sample = new byte[toRead];
-            try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
-                int totalRead = 0;
-                while (totalRead < toRead) {
-                    int read = fis.read(sample, totalRead, toRead - totalRead);
-                    if (read == -1) break;
-                    totalRead += read;
-                }
-            }
-            return sample;
-        } catch (IOException e) {
-            return new byte[0];
-        }
     }
 }

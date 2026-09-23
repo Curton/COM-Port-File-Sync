@@ -989,61 +989,6 @@ class SyncCoordinatorTest {
         verify(mockProtocol).sendError("Sync folder not configured");
     }
 
-    // ========== Complex tests: handleIncomingBatch ==========
-
-    @Test
-    void handleIncomingBatch_callsProtocolReceiveBatch_logsAndResetsSyncing() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.handleIncomingBatch(100, 10);
-
-        verify(mockProtocol)
-                .receiveBatch(
-                        anyInt(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        isA(File.class),
-                        isA(BatchTransferSession.WriteFailureHandler.class));
-        // handleIncomingBatch doesn't call touchHeartbeat() in success path
-        assertEquals(0, heartbeatTouches.get());
-        // After method completes, syncing should be false (in finally block)
-        assertFalse(syncing.get());
-        verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
-    }
-
-    @Test
-    void handleIncomingBatch_callsSyncIdle_whenSyncFolderNull() throws IOException {
-        File nullFolder = null;
-        SyncCoordinator coordinatorWithNullFolder =
-                new SyncCoordinator(
-                        mockProtocol,
-                        mockEventBus,
-                        () -> nullFolder,
-                        () -> false,
-                        () -> false,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        () -> true,
-                        pendingWriteService,
-                        syncing,
-                        () -> syncIdleCalls.incrementAndGet(),
-                        () -> syncBoundaryCalls.incrementAndGet(),
-                        () -> heartbeatTouches.incrementAndGet());
-
-        coordinatorWithNullFolder.handleIncomingBatch(100, 10);
-
-        assertEquals(1, syncIdleCalls.get());
-        verify(mockProtocol, never())
-                .receiveBatch(
-                        anyInt(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        isA(File.class),
-                        isA(BatchTransferSession.WriteFailureHandler.class));
-    }
-
     // ========== Complex tests: handleIncomingBatchUnknownTotal ==========
 
     @Test
