@@ -1,0 +1,13 @@
+{
+  "name": "happy path at 115200 (peer is sender)",
+  "steps": [
+    {"op": "waitState", "roleNegotiated": true, "sender": true, "timeoutMs": 30000},
+    {"op": "resetMeter"},
+    {"op": "sync", "timeoutMs": 180000},
+    {"op": "waitState", "syncing": false, "connected": true, "timeoutMs": 60000},
+    {"op": "expectThroughput", "channel": "outbound", "minBps": 200, "maxBps": 11519},
+    {"op": "expectStats", "channel": "outbound", "minDropped": 0},
+    {"op": "folder"},
+    {"op": "applog"}
+  ]
+}

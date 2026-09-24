@@ -1,0 +1,17 @@
+{
+  "name": "dirty link: noise, bit corruption and dropped control frames",
+  "steps": [
+    {"op": "fault", "corruptPct": 0.02, "noisePeriodBytes": 20000, "noiseBurstBytes": 24},
+    {"op": "tamper", "direction": "to-app", "action": "drop", "command": "HEARTBEAT_ACK", "occurrence": 2},
+    {"op": "waitState", "roleNegotiated": true, "sender": true, "timeoutMs": 30000},
+    {"op": "sync", "timeoutMs": 600000},
+    {"op": "waitState", "syncing": false, "connected": true, "timeoutMs": 180000},
+    {"op": "expectStats", "channel": "inbound", "minDropped": 0},
+    {"op": "resetMeter"},
+    {"op": "tamper", "direction": "to-app", "action": "drop", "command": "SYNC_COMPLETE", "occurrence": 1},
+    {"op": "sync", "timeoutMs": 600000},
+    {"op": "waitState", "syncing": false, "connected": true, "timeoutMs": 180000},
+    {"op": "inject", "direction": "to-peer", "frame": "[[SYNC:HEARTBEAT]]"},
+    {"op": "waitState", "connected": true, "timeoutMs": 30000}
+  ]
+}

@@ -1,0 +1,35 @@
+# Two-ended serial-link regression suite (tools/link-lab).
+#
+# Manual only: these tests spin two full application instances against each other on an
+# emulated COM link and are deliberately NOT part of any default build (local `mvn test`
+# excludes the com.filesync.lab.e2e package). Run them from the Actions tab when needed
+# ("Run workflow"), or locally with `mvn test -Pe2e` in tools/link-lab.
+
+name: link-lab regression
+
+on:
+  workflow_dispatch:
+
+jobs:
+  link-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+    - name: Run link-lab tests (wire model + two-ended e2e)
+      working-directory: tools/link-lab
+      run: mvn -B -ntp test -Pe2e
+    - name: Upload test reports
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: surefire-reports
+        path: tools/link-lab/target/surefire-reports/
+        if-no-files-found: ignore

@@ -1,0 +1,15 @@
+{
+  "name": "slow link at 9600 baud with light loss",
+  "steps": [
+    {"op": "fault", "baud": 9600, "latencyMs": 20, "jitterMs": 5, "lossPct": 0.2},
+    {"op": "waitState", "roleNegotiated": true, "sender": true, "timeoutMs": 30000},
+    {"op": "resetMeter"},
+    {"op": "sync", "timeoutMs": 600000},
+    {"op": "waitState", "syncing": false, "connected": true, "timeoutMs": 120000},
+    {"op": "expectThroughput", "channel": "outbound", "minBps": 700, "maxBps": 961},
+    {"op": "expectStats", "channel": "outbound", "minDropped": 1},
+    {"op": "fault", "baud": 115200, "lossPct": 0, "latencyMs": 2, "jitterMs": 1},
+    {"op": "sync", "timeoutMs": 300000},
+    {"op": "waitState", "syncing": false, "connected": true, "timeoutMs": 120000}
+  ]
+}
