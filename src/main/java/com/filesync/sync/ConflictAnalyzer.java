@@ -93,11 +93,16 @@ public class ConflictAnalyzer {
     }
 
     /**
-     * Filter conflicts to only include those with meaningful differences. This method should be
-     * called after remote content has been fetched.
+     * Compute and record whether each text conflict has meaningful differences. This method should
+     * be called after remote content has been fetched.
      *
-     * @param conflicts list of conflicts to filter (modified in place)
-     * @return the same list with trivial conflicts removed (trivial conflicts are marked as SKIP)
+     * <p>Nothing is removed: a conflict whose differences are purely whitespace or blank lines is
+     * pre-resolved to {@link ConflictInfo.Resolution#KEEP_LOCAL} so it syncs the sender's version
+     * directly, and the caller drops it from the resolution queue by checking {@link
+     * ConflictInfo#isResolved()} together with {@link ConflictInfo#hasMeaningfulDifferences()}.
+     *
+     * @param conflicts list of conflicts to annotate (modified in place)
+     * @return the same list, for convenience
      */
     public static List<ConflictInfo> filterTrivialConflicts(List<ConflictInfo> conflicts) {
         conflicts.removeIf(
