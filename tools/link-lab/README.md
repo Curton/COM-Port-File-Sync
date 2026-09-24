@@ -1,8 +1,10 @@
 # link-lab — serial link emulator + protocol peer for com_file_sync
 
 `link-lab` is the regression-test harness for COM Port File Sync. It exists so the application can
-be exercised the way it runs in the field — over a real COM port, at a real serial speed, with a
-real protocol counterpart — without a second physical machine.
+be exercised the way it runs in the field — a real protocol counterpart, a slow imperfect link,
+real timeouts firing — without a second physical machine. Almost everything here runs in a single
+JVM with no hardware at all; only the two optional modes that talk to a live application need a
+serial port pair on the system (see **What you need to run what** below).
 
 It provides two things:
 
@@ -14,9 +16,11 @@ It provides two things:
    roles, exchanges manifests, receives batches/deltas/appends, serves conflict content and shared
    text. Only the wire and the operator surface are new.
 
+`peer` mode in one picture — the one mode that needs anything beyond a JVM:
+
 ```
    ┌───────────────────┐                     ┌──────────────────────────────┐
-   │  app under test   │  COM10 ◄──────────► │  com0com virtual pair        │
+   │  app under test   │  COM10 ◄──────────► │  virtual serial pair         │
    │  (real Swing UI)  │                     │  COM11 ◄──────────────────┐  │
    └───────────────────┘                     └──────────────────────────┼──┘
                                                                        │
@@ -34,32 +38,26 @@ as the app under test (see `app.version` in `pom.xml`, keep it in sync with the 
 
 ---
 
-## 1. Prerequisites: a virtual COM port pair
+## What you need to run what
 
-The application opens real COM ports, and so does this tool. On Windows the pair is provided by a
-virtual-port driver such as **com0com** (see <https://github.com/tanvir-ahmed-m4/com0com>, also
-available from <https://sourceforge.net/projects/com0com/>). The tool does **not** ship a driver:
-it speaks to the pair the driver creates.
+Almost nothing needs installing: only the two modes that talk to a live application open a serial
+port at all. Find your row and read only what it asks for.
 
-Install and create a pair (run `setupc.exe` from an elevated prompt in the com0com install
-directory):
+| You want to | You need |
+|---|---|
+| `selftest` — check the emulator's pacing and fault statistics | nothing |
+| `mvn -o test` — the 49 wire-model unit tests | nothing |
+| `mvn -o test -Pe2e` — the two-ended regression suite (§9) | nothing |
+| `peer` — one app instance plus one simulated remote machine | a serial port pair (§2) |
+| `bridge` — two app instances relayed through the emulated wire | two serial port pairs (§2) |
 
-```bat
-setupc.exe install PortName=COM10 PortClass=com0com
-setupc.exe install PortName=COM11 PortClass=com0com
-setupc.exe list
-```
+Everything except the last two rows runs entirely in-process: no hardware, no driver, no ports. A
+"pair" is two port names the operating system links together, so whatever one end writes the other
+end reads; it comes from a virtual-serial driver of your choice — several exist, free and
+commercial. link-lab never installs a driver; it opens whichever pair is already on the system,
+and §2 shows where each mode's two ends live.
 
-You should see `COM10 <-> COM11` (use `-PortName=COM10` query flags to confirm the pairing). Any
-pair works; the convention below assumes **COM10 = app, COM11 = link-lab**. For bridge mode you
-need two pairs, e.g. `COM10<->COM11` and `COM13<->COM14` (app A on COM10, app B on COM13, the tool
-relays COM11 <-> COM14).
-
-Important: **com0com pairs do not model line timing at all** — data written to one end appears in
-the other end's buffer immediately, regardless of baud rate. That is exactly what link-lab adds:
-the tool paces every byte at the configured serial rate on both directions.
-
-## 2. Building
+## 1. Building
 
 From `tools/link-lab` (this repo's tool directory):
 
@@ -80,7 +78,7 @@ The shaded jar is `target/link-lab-<version>.jar`. This sub-project has its own 
 build output); the *application's* `target/` remains the rollback archive and must never be
 cleaned.
 
-## 3. Modes
+## 2. Modes
 
 ```
 java -jar target/link-lab-1.0.0.jar ports [--...]
@@ -91,7 +89,8 @@ java -jar target/link-lab-1.0.0.jar bridge   --ports COM11,COM14 [wire options]
 
 ### `ports`
 
-Lists the COM ports jSerialComm can see (i.e. whether the com0com pair is visible to Java).
+Lists the serial ports jSerialComm can see — how you confirm your pair is visible to Java before a
+`peer` or `bridge` run.
 
 ### `selftest`
 
@@ -104,7 +103,10 @@ run.bat selftest --baud 9600
 
 ### `peer`
 
-The simulated other machine. It listens on one end of the pair, the app under test on the other.
+The simulated other machine. It listens on one end of a serial port pair, the app under test on
+the other. This is one of the two modes that needs a pair on the system: create one with any
+virtual-serial driver (several exist, free and commercial), confirm it shows up under `ports`, and
+let the tool open one end — convention **COM11** — with the app on the other (**COM10**).
 
 ```bat
 run.bat peer --port COM11 --workspace C:\lab\peerB --roles peer-sender --frames --trace trace.txt
@@ -115,7 +117,7 @@ run.bat peer --port COM11 --workspace C:\lab\peerB --roles peer-sender --frames 
 | `--port COMx` | the tool's end of the virtual pair | required |
 | `--workspace DIR` | the peer's sync folder (stands in for machine B) | `link-lab-workspace` |
 | `--roles peer-sender\|peer-receiver\|auto` | deterministic role assignment | `peer-sender` |
-| `--script FILE` | run a JSON scenario and exit (see §6) | none |
+| `--script FILE` | run a JSON scenario and exit (see §5) | none |
 | `--frames` | log every control frame to the trace | off |
 | `--trace FILE` | also write the trace to a file | stdout only |
 
@@ -125,13 +127,15 @@ The peer redirects the application's disk caches (`manifest-*`, `sigcache-*`) in
 ### `bridge`
 
 The tool becomes the cable: two real app instances talk through the emulated wire. Nothing of the
-application protocol is replaced, which makes this the closest thing to a two-machine test:
+application protocol is replaced, which makes this the closest thing to a two-machine test. It
+needs two pairs on the system — e.g. `COM10<->COM11` and `COM13<->COM14`; the app instances open
+COM10 and COM13, the tool relays COM11 and COM14.
 
 ```bat
 run.bat bridge --ports COM11,COM14 --baud 19200 --loss 0.5 --latency 10
 ```
 
-## 4. The wire model
+## 3. The wire model
 
 Parameters (all live: they can be changed mid-session from the console or a scenario).
 
@@ -152,6 +156,10 @@ releases bytes early, so long-run throughput equals `baud/10` regardless of burs
 
 Backpressure is real too: if the receiving side stops reading, the emulator's buffer fills, the
 pump stops draining the port, and the sender blocks — the same cascade as on a real cable.
+
+A driver-provided pair passes bytes through instantly regardless of baud — it models nothing about
+the line. The pacing, latency, loss, corruption and noise above are what make an emulated link
+behave like the field; the pair itself is only the conduit.
 
 ### Frame tampering
 
@@ -175,7 +183,7 @@ handshake byte right after an `ACK` frame) - is still detected as one frame, and
 prefix that can still open a frame is held back. Everything else passes through untouched, so the
 tap can never swallow raw transfer bytes (covered by `FrameTapTest`).
 
-## 5. Peer mode: the operator console
+## 4. Peer mode: the operator console
 
 Started without `--script`, the peer reads commands from stdin while the trace streams:
 
@@ -208,7 +216,7 @@ Trace lines look like:
 [14:02:12.005][PEER     ] inbound  wire: 25123 B offered, 25123 B released (11519 B/s), ...
 ```
 
-## 6. Scenarios (repeatable regressions)
+## 5. Scenarios (repeatable regressions)
 
 A scenario is a JSON list of steps executed against a live peer. Every step has a timeout, so a
 hung protocol path fails the run instead of stalling it. The runner exits non-zero when any step
@@ -238,7 +246,7 @@ java -jar target/link-lab-1.0.0.jar peer --port COM11 --script scenarios/happy-p
 Bundled scenarios: `scenarios/happy-path.json`, `scenarios/slow-link.json`,
 `scenarios/dirty-link.json`.
 
-## 7. Regression playbook (connection lifecycle through shared text)
+## 6. Regression playbook (connection lifecycle through shared text)
 
 The app's README features map to concrete lab sessions:
 
@@ -255,7 +263,7 @@ The app's README features map to concrete lab sessions:
 | Slow link | `--baud 9600 --latency 20`; note the app's 10 s XMODEM block timeout is exercised for real |
 | Conflict resolution | same file modified on both sides; app: Sync Preview → conflict dialog; console `content <path>` fetches the app's copy |
 
-## 8. What the tool does not model
+## 7. What the tool does not model
 
 - **Flow control (RTS/CTS) and FIFO sizes** are not modelled; only the byte rate, latency, loss,
   corruption and noise.
@@ -267,7 +275,7 @@ The app's README features map to concrete lab sessions:
   you emulate a different rate, since the wire model only changes timing, not the port's baud
   register).
 
-## 9. Semantics the tool relies on (protocol facts)
+## 8. Semantics the tool relies on (protocol facts)
 
 Useful when reading a trace or writing a scenario (all in `src/main/java`):
 
@@ -291,7 +299,7 @@ Useful when reading a trace or writing a scenario (all in `src/main/java`):
 - Frame-level `ACK` is a text frame; XMODEM/interleave ACKs are the raw byte `0x06` — do not
   confuse them in a trace.
 
-## 11. Two-ended regression tests (`src/test/java/com/filesync/lab/e2e`)
+## 9. Two-ended regression tests (`src/test/java/com/filesync/lab/e2e`)
 
 No hardware and no COM port: a `DuplexLink` wires two `LinkSerialPortManager`s back to back in one
 JVM, and two *real* `FileSyncManager`s (`RemotePeer.attach`, headless) run the production protocol
@@ -331,11 +339,11 @@ only the 49 wire-model unit tests). It runs:
   — manual dispatch only, never on push or pull request;
 - locally on demand: `mvn -o test -Pe2e` in this directory (49 + 8 e2e tests, ~1 minute).
 
-## 12. Development notes
+## 10. Development notes
 
 - Unit tests cover the wire model without hardware: rate accuracy, backpressure, fault statistics,
   frame tampering, and the app-facing port wrapper (`mvn -o test` in this directory).
-- Adding `-Pe2e` to the same command also runs the two-ended regression suite (section 11): two
+- Adding `-Pe2e` to the same command also runs the two-ended regression suite (§9): two
   real application instances over one emulated link, covering the sync, drop-file, folder,
   shared-text, link-cycle and noisy-wire paths end to end.
 - `spotless` is configured for this sub-project only; if you run `spotless:apply` scope it with
