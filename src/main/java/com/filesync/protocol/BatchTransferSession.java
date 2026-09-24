@@ -1,6 +1,7 @@
 package com.filesync.protocol;
 
 import com.filesync.sync.CompressionUtil;
+import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.SafePaths;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -15,12 +16,19 @@ import java.util.List;
  * <pre>
  * MAGIC(4) | VERSION(1) | ENTRY_COUNT(4) | ENTRY[0] | ... | ENTRY[N-1]
  *
- * ENTRY = PATH_LEN(2) | PATH(utf8) | LAST_MODIFIED(8) | FLAGS(1) | RAW_OR_COMPRESSED_LEN(4) | DATA
- * FLAGS: bit 0 = compressed
+ * ENTRY = PATH_LEN(2) | PATH(utf8) | LAST_MODIFIED(8) | FLAGS(1) [ | MD5(16 raw) ]
+ *         | RAW_OR_COMPRESSED_LEN(4) | DATA
+ * FLAGS: bit 0 = compressed, bit 1 = entry carries a manifest MD5
  * </pre>
  *
- * On the wire the whole batch is one XMODEM payload. The receiver decodes each entry and writes the
- * file. If the XMODEM transfer fails the entire batch is retried; individual files cannot be
+ * The optional 16 raw MD5 bytes are the sender's manifest hash of the entry's decoded content. The
+ * receiver verifies every hashed entry before writing it — an entry whose content does not
+ * reproduce the announced hash is not written and is reported as a failure, so line-corrupted
+ * content can never silently land on disk. Entries without a hash (fast mode leaves files unhashed)
+ * are written unverified, exactly as before.
+ *
+ * <p>On the wire the whole batch is one XMODEM payload. The receiver decodes each entry and writes
+ * the file. If the XMODEM transfer fails the entire batch is retried; individual files cannot be
  * resumed mid-batch.
  */
 public class BatchTransferSession {
@@ -28,7 +36,9 @@ public class BatchTransferSession {
     /** Magic bytes identifying a batch payload: "BTH\0" */
     private static final byte[] MAGIC = new byte[] {0x42, 0x54, 0x48, 0x00};
 
-    private static final int VERSION = 1;
+    /** Version 2 adds the per-entry manifest MD5 and its verification (version 1 had neither). */
+    private static final int VERSION = 2;
+
     private static final int MAX_ENTRIES_PER_BATCH = 256;
 
     /** Hard ceiling on total decoded batch size (defense in depth against OOM). */
@@ -40,12 +50,18 @@ public class BatchTransferSession {
     /** Reasonable upper bound for a relative path within a batch entry. */
     private static final int MAX_PATH_LENGTH = 4096;
 
+    private static final int MD5_BYTES = 16;
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
     private BatchTransferSession() {}
 
     /**
      * Build a binary batch from the given file list and encode it into a byte array.
      *
-     * @param files list of entries; each entry is a Object[] { File file, String relativePath }
+     * @param files list of entries; each entry is a Object[] { File file, String relativePath[,
+     *     String manifestMd5] } — the optional third element is the sender's manifest md5 hex of
+     *     the file's content, carried in the entry so the receiver can verify it after decoding
      * @param maxBatchSizeBytes soft upper bound on total encoded bytes (count + content, approx.)
      * @return encoded batch bytes, ready for XMODEM.send()
      */
@@ -78,6 +94,7 @@ public class BatchTransferSession {
             Object[] entry = files.get(i);
             java.io.File file = (java.io.File) entry[0];
             String relativePath = (String) entry[1];
+            String manifestMd5 = entry.length > 2 ? (String) entry[2] : null;
 
             byte[] pathBytes = relativePath.getBytes(StandardCharsets.UTF_8);
             byte[] content = readFileContent(file);
@@ -99,9 +116,14 @@ public class BatchTransferSession {
             byte[] lmBytes = ByteBuffer.allocate(8).putLong(lastModified).array();
             out.write(lmBytes, 0, 8);
 
-            // FLAGS (1 byte): bit 0 = compressed
-            byte flags = (byte) (wasCompressed ? 1 : 0);
+            // FLAGS (1 byte): bit 0 = compressed, bit 1 = manifest md5 present
+            byte flags = (byte) ((wasCompressed ? 1 : 0) | (hasMd5(manifestMd5) ? 2 : 0));
             out.write(flags);
+
+            // MD5 (16 raw bytes, only when announced in FLAGS)
+            if (hasMd5(manifestMd5)) {
+                out.write(decodeMd5Hex(manifestMd5), 0, MD5_BYTES);
+            }
 
             // RAW_OR_COMPRESSED_LEN (4 bytes, big-endian)
             byte[] lenBytes = ByteBuffer.allocate(4).putInt(data.length).array();
@@ -164,8 +186,9 @@ public class BatchTransferSession {
     /**
      * Decode a batch produced by {@link #buildBatch} and write each file into the given base
      * directory. When a {@code failureHandler} is provided, an entry whose write fails (e.g. the
-     * target file is locked by another program) is reported through the handler and the remaining
-     * entries are still written instead of aborting the whole batch.
+     * target file is locked by another program) or whose content does not reproduce its announced
+     * manifest md5 is reported through the handler and the remaining entries are still written
+     * instead of aborting the whole batch.
      *
      * @param baseDir the directory to extract files under
      * @param batch encoded batch bytes
@@ -173,8 +196,9 @@ public class BatchTransferSession {
      *     callback to report correct overall progress)
      * @param progressCallback called with (entryIndex, totalEntries, relativePath) after each file
      *     is written; may be null
-     * @param failureHandler called with (relativePath, data, lastModified, errorMessage) when a
-     *     single entry cannot be written; when null the write failure is rethrown
+     * @param failureHandler called with (relativePath, data, lastModified, errorMessage, cause)
+     *     when a single entry cannot be written or fails verification; when null the failure is
+     *     rethrown
      * @return the number of files written
      */
     public static int decodeAndWriteBatch(
@@ -184,13 +208,34 @@ public class BatchTransferSession {
             BatchProgressCallback progressCallback,
             WriteFailureHandler failureHandler)
             throws IOException {
+        return decodeAndWriteBatch(
+                baseDir, batch, totalEntries, progressCallback, failureHandler, null);
+    }
+
+    /**
+     * Full decode variant, additionally notifying {@code confirmationListener} after each entry
+     * that was verified (when it announced an md5) and written. The listener receives the entry's
+     * manifest md5 hex and decoded size, which is exactly the confirmed state a receiver records
+     * for the path.
+     *
+     * @param confirmationListener called after each successfully written entry; may be null. For
+     *     entries without a hash the md5 argument is null.
+     */
+    public static int decodeAndWriteBatch(
+            java.io.File baseDir,
+            byte[] batch,
+            int totalEntries,
+            BatchProgressCallback progressCallback,
+            WriteFailureHandler failureHandler,
+            EntryConfirmationListener confirmationListener)
+            throws IOException {
         if (batch.length > MAX_BATCH_TOTAL_BYTES) {
             throw new IOException(
                     "Batch payload too large: "
                             + batch.length
                             + " bytes (max: "
                             + MAX_BATCH_TOTAL_BYTES
-                            + ")");
+                            + " bytes)");
         }
         java.io.ByteArrayInputStream in = new java.io.ByteArrayInputStream(batch);
 
@@ -248,6 +293,15 @@ public class BatchTransferSession {
             // FLAGS
             int flags = in.read();
             boolean compressed = (flags & 1) != 0;
+            boolean hasMd5 = (flags & 2) != 0;
+
+            // MD5 (16 raw bytes, present iff announced)
+            String manifestMd5 = null;
+            if (hasMd5) {
+                byte[] md5Buf = new byte[MD5_BYTES];
+                readFully(in, md5Buf);
+                manifestMd5 = encodeHex(md5Buf);
+            }
 
             // LEN
             byte[] lenBuf = new byte[4];
@@ -273,6 +327,26 @@ public class BatchTransferSession {
                 data = CompressionUtil.decompress(data);
             }
 
+            // Verify the announced manifest md5 before anything touches the disk; an entry that
+            // fails was corrupted in transit and must not be written or retried from these bytes.
+            if (manifestMd5 != null && !manifestMd5.equals(FileChangeDetector.manifestMd5(data))) {
+                if (failureHandler == null) {
+                    throw new IOException(
+                            "Batch entry md5 mismatch for '"
+                                    + relativePath
+                                    + "': announced "
+                                    + manifestMd5
+                                    + ", decoded content differs");
+                }
+                failureHandler.onWriteFailed(
+                        relativePath,
+                        data,
+                        lastModified,
+                        "manifest md5 mismatch (announced " + manifestMd5 + ")",
+                        WriteFailureCause.HASH_MISMATCH);
+                continue;
+            }
+
             // Write file; a failure (e.g. target locked by another program) is reported through
             // the failure handler and the rest of the batch still proceeds.
             java.io.File parentDir = targetFile.getParentFile();
@@ -286,6 +360,9 @@ public class BatchTransferSession {
                     targetFile.setLastModified(lastModified);
                 }
                 written++;
+                if (confirmationListener != null) {
+                    confirmationListener.onEntryConfirmed(relativePath, manifestMd5, data.length);
+                }
                 if (progressCallback != null) {
                     progressCallback.onEntryProcessed(i, totalEntries, relativePath);
                 }
@@ -293,7 +370,12 @@ public class BatchTransferSession {
                 if (failureHandler == null) {
                     throw e;
                 }
-                failureHandler.onWriteFailed(relativePath, data, lastModified, e.getMessage());
+                failureHandler.onWriteFailed(
+                        relativePath,
+                        data,
+                        lastModified,
+                        e.getMessage(),
+                        WriteFailureCause.IO_ERROR);
             }
         }
 
@@ -303,8 +385,65 @@ public class BatchTransferSession {
     /** Callback for per-entry write failures during batch decode. */
     @FunctionalInterface
     public interface WriteFailureHandler {
+        /**
+         * Report one entry that could not be written or failed verification.
+         *
+         * @param cause {@link WriteFailureCause#IO_ERROR} entries may be retried later from {@code
+         *     data}; {@link WriteFailureCause#HASH_MISMATCH} entries must not — their decoded bytes
+         *     did not reproduce the announced md5.
+         */
         void onWriteFailed(
-                String relativePath, byte[] data, long lastModified, String errorMessage);
+                String relativePath,
+                byte[] data,
+                long lastModified,
+                String errorMessage,
+                WriteFailureCause cause);
+    }
+
+    /** Why a batch entry failed: its bytes are either retryable or provably corrupt. */
+    public enum WriteFailureCause {
+        /** The write itself failed (e.g. the target is locked); the decoded bytes are usable. */
+        IO_ERROR,
+        /** The decoded content does not reproduce the announced manifest md5; do not write it. */
+        HASH_MISMATCH
+    }
+
+    /** Callback for entries that were verified and written during batch decode. */
+    @FunctionalInterface
+    public interface EntryConfirmationListener {
+        /**
+         * Called after an entry is written. {@code manifestMd5} is the announced md5 hex for a
+         * hashed entry, or null when the entry carried no hash (fast mode).
+         */
+        void onEntryConfirmed(String relativePath, String manifestMd5, long size);
+    }
+
+    private static boolean hasMd5(String manifestMd5) {
+        return manifestMd5 != null && !manifestMd5.isEmpty();
+    }
+
+    private static byte[] decodeMd5Hex(String hex) throws IOException {
+        if (hex.length() != MD5_BYTES * 2) {
+            throw new IOException("Invalid manifest md5 length for batch entry: " + hex);
+        }
+        byte[] out = new byte[MD5_BYTES];
+        for (int i = 0; i < out.length; i++) {
+            int high = Character.digit(hex.charAt(i * 2), 16);
+            int low = Character.digit(hex.charAt(i * 2 + 1), 16);
+            if (high < 0 || low < 0) {
+                throw new IOException("Invalid manifest md5 hex for batch entry: " + hex);
+            }
+            out[i] = (byte) ((high << 4) | low);
+        }
+        return out;
+    }
+
+    private static String encodeHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(HEX[(b >> 4) & 0xF]).append(HEX[b & 0xF]);
+        }
+        return sb.toString();
     }
 
     private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {

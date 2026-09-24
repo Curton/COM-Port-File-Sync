@@ -11,11 +11,25 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Analyzes two file manifests to detect conflicts - files that have been modified on both sender
- * and receiver since the last sync.
+ * Analyzes two file manifests to detect conflicts — files modified on both sides since the last
+ * successful sync.
  *
- * <p>Conflict detection is based on manifest metadata (MD5 checksums or size+mtime). Actual content
- * is fetched later when needed for merge UI.
+ * <p>Arbitration compares three states per path: the local manifest entry (L), the remote manifest
+ * entry (R) and the base (B) recorded by the {@link SyncStateStore} for the last successful sync.
+ * When content differs (L != R):
+ *
+ * <ul>
+ *   <li>R == B: only the sender changed the file — a normal transfer, no conflict.
+ *   <li>R != B (any L): the receiver changed its copy too — pushing the sender's version would
+ *       overwrite those changes, so the conflict dialog decides.
+ *   <li>B missing (first pairing, or the state store was wiped): the history is unknown, so the
+ *       path is treated as a conflict conservative once; the session then records fresh bases.
+ *   <li>L or R without a hash (fast mode leaves binaries unhashed): no hash to arbitrate with, so
+ *       the timestamps decide exactly as before.
+ * </ul>
+ *
+ * <p>Conflict detection needs manifest metadata only (MD5, or size+mtime in fast mode); actual
+ * content is fetched later when needed for the merge UI.
  */
 public class ConflictAnalyzer {
 
@@ -37,7 +51,8 @@ public class ConflictAnalyzer {
 
     /**
      * Find all conflicts between two manifests. A conflict occurs when the same file exists on both
-     * sides with different content.
+     * sides, their content differs, and the remote copy is not the state both sides last agreed on
+     * (see the class javadoc for the full rule).
      *
      * <p>For text files, this method computes a line-by-line diff and filters out conflicts that
      * only have trivial differences (whitespace-only changes, blank lines). Binary files are always
@@ -46,12 +61,15 @@ public class ConflictAnalyzer {
      * @param localManifest the sender's manifest
      * @param remoteManifest the receiver's manifest
      * @param localFolder the sender's sync folder (to read local content for ConflictInfo)
+     * @param syncState the store of last-successfully-synced states; a null store means "no base
+     *     known", the same state a first pairing is in (every difference is a conflict)
      * @return list of detected conflicts with meaningful differences, never null
      */
     public static List<ConflictInfo> findConflicts(
             FileChangeDetector.FileManifest localManifest,
             FileChangeDetector.FileManifest remoteManifest,
-            File localFolder) {
+            File localFolder,
+            SyncStateStore syncState) {
 
         List<ConflictInfo> conflicts = new ArrayList<>();
 
@@ -69,12 +87,10 @@ public class ConflictAnalyzer {
             if (localInfo != null && remoteInfo != null) {
                 // File exists on both sides - check if content differs
                 if (contentDiffers(localInfo, remoteInfo)) {
-                    // Only treat as conflict when receiver has newer changes (we would overwrite
-                    // them).
-                    // If only sender modified, remote has old version - normal transfer, no
-                    // conflict.
-                    if (!isReceiverNewer(localInfo, remoteInfo)) {
-                        continue; // Sender's version is same or newer, safe to transfer
+                    // Decide whether this is a conflict from the recorded base: transferring is
+                    // only harmless when the receiver still holds the agreed-on version.
+                    if (!isRemoteDivergedFromBase(path, localInfo, remoteInfo, syncState)) {
+                        continue; // only the sender modified: normal transfer
                     }
                     boolean isBinary = isBinaryExtension(path);
                     File localFile = new File(localFolder, path);
@@ -135,11 +151,11 @@ public class ConflictAnalyzer {
      * the set of exempted paths.
      *
      * <p>This is the shape of a partially copied file: the receiver holds the sender's first N
-     * bytes (e.g. an archive transferred halfway through some outside-the-sync channel, so the
-     * copy's mtime is newer than the sender's). Such a file is not receiver-modified content, but
-     * the md5/mtime manifests alone classify it as a binary conflict, which excludes it from the
-     * delta candidates and forces a full transfer through the conflict dialog. Exempting it lets
-     * the file reach the append/delta path, which sends only the missing tail.
+     * bytes (e.g. an archive transferred halfway through some outside-the-sync channel). Such a
+     * file is not receiver-modified content — its base state is neither the old agreed-on version
+     * nor verifiable as an append, so the manifests alone classify it as a conflict, which excludes
+     * it from the delta candidates and forces a full transfer through the conflict dialog.
+     * Exempting it lets the file reach the append/delta path, which sends only the missing tail.
      *
      * <p>The match is verified by hashing the sender's first {@code remoteInfo.getSize()} bytes
      * with the manifest algorithm ({@link FileChangeDetector#hashFilePrefix}) and comparing against
@@ -293,9 +309,42 @@ public class ConflictAnalyzer {
     }
 
     /**
-     * True when receiver (remote) has a newer version than sender (local). In that case we would
-     * overwrite receiver's changes - a real conflict. When only sender modified, remote is older -
-     * no conflict, normal transfer.
+     * Whether the receiver's copy has diverged from the state both sides last agreed on (the base),
+     * so transferring the sender's version would overwrite receiver-side changes.
+     *
+     * <p>With hashes on both sides the base is the authority: the receiver still holding the base
+     * (R == B) means only the sender modified the file. A missing base (first sync, wiped store)
+     * has unknown history and always counts as diverged. Without hashes (fast mode) there is
+     * nothing to compare and the timestamps decide instead (see {@link #isReceiverNewer}).
+     *
+     * <p>Called only for paths whose content already differs (see {@link #contentDiffers}), so "L
+     * == B" and "R == B" cannot both hold.
+     */
+    private static boolean isRemoteDivergedFromBase(
+            String path,
+            FileChangeDetector.FileInfo local,
+            FileChangeDetector.FileInfo remote,
+            SyncStateStore syncState) {
+        String localMd5 = local.getMd5();
+        String remoteMd5 = remote.getMd5();
+        if (localMd5 == null || localMd5.isEmpty() || remoteMd5 == null || remoteMd5.isEmpty()) {
+            return isReceiverNewer(local, remote);
+        }
+        if (syncState == null) {
+            return true; // no recorded history: treat as diverged
+        }
+        SyncStateStore.Confirmed base = syncState.base(path);
+        if (base == null || base.md5() == null || base.md5().isEmpty()) {
+            return true; // never synced with a hash: unknown history
+        }
+        return !remoteMd5.equals(base.md5());
+    }
+
+    /**
+     * True when the receiver's copy is timestamped after the sender's (beyond {@link
+     * FileChangeDetector#MODIFY_WINDOW_MS}) — the fast-mode arbitration used when neither side
+     * carries a hash to compare. Kept as the fallback until fast mode gains hash-based fast paths;
+     * it no longer carries arbitration semantics for hashed content.
      */
     private static boolean isReceiverNewer(
             FileChangeDetector.FileInfo local, FileChangeDetector.FileInfo remote) {

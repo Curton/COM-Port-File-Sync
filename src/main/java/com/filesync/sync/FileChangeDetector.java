@@ -876,6 +876,18 @@ public class FileChangeDetector {
     }
 
     /**
+     * Calculate the manifest-equivalent MD5 of the given bytes.
+     *
+     * <p>Applies the same classification and line-ending normalization as {@link
+     * #calculateMD5(File)}: text content is hashed with CRLF/CR/LF collapsed to LF, binary content
+     * is hashed raw. This is the hash for content that exists only in memory (e.g. a merged
+     * conflict result) and must be recorded or verified the way a manifest entry would be.
+     */
+    public static String manifestMd5(byte[] data) throws IOException {
+        return calculateMD5OfPrefix(data, data.length);
+    }
+
+    /**
      * Calculate the manifest-equivalent MD5 of the first {@code length} bytes of {@code data}.
      *
      * <p>Applies the same classification and line-ending normalization as {@link

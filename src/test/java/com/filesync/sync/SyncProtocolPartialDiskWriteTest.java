@@ -47,7 +47,7 @@ class SyncProtocolPartialDiskWriteTest {
                 new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(payload)));
 
         File baseDir = tempDir.toFile();
-        protocol.receiveFile(baseDir, "big.bin", payload.length, false, 1234567890L);
+        protocol.receiveFile(baseDir, "big.bin", payload.length, false, 1234567890L, null);
 
         assertArrayEquals(
                 payload,
@@ -66,7 +66,7 @@ class SyncProtocolPartialDiskWriteTest {
                 new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(compressed)));
 
         File baseDir = tempDir.toFile();
-        protocol.receiveFile(baseDir, "big.txt", compressed.length, true, 55L);
+        protocol.receiveFile(baseDir, "big.txt", compressed.length, true, 55L, null);
 
         File target = new File(baseDir, "big.txt");
         assertArrayEquals(payload, Files.readAllBytes(target.toPath()));
@@ -81,7 +81,7 @@ class SyncProtocolPartialDiskWriteTest {
                 new SyncProtocol(new ByteStreamSerialPortManager(buildXmodemFrame(payload)));
 
         File baseDir = tempDir.toFile();
-        protocol.receiveFile(baseDir, "small.txt", payload.length, false, 7L);
+        protocol.receiveFile(baseDir, "small.txt", payload.length, false, 7L, null);
 
         assertArrayEquals(payload, Files.readAllBytes(new File(baseDir, "small.txt").toPath()));
         // Below the threshold nothing may be staged, not even transiently.
@@ -110,7 +110,12 @@ class SyncProtocolPartialDiskWriteTest {
                         IOException.class,
                         () ->
                                 protocol.receiveFile(
-                                        baseDir, "big.bin", payload.length, false, senderMtime));
+                                        baseDir,
+                                        "big.bin",
+                                        payload.length,
+                                        false,
+                                        senderMtime,
+                                        null));
 
         File target = new File(baseDir, "big.bin");
         assertTrue(target.isFile(), "An interrupted transfer must salvage the prefix");
@@ -139,7 +144,7 @@ class SyncProtocolPartialDiskWriteTest {
         File baseDir = tempDir.toFile();
         assertThrows(
                 IOException.class,
-                () -> protocol.receiveFile(baseDir, "big.txt", compressed.length, true, 42L));
+                () -> protocol.receiveFile(baseDir, "big.txt", compressed.length, true, 42L, null));
 
         File target = new File(baseDir, "big.txt");
         assertTrue(target.isFile(), "A compressed interrupted transfer must salvage a prefix");
@@ -169,7 +174,9 @@ class SyncProtocolPartialDiskWriteTest {
         IOException thrown =
                 assertThrows(
                         IOException.class,
-                        () -> protocol.receiveFile(baseDir, "big.bin", payload.length, false, 99L));
+                        () ->
+                                protocol.receiveFile(
+                                        baseDir, "big.bin", payload.length, false, 99L, null));
 
         byte[] saved = Files.readAllBytes(new File(baseDir, "big.bin").toPath());
         assertEquals(4096, saved.length);
@@ -193,7 +200,7 @@ class SyncProtocolPartialDiskWriteTest {
         // An existing target takes the buffered path: no staging, and the old content survives.
         assertThrows(
                 IOException.class,
-                () -> protocol.receiveFile(baseDir, "exists.bin", payload.length, false, 1L));
+                () -> protocol.receiveFile(baseDir, "exists.bin", payload.length, false, 1L, null));
         assertEquals(
                 "OLD",
                 new String(Files.readAllBytes(target.toPath())),
@@ -218,7 +225,7 @@ class SyncProtocolPartialDiskWriteTest {
                         FileWriteException.class,
                         () ->
                                 protocol.receiveFile(
-                                        baseDir, "locked.bin", payload.length, false, 5L));
+                                        baseDir, "locked.bin", payload.length, false, 5L, null));
 
         assertArrayEquals(
                 payload,
@@ -249,7 +256,8 @@ class SyncProtocolPartialDiskWriteTest {
                 77L,
                 base.length,
                 full.length,
-                HashUtil.md5Hex(full));
+                HashUtil.md5Hex(full),
+                null);
 
         assertArrayEquals(full, Files.readAllBytes(target.toPath()));
         assertEquals(77L, target.lastModified(), "Sender timestamp must be preserved");
@@ -279,7 +287,8 @@ class SyncProtocolPartialDiskWriteTest {
                 88L,
                 base.length,
                 full.length,
-                HashUtil.md5Hex(full));
+                HashUtil.md5Hex(full),
+                null);
 
         assertArrayEquals(full, Files.readAllBytes(target.toPath()));
         assertEquals(88L, target.lastModified());
@@ -314,7 +323,8 @@ class SyncProtocolPartialDiskWriteTest {
                                         1234567890L,
                                         base.length,
                                         full.length,
-                                        HashUtil.md5Hex(full)));
+                                        HashUtil.md5Hex(full),
+                                        null));
 
         assertTrue(
                 thrown.getMessage().contains("4096 tail bytes salvaged"),
@@ -354,7 +364,8 @@ class SyncProtocolPartialDiskWriteTest {
                                         42L,
                                         base.length,
                                         full.length,
-                                        HashUtil.md5Hex(full)));
+                                        HashUtil.md5Hex(full),
+                                        null));
 
         assertFalse(
                 thrown instanceof TransferCancelledException,
@@ -392,7 +403,8 @@ class SyncProtocolPartialDiskWriteTest {
                                 42L,
                                 base.length,
                                 full.length,
-                                HashUtil.md5Hex(full)));
+                                HashUtil.md5Hex(full),
+                                null));
 
         byte[] merged = Files.readAllBytes(target.toPath());
         assertTrue(merged.length > base.length, "A decoded tail prefix must be merged");
@@ -426,7 +438,8 @@ class SyncProtocolPartialDiskWriteTest {
                                         7L,
                                         base.length,
                                         base.length + tail.length,
-                                        HashUtil.md5Hex(concat(base, tail))));
+                                        HashUtil.md5Hex(concat(base, tail)),
+                                        null));
 
         assertFalse(
                 thrown.getMessage().contains("salvaged"),
@@ -462,7 +475,8 @@ class SyncProtocolPartialDiskWriteTest {
                                         7L,
                                         base.length + 123,
                                         base.length + 123 + tail.length,
-                                        "irrelevant"));
+                                        "irrelevant",
+                                        null));
 
         assertFalse(
                 thrown.getMessage().contains("kept"),
@@ -499,7 +513,8 @@ class SyncProtocolPartialDiskWriteTest {
                                 7L,
                                 base.length,
                                 base.length + tail.length,
-                                HashUtil.md5Hex(concat(base, tail))));
+                                HashUtil.md5Hex(concat(base, tail)),
+                                null));
 
         assertArrayEquals(base, Files.readAllBytes(target.toPath()));
         assertNoStageFile(baseDir, "growing.bin");
@@ -525,7 +540,8 @@ class SyncProtocolPartialDiskWriteTest {
                 9L,
                 base.length,
                 full.length,
-                HashUtil.md5Hex(full));
+                HashUtil.md5Hex(full),
+                null);
 
         assertArrayEquals(full, Files.readAllBytes(target.toPath()));
         // Below the threshold nothing may be staged, not even transiently.

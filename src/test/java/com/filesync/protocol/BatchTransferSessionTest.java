@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.filesync.sync.FileChangeDetector;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -33,7 +34,7 @@ class BatchTransferSessionTest {
         assertEquals(0x54, batch[1], "Second magic byte should be 'T'");
         assertEquals(0x48, batch[2], "Third magic byte should be 'H'");
         assertEquals(0x00, batch[3], "Fourth magic byte should be 0");
-        assertEquals(1, batch[4], "Version should be 1");
+        assertEquals(2, batch[4], "Version should be 2");
 
         int count =
                 ((batch[5] & 0xFF) << 24)
@@ -190,7 +191,7 @@ class BatchTransferSessionTest {
 
     @Test
     void decodeBatchInvalidMagicThrowsException() {
-        byte[] badBatch = new byte[] {0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01};
+        byte[] badBatch = new byte[] {0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01};
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -206,7 +207,7 @@ class BatchTransferSessionTest {
 
     @Test
     void decodeBatchUnsupportedVersionThrowsException() {
-        byte[] badBatch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00};
+        byte[] badBatch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00};
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -332,7 +333,7 @@ class BatchTransferSessionTest {
 
     @Test
     void decodeBatchWithTruncatedDataThrowsException() {
-        byte[] batch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01};
+        byte[] batch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01};
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
@@ -356,7 +357,7 @@ class BatchTransferSessionTest {
                     0x54,
                     0x48,
                     0x00, // magic
-                    0x01, // version
+                    0x02, // version
                     0x00,
                     0x00,
                     0x00,
@@ -399,7 +400,7 @@ class BatchTransferSessionTest {
                     0x54,
                     0x48,
                     0x00, // magic
-                    0x01, // version
+                    0x02, // version
                     0x00,
                     0x00,
                     0x00,
@@ -443,7 +444,7 @@ class BatchTransferSessionTest {
                     0x54,
                     0x48,
                     0x00, // magic
-                    0x01, // version
+                    0x02, // version
                     0x00,
                     0x00,
                     0x01,
@@ -470,7 +471,7 @@ class BatchTransferSessionTest {
                     0x54,
                     0x48,
                     0x00, // magic
-                    0x01, // version
+                    0x02, // version
                     (byte) 0xFF,
                     (byte) 0xFF,
                     (byte) 0xFF,
@@ -498,7 +499,7 @@ class BatchTransferSessionTest {
                     0x54,
                     0x48,
                     0x00, // magic
-                    0x01, // version
+                    0x02, // version
                     0x00,
                     0x00,
                     0x00,
@@ -614,7 +615,7 @@ class BatchTransferSessionTest {
                         batch,
                         2,
                         null,
-                        (path, data, lastModified, message) -> {
+                        (path, data, lastModified, message, cause) -> {
                             failedPaths.add(path);
                             failedContents.add(new String(data, StandardCharsets.UTF_8));
                         });
@@ -647,7 +648,7 @@ class BatchTransferSessionTest {
                         batch,
                         3,
                         null,
-                        (path, data, lastModified, message) -> failedPaths.add(path));
+                        (path, data, lastModified, message, cause) -> failedPaths.add(path));
 
         assertEquals(1, written, "Only the writable entry should be written");
         assertEquals(List.of("a.txt", "c.txt"), failedPaths, "Each locked entry must be reported");
@@ -670,7 +671,11 @@ class BatchTransferSessionTest {
 
         int written =
                 BatchTransferSession.decodeAndWriteBatch(
-                        extractDir, batch, 2, callback, (path, data, lastModified, message) -> {});
+                        extractDir,
+                        batch,
+                        2,
+                        callback,
+                        (path, data, lastModified, message, cause) -> {});
 
         assertEquals(1, written, "Should have written 1 file");
         assertEquals(1, progress[0], "Progress callback should only fire for written entries");
@@ -691,5 +696,113 @@ class BatchTransferSessionTest {
                         IOException.class,
                         () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
         assertTrue(thrown.getMessage() != null, "Write failure should carry the OS error message");
+    }
+
+    // ========== Per-entry manifest md5 (version 2 envelope) ==========
+
+    @Test
+    void buildBatchWithMd5_writesVerifiedEntryAndConfirmsIt() throws IOException {
+        String content = "Hello, World!";
+        File f = tempDir.resolve("example.txt").toFile();
+        Files.writeString(f.toPath(), content);
+        String md5 = FileChangeDetector.manifestMd5(content.getBytes(StandardCharsets.UTF_8));
+
+        List<Object[]> files = new ArrayList<>();
+        files.add(new Object[] {f, "example.txt", md5});
+        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
+
+        // The version-2 entry inserts 16 raw md5 bytes between LAST_MODIFIED and FLAGS, so the
+        // envelope is exactly 16 bytes longer than a hash-less entry of the same content.
+        byte[] hashless =
+                BatchTransferSession.buildBatch(
+                        List.<Object[]>of(new Object[] {f, "example.txt"}), 65536);
+        assertEquals(16, batch.length - hashless.length, "16 raw MD5 bytes must be inserted");
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        List<String> confirmed = new ArrayList<>();
+        long[] confirmedSize = new long[1];
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        0,
+                        null,
+                        null,
+                        (path, entryMd5, size) -> {
+                            confirmed.add(path + ":" + entryMd5);
+                            confirmedSize[0] = size;
+                        });
+
+        assertEquals(1, written);
+        assertEquals(content, Files.readString(new File(extractDir, "example.txt").toPath()));
+        assertEquals(
+                List.of("example.txt:" + md5),
+                confirmed,
+                "a verified entry must be confirmed with its md5 hex");
+        assertEquals(
+                content.length(),
+                confirmedSize[0],
+                "the confirmed size is the decoded entry length");
+    }
+
+    @Test
+    void decodeBatchRejectsEntryWhoseMd5DoesNotMatch() throws IOException {
+        File f = tempDir.resolve("example.txt").toFile();
+        Files.writeString(f.toPath(), "Hello, World!");
+        // Correct for some other content: the decoded entry must fail verification.
+        String wrongMd5 = FileChangeDetector.manifestMd5("other".getBytes(StandardCharsets.UTF_8));
+
+        List<Object[]> files = new ArrayList<>();
+        files.add(new Object[] {f, "example.txt", wrongMd5});
+        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        List<String> failedPaths = new ArrayList<>();
+        List<BatchTransferSession.WriteFailureCause> causes = new ArrayList<>();
+        List<String> confirmed = new ArrayList<>();
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        0,
+                        null,
+                        (path, data, lastModified, message, cause) -> {
+                            failedPaths.add(path);
+                            causes.add(cause);
+                        },
+                        (path, entryMd5, size) -> confirmed.add(path));
+
+        assertEquals(0, written, "a mismatched entry must not be written");
+        assertFalse(
+                new File(extractDir, "example.txt").exists(),
+                "corrupt content must never reach the disk");
+        assertEquals(List.of("example.txt"), failedPaths, "the mismatch must be reported");
+        assertEquals(
+                List.of(BatchTransferSession.WriteFailureCause.HASH_MISMATCH),
+                causes,
+                "a mismatched entry must be reported as HASH_MISMATCH (never retry these bytes)");
+        assertTrue(confirmed.isEmpty(), "nothing to confirm for a rejected entry");
+    }
+
+    @Test
+    void decodeBatchWithoutMd5_confirmsEntryWithNullHash() throws IOException {
+        byte[] batch = buildBatch(new String[] {"a.txt"}, new String[] {"A"});
+
+        File extractDir = tempDir.resolve("extracted").toFile();
+        extractDir.mkdirs();
+        List<String> confirmedMd5 = new ArrayList<>();
+        int written =
+                BatchTransferSession.decodeAndWriteBatch(
+                        extractDir,
+                        batch,
+                        0,
+                        null,
+                        null,
+                        (path, entryMd5, size) -> confirmedMd5.add(String.valueOf(entryMd5)));
+
+        assertEquals(1, written, "a hash-less entry (fast mode) is written unverified");
+        assertEquals(List.of("null"), confirmedMd5, "no announced md5 means a null hash");
     }
 }

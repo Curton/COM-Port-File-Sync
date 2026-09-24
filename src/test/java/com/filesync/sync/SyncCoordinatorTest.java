@@ -15,6 +15,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -783,7 +784,7 @@ class SyncCoordinatorTest {
 
         coordinator.handleFileRequest(relativePath);
 
-        verify(mockProtocol).sendFile(syncFolder, relativePath);
+        verify(mockProtocol).sendFile(isA(File.class), eq(relativePath), nullable(String.class));
         verify(mockEventBus).post(isA(SyncEvent.LogEvent.class));
     }
 
@@ -1005,7 +1006,8 @@ class SyncCoordinatorTest {
                         anyInt(),
                         isA(BatchTransferSession.BatchProgressCallback.class),
                         isA(File.class),
-                        isA(BatchTransferSession.WriteFailureHandler.class));
+                        isA(BatchTransferSession.WriteFailureHandler.class),
+                        nullable(BatchTransferSession.EntryConfirmationListener.class));
         assertFalse(syncing.get());
     }
 
@@ -1026,7 +1028,13 @@ class SyncCoordinatorTest {
         // handleIncomingFileData posts 2 LogEvents: "Receiving file" + "File received"
         verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
         verify(mockProtocol)
-                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+                .receiveFile(
+                        isA(File.class),
+                        anyString(),
+                        anyInt(),
+                        anyBoolean(),
+                        anyLong(),
+                        nullable(String.class));
         verify(pendingWriteService).markWritten("test.txt");
     }
 
@@ -1068,11 +1076,16 @@ class SyncCoordinatorTest {
                         invocation -> {
                             BatchTransferSession.WriteFailureHandler handler =
                                     invocation.getArgument(4);
-                            handler.onWriteFailed("locked.txt", payload, 1234L, "being used");
+                            handler.onWriteFailed(
+                                    "locked.txt",
+                                    payload,
+                                    1234L,
+                                    "being used",
+                                    BatchTransferSession.WriteFailureCause.IO_ERROR);
                             return 0;
                         })
                 .when(mockProtocol)
-                .receiveBatch(anyInt(), anyInt(), any(), any(), any());
+                .receiveBatch(anyInt(), anyInt(), any(), any(), any(), any());
 
         coordinator.handleIncomingBatchUnknownTotal(100);
 
@@ -1106,7 +1119,7 @@ class SyncCoordinatorTest {
                             return 1;
                         })
                 .when(mockProtocol)
-                .receiveBatch(anyInt(), anyInt(), any(), any(), any());
+                .receiveBatch(anyInt(), anyInt(), any(), any(), any(), any());
 
         coordinator.handleIncomingBatchUnknownTotal(100);
 
@@ -1125,7 +1138,13 @@ class SyncCoordinatorTest {
         byte[] payload = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         doThrow(new FileWriteException("locked.txt", payload, 77L, "being used", null))
                 .when(mockProtocol)
-                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+                .receiveFile(
+                        isA(File.class),
+                        anyString(),
+                        anyInt(),
+                        anyBoolean(),
+                        anyLong(),
+                        nullable(String.class));
 
         // A locked target must not tear down the connection: no exception may escape.
         coordinator.handleIncomingFileData(mockMsg);
@@ -1157,7 +1176,13 @@ class SyncCoordinatorTest {
         when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
         doThrow(new IOException("communication failure"))
                 .when(mockProtocol)
-                .receiveFile(isA(File.class), anyString(), anyInt(), anyBoolean(), anyLong());
+                .receiveFile(
+                        isA(File.class),
+                        anyString(),
+                        anyInt(),
+                        anyBoolean(),
+                        anyLong(),
+                        nullable(String.class));
 
         assertThrows(
                 IOException.class,

@@ -205,7 +205,8 @@ public class DeltaThresholdBenchmark {
                                     delta,
                                     System.currentTimeMillis(),
                                     modified.length,
-                                    sourceMd5);
+                                    sourceMd5,
+                                    null);
                     long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
                     receiver.awaitOps(60_000);
                     if (i >= WARMUP_ITERATIONS) {
@@ -445,7 +446,8 @@ public class DeltaThresholdBenchmark {
                         delta,
                         System.currentTimeMillis(),
                         modifiedBytes[idx].length,
-                        md5Hex(modifiedBytes[idx]));
+                        md5Hex(modifiedBytes[idx]),
+                        null);
     }
 
     // ---- wire endpoints
@@ -727,12 +729,14 @@ public class DeltaThresholdBenchmark {
                                     msg.getParamAsBoolean(2),
                                     msg.getParamAsLong(3),
                                     msg.getParamAsLong(4),
-                                    msg.getParam(5));
+                                    msg.getParam(5),
+                                    msg.getParam(6));
                             operationDone();
                         }
                         case SyncProtocol.CMD_BATCH_DATA -> {
                             protocol.sendAck();
-                            protocol.receiveBatch(msg.getParamAsInt(0), 0, null, baseDir, null);
+                            protocol.receiveBatch(
+                                    msg.getParamAsInt(0), 0, null, baseDir, null, null);
                             operationDone();
                         }
                         case SyncProtocol.CMD_DELTA_SIG_REQ -> {

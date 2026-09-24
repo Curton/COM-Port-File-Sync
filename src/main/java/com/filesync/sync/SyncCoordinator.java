@@ -415,9 +415,14 @@ public class SyncCoordinator {
         long totalBytesToTransfer =
                 filesToSync.stream().mapToLong(FileChangeDetector.FileInfo::getSize).sum();
 
-        // Detect conflicts: files modified on both sides
+        // Detect conflicts: files modified on both sides, arbitrated against the recorded
+        // last-successfully-synced states.
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, syncFolder);
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        syncFolder,
+                        createSyncStateStore(syncFolder));
 
         if (!conflicts.isEmpty()) {
             eventBus.post(
@@ -607,6 +612,15 @@ public class SyncCoordinator {
      */
     SignatureCache createSignatureCache(File syncFolder) {
         return SignatureCache.forFolder(syncFolder);
+    }
+
+    /**
+     * The confirmed-sync state store for the given sync folder. Factory method so tests can
+     * redirect the on-disk location; the default stores one JSON file per sync folder under {@code
+     * <user.home>/.filesync/}.
+     */
+    SyncStateStore createSyncStateStore(File syncFolder) {
+        return SyncStateStore.forFolder(syncFolder);
     }
 
     /**
@@ -828,7 +842,8 @@ public class SyncCoordinator {
         }
         resolveSafe(syncFolder, relativePath);
         eventBus.post(new SyncEvent.LogEvent("Sending file: " + relativePath));
-        protocol.sendFile(syncFolder, relativePath);
+        // No manifest at hand for a single ad-hoc request; the receiver verifies size only.
+        protocol.sendFile(syncFolder, relativePath, (String) null);
     }
 
     /**
@@ -859,13 +874,26 @@ public class SyncCoordinator {
                         touchHeartbeat();
                     };
             BatchTransferSession.WriteFailureHandler failureHandler =
-                    (path, data, lastModified, message) -> {
+                    (path, data, lastModified, message, cause) -> {
                         failedCount[0]++;
+                        if (cause == BatchTransferSession.WriteFailureCause.HASH_MISMATCH) {
+                            // Corrupt content: report it, but never write or retry these bytes.
+                            eventBus.post(
+                                    new SyncEvent.ErrorEvent(
+                                            "Batch entry failed verification and was not"
+                                                    + " written: "
+                                                    + path
+                                                    + " ("
+                                                    + message
+                                                    + ")"));
+                            return;
+                        }
                         pendingFileWriteService.enqueue(
                                 syncFolder, path, data, lastModified, message);
                     };
             int written =
-                    protocol.receiveBatch(expectedSize, 0, callback, syncFolder, failureHandler);
+                    protocol.receiveBatch(
+                            expectedSize, 0, callback, syncFolder, failureHandler, null);
             if (failedCount[0] > 0) {
                 eventBus.post(
                         new SyncEvent.LogEvent(
@@ -897,11 +925,13 @@ public class SyncCoordinator {
             int size = msg.getParamAsInt(1);
             boolean compressed = msg.getParamAsBoolean(2);
             long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+            String manifestMd5 = msg.getParams().length > 4 ? msg.getParam(4) : null;
 
             eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
             protocol.sendAck();
             resolveSafe(syncFolder, relativePath);
-            protocol.receiveFile(syncFolder, relativePath, size, compressed, lastModified);
+            protocol.receiveFile(
+                    syncFolder, relativePath, size, compressed, lastModified, manifestMd5);
             eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
             pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
@@ -993,6 +1023,7 @@ public class SyncCoordinator {
             long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
             long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
             String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
+            String manifestMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
 
             eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
             protocol.sendAck();
@@ -1004,7 +1035,8 @@ public class SyncCoordinator {
                     compressed,
                     lastModified,
                     sourceSize,
-                    sourceMd5);
+                    sourceMd5,
+                    manifestMd5);
             eventBus.post(new SyncEvent.LogEvent("Delta applied: " + relativePath));
             pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
@@ -1055,6 +1087,7 @@ public class SyncCoordinator {
             long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
             long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
             String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
+            String manifestMd5 = msg.getParams().length > 7 ? msg.getParam(7) : null;
 
             eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
             protocol.sendAck();
@@ -1067,7 +1100,8 @@ public class SyncCoordinator {
                     lastModified,
                     baseSize,
                     finalSize,
-                    finalMd5);
+                    finalMd5,
+                    manifestMd5);
             eventBus.post(new SyncEvent.LogEvent("Append applied: " + relativePath));
             pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
@@ -1363,7 +1397,8 @@ public class SyncCoordinator {
                                     lastModified,
                                     append.baseSize,
                                     append.finalSize,
-                                    append.finalMd5);
+                                    append.finalMd5,
+                                    append.fileInfo.getMd5());
                     long sendMs = System.currentTimeMillis() - sendStart;
                     String msg =
                             "Append-only syncing ["
@@ -1556,7 +1591,12 @@ public class SyncCoordinator {
                         long sendStart = System.currentTimeMillis();
                         boolean wasCompressed =
                                 protocol.sendFileDelta(
-                                        path, delta, lastModified, source.length, sourceMd5);
+                                        path,
+                                        delta,
+                                        lastModified,
+                                        source.length,
+                                        sourceMd5,
+                                        fi.getMd5());
                         long sendMs = System.currentTimeMillis() - sendStart;
                         int pct =
                                 (int)
@@ -1606,7 +1646,9 @@ public class SyncCoordinator {
                         long t0 = System.currentTimeMillis();
                         boolean sentOk = false;
                         try {
-                            sentOk = protocol.sendFile(syncFolder, fileInfo.getPath());
+                            sentOk =
+                                    protocol.sendFile(
+                                            syncFolder, fileInfo.getPath(), fileInfo.getMd5());
                         } catch (IOException | IllegalStateException e) {
                             if (e instanceof TransferCancelledException) {
                                 // The peer cancelled the session; do not send the next file.
@@ -1651,7 +1693,7 @@ public class SyncCoordinator {
                         continue;
                     }
 
-                    batch.add(new Object[] {file, fileInfo.getPath()});
+                    batch.add(new Object[] {file, fileInfo.getPath(), fileInfo.getMd5()});
 
                     if (batch.size() >= 256 || estimateBatchSize(batch) >= BATCH_BYTE_TARGET) {
                         // Each batch gets its own callback capturing the correct starting index.
@@ -1699,12 +1741,14 @@ public class SyncCoordinator {
                                     break;
                                 }
                                 String rp = (String) batch.get(i)[1];
+                                String rpMd5 =
+                                        batch.get(i).length > 2 ? (String) batch.get(i)[2] : null;
                                 savedOpIndex++;
                                 operationIndex++;
                                 long t0 = System.currentTimeMillis();
                                 boolean sentOk = false;
                                 try {
-                                    sentOk = protocol.sendFile(syncFolder, rp);
+                                    sentOk = protocol.sendFile(syncFolder, rp, rpMd5);
                                 } catch (IOException | IllegalStateException e) {
                                     if (e instanceof TransferCancelledException) {
                                         // The peer cancelled the session; do not send the
@@ -1798,12 +1842,14 @@ public class SyncCoordinator {
                                 break;
                             }
                             String rp = (String) batch.get(i)[1];
+                            String rpMd5 =
+                                    batch.get(i).length > 2 ? (String) batch.get(i)[2] : null;
                             savedOpIndex++;
                             operationIndex++;
                             long t0 = System.currentTimeMillis();
                             boolean sentOk = false;
                             try {
-                                sentOk = protocol.sendFile(syncFolder, rp);
+                                sentOk = protocol.sendFile(syncFolder, rp, rpMd5);
                             } catch (IOException | IllegalStateException e) {
                                 if (session.cancelRequested.get()) {
                                     break;
@@ -2091,6 +2137,7 @@ public class SyncCoordinator {
         for (Object[] entry : batch) {
             File f = (File) entry[0];
             String path = (String) entry[1];
+            String md5 = entry.length > 2 ? (String) entry[2] : null;
             long rawSize = f.length();
             long estimatedContentSize = estimateCompressedSize(f, path, rawSize);
             total +=
@@ -2098,6 +2145,7 @@ public class SyncCoordinator {
                             + path.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
                             + 8
                             + 1
+                            + (md5 != null && !md5.isEmpty() ? 16 : 0)
                             + 4
                             + estimatedContentSize;
         }

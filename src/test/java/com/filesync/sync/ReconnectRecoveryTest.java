@@ -731,7 +731,8 @@ class ReconnectRecoveryTest {
 
         IOException thrown =
                 org.junit.jupiter.api.Assertions.assertThrows(
-                        IOException.class, () -> protocol.sendFile(tempDir.toFile(), "test.txt"));
+                        IOException.class,
+                        () -> protocol.sendFile(tempDir.toFile(), "test.txt", (String) null));
 
         assertTrue(
                 thrown.getMessage().contains("Timeout waiting for command"),
@@ -878,7 +879,8 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+        public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+                throws IOException {
             if (Thread.currentThread().isInterrupted()) {
                 throw new IOException("Interrupted before completing simulated send");
             }
@@ -952,7 +954,8 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+        public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+                throws IOException {
             sendFileStarted.set(true);
             try {
                 continueLatch.await();
@@ -1092,7 +1095,8 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+        public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+                throws IOException {
             perFileSendCount.incrementAndGet();
             return true;
         }
@@ -1259,7 +1263,8 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+        public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+                throws IOException {
             if (individualSender != null) {
                 individualSender.accept(relativePath);
             }
@@ -1305,7 +1310,8 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public boolean sendFile(File baseDir, String relativePath) throws IOException {
+        public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+                throws IOException {
             individuallySentPaths.add(relativePath);
             perFileFallbackUsed.set(true);
             return true;

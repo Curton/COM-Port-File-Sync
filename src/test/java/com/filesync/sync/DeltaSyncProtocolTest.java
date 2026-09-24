@@ -62,15 +62,16 @@ class DeltaSyncProtocolTest {
         SyncProtocol protocol = new SyncProtocol(serial);
 
         byte[] delta = {1, 2, 3, 4, 5};
-        boolean compressed = protocol.sendFileDelta("a.bin", delta, 999L, 100L, "abc");
+        boolean compressed = protocol.sendFileDelta("a.bin", delta, 999L, 100L, "abc", null);
 
-        // The frame must carry path, length, compressed-flag, timestamp, sourceSize, sourceMd5.
+        // The frame must carry path, length, compressed-flag, timestamp, sourceSize, sourceMd5 and
+        // the manifest md5 (empty here: no manifest at hand).
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("FILE_DELTA:a.bin")),
                 "must announce FILE_DELTA with the path");
         assertTrue(
-                serial.getWrittenLines().stream().anyMatch(l -> l.endsWith(":999:100:abc]]")),
-                "frame must end with lastModified:sourceSize:sourceMd5");
+                serial.getWrittenLines().stream().anyMatch(l -> l.endsWith(":999:100:abc:]]")),
+                "frame must end with lastModified:sourceSize:sourceMd5:manifestMd5");
         assertFalse(protocol.isXmodemInProgress(), "xmodem flag must be reset after send");
         // For this small payload, compressIfBeneficial leaves it uncompressed.
         assertFalse(compressed);
@@ -147,7 +148,7 @@ class DeltaSyncProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.sendFileDelta(
-                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc", null));
         assertTrue(
                 thrown instanceof TransferCancelledException,
                 "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
@@ -258,7 +259,7 @@ class DeltaSyncProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.sendFileDelta(
-                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc"));
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100, "abc", null));
         assertTrue(thrown.getMessage().contains("Failed to send file delta"));
         // Command/ACK-phase failure must retry up to maxAttempts = 3.
         assertEquals(

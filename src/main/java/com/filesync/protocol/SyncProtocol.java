@@ -125,6 +125,18 @@ public class SyncProtocol {
     // in-flight operation, so the failed transfer is not repeated on every sync.
     private java.util.function.Consumer<Message> baseStaleHandler;
 
+    // Fired after a received transfer is verified and written to disk, carrying the sender's
+    // announced manifest md5 and the written size. Wired to the SyncCoordinator, which records
+    // the path's confirmed (base) state — the anchor conflict arbitration compares against.
+    // Must not throw: it runs inside the receive paths below.
+    private BatchTransferSession.EntryConfirmationListener transferConfirmedHandler;
+
+    // Fired when a received transfer cannot be honored as sent: the decoded content failed its
+    // manifest-md5 verification, or the write itself failed. The SyncCoordinator collects these
+    // paths so the end-of-session CMD_WRITE_FAILURES can tell the sender which of its
+    // optimistic confirmations to withdraw. Must not throw.
+    private java.util.function.Consumer<String> writeFailedHandler;
+
     private static final java.util.Base64.Encoder BASE64_ENCODER = java.util.Base64.getEncoder();
     private static final java.util.Base64.Decoder BASE64_DECODER = java.util.Base64.getDecoder();
 
@@ -163,6 +175,38 @@ public class SyncProtocol {
      */
     public void setBaseStaleHandler(java.util.function.Consumer<Message> handler) {
         this.baseStaleHandler = handler;
+    }
+
+    /**
+     * Set the handler invoked after a received transfer is verified and written (single-file, delta
+     * and append paths). The handler must not throw: it runs inside the receive paths.
+     */
+    public void setTransferConfirmedHandler(
+            BatchTransferSession.EntryConfirmationListener handler) {
+        this.transferConfirmedHandler = handler;
+    }
+
+    /**
+     * Set the handler invoked when received content fails its manifest-md5 verification or its
+     * write. The handler must not throw: it runs inside the receive paths, right before the
+     * matching exception is raised.
+     */
+    public void setWriteFailedHandler(java.util.function.Consumer<String> handler) {
+        this.writeFailedHandler = handler;
+    }
+
+    private void fireTransferConfirmed(String relativePath, String manifestMd5, long size) {
+        BatchTransferSession.EntryConfirmationListener handler = transferConfirmedHandler;
+        if (handler != null) {
+            handler.onEntryConfirmed(relativePath, manifestMd5, size);
+        }
+    }
+
+    private void fireWriteFailed(String relativePath) {
+        java.util.function.Consumer<String> handler = writeFailedHandler;
+        if (handler != null) {
+            handler.accept(relativePath);
+        }
     }
 
     /** One queued shared text that may be interleaved between file-transfer blocks. */
@@ -458,7 +502,9 @@ public class SyncProtocol {
     /**
      * Sender side: send a delta-encoded file. The {@code delta} bytes are compressed if beneficial.
      * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
-     * sourceSize} lets the receiver pre-size the output buffer.
+     * sourceSize} lets the receiver pre-size the output buffer. The {@code manifestMd5} is the
+     * sender's manifest hash of the full source — the reconstruction already proves byte equality
+     * against {@code sourceMd5}, so the receiver only records it as the path's confirmed state.
      *
      * <p>Recovery contract: the command/ACK handshake is retried up to {@code maxAttempts} times.
      * Each retry first ejects the peer from any blocked {@code xmodem.receive()} ({@link
@@ -474,7 +520,12 @@ public class SyncProtocol {
      * @return true if the delta was compressed, false otherwise
      */
     public boolean sendFileDelta(
-            String relativePath, byte[] delta, long lastModified, long sourceSize, String sourceMd5)
+            String relativePath,
+            byte[] delta,
+            long lastModified,
+            long sourceSize,
+            String sourceMd5,
+            String manifestMd5)
             throws IOException {
         CompressionUtil.CompressedData compressedData =
                 CompressionUtil.compressIfBeneficial(relativePath, delta);
@@ -495,7 +546,8 @@ public class SyncProtocol {
                         String.valueOf(wasCompressed),
                         String.valueOf(ts),
                         String.valueOf(sourceSize),
-                        sourceMd5);
+                        sourceMd5,
+                        manifestMd5);
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
@@ -583,6 +635,8 @@ public class SyncProtocol {
      * @param lastModified sender timestamp to preserve
      * @param sourceSize sender's total source byte length (informational)
      * @param sourceMd5 sender's MD5 of the source, for reconstruction verification
+     * @param manifestMd5 sender's manifest md5 of the source, recorded as the confirmed state on
+     *     success (no additional verification: a matching sourceMd5 already proves byte equality)
      */
     public void receiveFileDelta(
             File baseDir,
@@ -591,7 +645,8 @@ public class SyncProtocol {
             boolean compressed,
             long lastModified,
             long sourceSize,
-            String sourceMd5)
+            String sourceMd5,
+            String manifestMd5)
             throws IOException {
         xmodemInProgress.set(true);
         byte[] payload;
@@ -646,12 +701,14 @@ public class SyncProtocol {
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(reconstructed);
         } catch (IOException e) {
+            fireWriteFailed(relativePath);
             throw new FileWriteException(
                     relativePath, reconstructed, lastModified, e.getMessage(), e);
         }
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);
         }
+        fireTransferConfirmed(relativePath, manifestMd5, reconstructed.length);
     }
 
     // ---- append-only tail transfer ----
@@ -669,6 +726,9 @@ public class SyncProtocol {
      * is entered, any failure is terminal (transfer-cancel releases the receiver from its blocking
      * {@code xmodem.receive()}).
      *
+     * @param manifestMd5 the sender's manifest hash of the full file, recorded by the receiver as
+     *     the confirmed state on success (the raw {@code finalMd5} verification already proves byte
+     *     equality)
      * @return true if the tail was compressed, false otherwise
      */
     public boolean sendFileAppend(
@@ -677,7 +737,8 @@ public class SyncProtocol {
             long lastModified,
             long baseSize,
             long finalSize,
-            String finalMd5)
+            String finalMd5,
+            String manifestMd5)
             throws IOException {
         CompressionUtil.CompressedData compressedData =
                 CompressionUtil.compressIfBeneficial(relativePath, tail);
@@ -699,7 +760,8 @@ public class SyncProtocol {
                         String.valueOf(ts),
                         String.valueOf(baseSize),
                         String.valueOf(finalSize),
-                        finalMd5);
+                        finalMd5,
+                        manifestMd5);
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
@@ -798,6 +860,8 @@ public class SyncProtocol {
      * @param baseSize expected receiver file length before the append
      * @param finalSize sender's total file length after the append
      * @param finalMd5 sender's raw MD5 of the full file, for reconstruction verification
+     * @param manifestMd5 sender's manifest md5 of the full file, recorded as the confirmed state on
+     *     success (no additional verification: a matching finalMd5 already proves byte equality)
      */
     public void receiveFileAppend(
             File baseDir,
@@ -807,7 +871,8 @@ public class SyncProtocol {
             long lastModified,
             long baseSize,
             long finalSize,
-            String finalMd5)
+            String finalMd5,
+            String manifestMd5)
             throws IOException {
         File existing = new File(baseDir, relativePath);
         if (expectedSize > PARTIAL_DISK_WRITE_THRESHOLD_BYTES && existing.isFile()) {
@@ -819,7 +884,8 @@ public class SyncProtocol {
                     lastModified,
                     baseSize,
                     finalSize,
-                    finalMd5);
+                    finalMd5,
+                    manifestMd5);
             return;
         }
 
@@ -852,7 +918,8 @@ public class SyncProtocol {
                 lastModified,
                 baseSize,
                 finalSize,
-                finalMd5);
+                finalMd5,
+                manifestMd5);
     }
 
     /**
@@ -871,7 +938,8 @@ public class SyncProtocol {
             long lastModified,
             long baseSize,
             long finalSize,
-            String finalMd5)
+            String finalMd5,
+            String manifestMd5)
             throws IOException {
         File stageFile =
                 new File(existing.getParentFile(), "." + existing.getName() + PARTIAL_SUFFIX);
@@ -918,7 +986,8 @@ public class SyncProtocol {
                 lastModified,
                 baseSize,
                 finalSize,
-                finalMd5);
+                finalMd5,
+                manifestMd5);
     }
 
     /**
@@ -935,7 +1004,8 @@ public class SyncProtocol {
             long lastModified,
             long baseSize,
             long finalSize,
-            String finalMd5)
+            String finalMd5,
+            String manifestMd5)
             throws IOException {
         validateReceivedSize("file append", relativePath, expectedSize, payload);
 
@@ -1013,12 +1083,14 @@ public class SyncProtocol {
         try (FileOutputStream fos = new FileOutputStream(existing)) {
             fos.write(reconstructed);
         } catch (IOException e) {
+            fireWriteFailed(relativePath);
             throw new FileWriteException(
                     relativePath, reconstructed, lastModified, e.getMessage(), e);
         }
         if (lastModified > 0) {
             existing.setLastModified(lastModified);
         }
+        fireTransferConfirmed(relativePath, manifestMd5, finalSize);
     }
 
     /**
@@ -1227,6 +1299,29 @@ public class SyncProtocol {
             File baseDir,
             BatchTransferSession.WriteFailureHandler failureHandler)
             throws IOException {
+        return receiveBatch(
+                expectedSize, totalEntries, batchProgressCallback, baseDir, failureHandler, null);
+    }
+
+    /**
+     * Receive a batch transfer initiated by {@link #sendBatch(File, List, int,
+     * BatchTransferSession.BatchProgressCallback, File)}. Each entry announcing a manifest md5 is
+     * verified against its decoded content before being written; a mismatch is reported through
+     * {@code failureHandler} with cause {@link
+     * BatchTransferSession.WriteFailureCause#HASH_MISMATCH} and the entry is not written.
+     * Successfully written entries are reported through {@code confirmationListener}.
+     *
+     * @param confirmationListener notified after each verified, written entry; may be null
+     * @return number of files written
+     */
+    public int receiveBatch(
+            int expectedSize,
+            int totalEntries,
+            BatchTransferSession.BatchProgressCallback batchProgressCallback,
+            File baseDir,
+            BatchTransferSession.WriteFailureHandler failureHandler,
+            BatchTransferSession.EntryConfirmationListener confirmationListener)
+            throws IOException {
         xmodemInProgress.set(true);
         byte[] batch;
         try {
@@ -1241,17 +1336,25 @@ public class SyncProtocol {
         }
 
         return BatchTransferSession.decodeAndWriteBatch(
-                baseDir, batch, totalEntries, batchProgressCallback, failureHandler);
+                baseDir,
+                batch,
+                totalEntries,
+                batchProgressCallback,
+                failureHandler,
+                confirmationListener);
     }
 
     /**
      * Send file data. Performs limited retries around the underlying XMODEM transfer so that
      * transient handshake issues do not abort the entire sync. The sender includes its lastModified
-     * timestamp so the receiver can preserve it and avoid unnecessary re-syncs in fast mode.
+     * timestamp so the receiver can preserve it and avoid unnecessary re-syncs in fast mode, and
+     * the file's manifest md5 so the receiver can verify the decoded content before writing it
+     * (skipped when {@code manifestMd5} is null/empty, e.g. fast mode).
      *
      * @return true if file was compressed, false otherwise
      */
-    public boolean sendFile(File baseDir, String relativePath) throws IOException {
+    public boolean sendFile(File baseDir, String relativePath, String manifestMd5)
+            throws IOException {
         File file = new File(baseDir, relativePath);
         if (!file.exists() || !file.isFile()) {
             sendCommand(CMD_ERROR, "File not found: " + relativePath);
@@ -1289,7 +1392,8 @@ public class SyncProtocol {
                         relativePath,
                         String.valueOf(compressedData.getData().length),
                         String.valueOf(wasCompressed),
-                        String.valueOf(lastModified));
+                        String.valueOf(lastModified),
+                        manifestMd5);
 
                 // Wait for receiver ACK to ensure proper synchronization
                 waitForCommand(CMD_ACK);
@@ -1370,7 +1474,8 @@ public class SyncProtocol {
     /**
      * Send file data with pre-computed content (used for merged conflict resolution). Performs
      * limited retries around the underlying XMODEM transfer so that transient handshake issues do
-     * not abort the entire sync.
+     * not abort the entire sync. The manifest md5 of the content is computed here, so the receiver
+     * verifies what is actually sent.
      *
      * @param baseDir the base directory containing the file
      * @param relativePath the relative path within the base directory
@@ -1393,6 +1498,29 @@ public class SyncProtocol {
      * @return true if file was compressed, false otherwise
      */
     public boolean sendFile(File baseDir, String relativePath, byte[] content, long lastModified)
+            throws IOException {
+        // Null content is rejected by the full overload's check; avoid hashing it here.
+        String md5 = content != null ? FileChangeDetector.manifestMd5(content) : null;
+        return sendFile(baseDir, relativePath, content, lastModified, md5);
+    }
+
+    /**
+     * Send file data with pre-computed content, explicit lastModified and the content's manifest
+     * md5, so the receiver can verify the decoded content before writing it.
+     *
+     * @param baseDir the base directory containing the file
+     * @param relativePath the relative path within the base directory
+     * @param content the pre-computed file content to send (e.g., merged content)
+     * @param lastModified timestamp to send; use file.lastModified() when file was just written
+     * @param manifestMd5 the manifest md5 of {@code content}; null/empty skips verification
+     * @return true if file was compressed, false otherwise
+     */
+    public boolean sendFile(
+            File baseDir,
+            String relativePath,
+            byte[] content,
+            long lastModified,
+            String manifestMd5)
             throws IOException {
         if (content == null) {
             sendCommand(CMD_ERROR, "File content is null: " + relativePath);
@@ -1420,7 +1548,8 @@ public class SyncProtocol {
                         relativePath,
                         String.valueOf(compressedData.getData().length),
                         String.valueOf(wasCompressed),
-                        String.valueOf(ts));
+                        String.valueOf(ts),
+                        manifestMd5);
 
                 waitForCommand(CMD_ACK);
 
@@ -1552,14 +1681,16 @@ public class SyncProtocol {
      * #PARTIAL_DISK_WRITE_THRESHOLD_BYTES} for a target that does not exist yet are streamed to a
      * staging file next to the target as blocks arrive, so an interrupted transfer leaves a
      * resumable prefix on disk; everything else keeps the buffered receive, which never touches the
-     * target unless the whole transfer completed.
+     * target unless the whole transfer completed. When {@code manifestMd5} is non-empty the decoded
+     * content is verified against it before anything is written (see {@link #verifyManifestHash}).
      */
     public void receiveFile(
             File baseDir,
             String relativePath,
             int expectedSize,
             boolean compressed,
-            long lastModified)
+            long lastModified,
+            String manifestMd5)
             throws IOException {
         File targetFile = new File(baseDir, relativePath);
         File parentDir = targetFile.getParentFile();
@@ -1568,9 +1699,33 @@ public class SyncProtocol {
         }
 
         if (expectedSize <= PARTIAL_DISK_WRITE_THRESHOLD_BYTES || targetFile.exists()) {
-            receiveFileBuffered(targetFile, relativePath, expectedSize, compressed, lastModified);
+            receiveFileBuffered(
+                    targetFile, relativePath, expectedSize, compressed, lastModified, manifestMd5);
         } else {
-            receiveFileStaged(targetFile, relativePath, expectedSize, compressed, lastModified);
+            receiveFileStaged(
+                    targetFile, relativePath, expectedSize, compressed, lastModified, manifestMd5);
+        }
+    }
+
+    /**
+     * Verify decoded content against the sender's announced manifest md5. A null/empty md5 (fast
+     * mode) skips verification. A mismatch fires the write-failure notification and raises {@link
+     * ManifestMismatchException}: the bytes are provably wrong and must neither be written nor
+     * queued for a retry.
+     */
+    private void verifyManifestHash(String relativePath, byte[] data, String manifestMd5)
+            throws IOException {
+        if (manifestMd5 == null || manifestMd5.isEmpty()) {
+            return;
+        }
+        if (!manifestMd5.equals(FileChangeDetector.manifestMd5(data))) {
+            fireWriteFailed(relativePath);
+            throw new ManifestMismatchException(
+                    "Manifest md5 mismatch while receiving '"
+                            + relativePath
+                            + "': announced "
+                            + manifestMd5
+                            + ", decoded content differs");
         }
     }
 
@@ -1584,7 +1739,8 @@ public class SyncProtocol {
             String relativePath,
             int expectedSize,
             boolean compressed,
-            long lastModified)
+            long lastModified,
+            String manifestMd5)
             throws IOException {
         xmodemInProgress.set(true);
         byte[] data;
@@ -1618,12 +1774,15 @@ public class SyncProtocol {
             data = CompressionUtil.decompress(data);
         }
 
+        verifyManifestHash(relativePath, data, manifestMd5);
+
         // Write file; a failure here (e.g. target locked by another program) is surfaced as a
         // FileWriteException carrying the payload so the caller can queue a later retry instead of
         // tearing down the connection.
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(data);
         } catch (IOException e) {
+            fireWriteFailed(relativePath);
             throw new FileWriteException(relativePath, data, lastModified, e.getMessage(), e);
         }
 
@@ -1631,6 +1790,7 @@ public class SyncProtocol {
         if (lastModified > 0) {
             targetFile.setLastModified(lastModified);
         }
+        fireTransferConfirmed(relativePath, manifestMd5, data.length);
     }
 
     /**
@@ -1647,7 +1807,8 @@ public class SyncProtocol {
             String relativePath,
             int expectedSize,
             boolean compressed,
-            long lastModified)
+            long lastModified,
+            String manifestMd5)
             throws IOException {
         File stageFile =
                 new File(targetFile.getParentFile(), "." + targetFile.getName() + PARTIAL_SUFFIX);
@@ -1692,12 +1853,14 @@ public class SyncProtocol {
         if (compressed) {
             data = CompressionUtil.decompress(data);
         }
+        verifyManifestHash(relativePath, data, manifestMd5);
         try (FileOutputStream fos = new FileOutputStream(targetFile)) {
             fos.write(data);
         } catch (IOException e) {
             // The stage is redundant from here on: the payload travels with the exception for a
             // deferred retry.
             stageFile.delete();
+            fireWriteFailed(relativePath);
             throw new FileWriteException(relativePath, data, lastModified, e.getMessage(), e);
         }
 
@@ -1706,6 +1869,7 @@ public class SyncProtocol {
             targetFile.setLastModified(lastModified);
         }
         stageFile.delete();
+        fireTransferConfirmed(relativePath, manifestMd5, data.length);
     }
 
     /**

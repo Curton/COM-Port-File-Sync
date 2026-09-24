@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -16,64 +17,72 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Tests for {@link ConflictAnalyzer}: the base-state arbitration matrix (R == B is the only
+ * non-conflict divergence), the conservative first-sync default without a base, the fast-mode
+ * timestamp fallback, and the prefix-shape exemptions.
+ */
 class ConflictAnalyzerTest {
 
     @TempDir Path tempDir;
 
-    @Test
-    void findConflicts_noConflicts_whenFilesIdentical() throws IOException {
-        // Create test files
+    // ========== arbitration matrix (base + content hashes) ==========
+
+    /**
+     * Write {@code localContent} and {@code remoteContent} for the same path and generate both
+     * manifests. Timestamps are irrelevant to the outcome — the arbitration is hash-based unless
+     * fast mode is on.
+     */
+    private ConflictSetup setup(String localContent, String remoteContent) throws IOException {
         Path localDir = tempDir.resolve("local");
         Path remoteDir = tempDir.resolve("remote");
         Files.createDirectories(localDir);
         Files.createDirectories(remoteDir);
+        Files.writeString(localDir.resolve("file.txt"), localContent);
+        Files.writeString(remoteDir.resolve("file.txt"), remoteContent);
+        ConflictSetup setup = new ConflictSetup();
+        setup.localManifest = FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        setup.remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+        setup.localDir = localDir;
+        return setup;
+    }
 
-        String content = "same content";
-        Files.writeString(localDir.resolve("file.txt"), content);
-        Files.writeString(remoteDir.resolve("file.txt"), content);
+    /** Fluent helper: find conflicts with a store pre-seeded with the given base md5. */
+    private List<ConflictInfo> findConflicts(ConflictSetup setup, String baseMd5)
+            throws IOException {
+        SyncStateStore store = new SyncStateStore(setup.localDir.resolve("state.json").toFile());
+        if (baseMd5 != null) {
+            store.confirm(
+                    "file.txt", baseMd5, setup.remoteManifest.getFiles().get("file.txt").getSize());
+        }
+        return ConflictAnalyzer.findConflicts(
+                setup.localManifest, setup.remoteManifest, setup.localDir.toFile(), store);
+    }
 
-        // Generate manifests
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
+    private static final class ConflictSetup {
+        FileChangeDetector.FileManifest localManifest;
+        FileChangeDetector.FileManifest remoteManifest;
+        Path localDir;
 
-        // Find conflicts
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        String localMd5() {
+            return localManifest.getFiles().get("file.txt").getMd5();
+        }
 
-        assertTrue(conflicts.isEmpty(), "No conflicts when files are identical");
+        String remoteMd5() {
+            return remoteManifest.getFiles().get("file.txt").getMd5();
+        }
     }
 
     @Test
-    void findConflicts_detectsConflict_whenBothSidesModified() throws IOException {
-        // Create test files
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
+    void bothSidesModifiedWithBase_conflicts() throws IOException {
+        ConflictSetup setup = setup("local version", "remote version");
+        String base =
+                FileChangeDetector.manifestMd5("agreed version".getBytes(StandardCharsets.UTF_8));
+        // L != B, R != B, L != R: both sides moved away from the agreement.
+        List<ConflictInfo> conflicts = findConflicts(setup, base);
 
-        // Same file but different content on each side; remote has newer mtime (receiver modified)
-        Path localFile = localDir.resolve("file.txt");
-        Path remoteFile = remoteDir.resolve("file.txt");
-        Files.writeString(localFile, "local version");
-        Files.writeString(remoteFile, "remote version");
-        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
-        Files.setLastModifiedTime(
-                remoteFile,
-                FileTime.fromMillis(5000L)); // remote newer than local + MODIFY_WINDOW_MS
-
-        // Generate manifests (fast mode to use MD5)
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
-
-        // Find conflicts
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-
-        assertEquals(1, conflicts.size(), "Should detect one conflict");
+        assertEquals(1, conflicts.size(), "both sides modified: conflict");
         ConflictInfo conflict = conflicts.get(0);
         assertEquals("file.txt", conflict.getPath());
         assertFalse(conflict.isBinary(), "Text file should not be marked as binary");
@@ -81,19 +90,67 @@ class ConflictAnalyzerTest {
     }
 
     @Test
-    void findConflicts_noConflict_whenOnlySenderModified() throws IOException {
-        // File exists on both sides, content differs, but only sender (local) modified
+    void onlySenderModified_normalTransfer_noConflict() throws IOException {
+        ConflictSetup setup = setup("sender modified content", "old content");
+        // The receiver still holds the agreed-on version: only the sender modified the file.
+        List<ConflictInfo> conflicts = findConflicts(setup, setup.remoteMd5());
+
+        assertTrue(
+                conflicts.isEmpty(), "only sender modified (R == B): normal transfer, no conflict");
+    }
+
+    @Test
+    void onlyReceiverModified_conflicts() throws IOException {
+        ConflictSetup setup = setup("old content", "receiver modified content");
+        // The sender still holds the agreed-on version; pushing it would lose receiver changes.
+        List<ConflictInfo> conflicts = findConflicts(setup, setup.localMd5());
+
+        assertEquals(1, conflicts.size(), "only receiver modified (R != B): conflict");
+    }
+
+    @Test
+    void noBase_firstSync_everyDifferenceConflicts() throws IOException {
+        ConflictSetup setup = setup("local version", "remote version");
+        List<ConflictInfo> conflicts = findConflicts(setup, null);
+
+        assertEquals(
+                1,
+                conflicts.size(),
+                "without a recorded base the history is unknown: conservatively a conflict");
+    }
+
+    @Test
+    void identicalContent_neverConflicts() throws IOException {
         Path localDir = tempDir.resolve("local");
         Path remoteDir = tempDir.resolve("remote");
         Files.createDirectories(localDir);
         Files.createDirectories(remoteDir);
+        Files.writeString(localDir.resolve("file.txt"), "same content");
+        Files.writeString(remoteDir.resolve("file.txt"), "same content");
 
-        Path localFile = localDir.resolve("file.txt");
-        Path remoteFile = remoteDir.resolve("file.txt");
-        Files.writeString(localFile, "sender modified content");
-        Files.writeString(remoteFile, "old content");
-        Files.setLastModifiedTime(localFile, FileTime.fromMillis(5000L)); // local newer
-        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(1000L)); // remote older
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
+
+        // Even a missing base cannot manufacture a conflict: content must differ first.
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
+
+        assertTrue(conflicts.isEmpty(), "No conflicts when files are identical");
+    }
+
+    @Test
+    void onlySenderHasFile_notAConflict() throws IOException {
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        Files.writeString(localDir.resolve("senderOnly.txt"), "content");
 
         FileChangeDetector.FileManifest localManifest =
                 FileChangeDetector.generateManifest(localDir.toFile(), false, false);
@@ -101,66 +158,95 @@ class ConflictAnalyzerTest {
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
 
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
-
-        assertTrue(conflicts.isEmpty(), "No conflict when only sender modified - normal transfer");
-    }
-
-    @Test
-    void findConflicts_noConflict_whenOnlySenderHasFile() throws IOException {
-        // Create test files
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-
-        // File exists only on sender side
-        Files.writeString(localDir.resolve("senderOnly.txt"), "content");
-        // remoteDir is empty
-
-        // Generate manifests
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
-
-        // Find conflicts
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
 
         assertTrue(conflicts.isEmpty(), "No conflict when file exists on only sender");
     }
 
     @Test
-    void findConflicts_detectsConflict_forBinaryFiles() throws IOException {
-        // Create test files
+    void binaryFile_bothSidesModified_conflicts() throws IOException {
         Path localDir = tempDir.resolve("local");
         Path remoteDir = tempDir.resolve("remote");
         Files.createDirectories(localDir);
         Files.createDirectories(remoteDir);
-
-        // Create binary-like files (with null bytes); remote has newer mtime
         byte[] localBinary = new byte[] {0x00, 0x01, 0x02};
         byte[] remoteBinary = new byte[] {0x00, 0x03, 0x04};
-        Path localPath = localDir.resolve("image.bin");
-        Path remotePath = remoteDir.resolve("image.bin");
-        Files.write(localPath, localBinary);
-        Files.write(remotePath, remoteBinary);
-        Files.setLastModifiedTime(localPath, FileTime.fromMillis(1000L));
-        Files.setLastModifiedTime(remotePath, FileTime.fromMillis(5000L));
+        Files.write(localDir.resolve("image.bin"), localBinary);
+        Files.write(remoteDir.resolve("image.bin"), remoteBinary);
+        Files.setLastModifiedTime(localDir.resolve("image.bin"), FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteDir.resolve("image.bin"), FileTime.fromMillis(5000L));
 
-        // Generate manifests
         FileChangeDetector.FileManifest localManifest =
                 FileChangeDetector.generateManifest(localDir.toFile(), false, false);
         FileChangeDetector.FileManifest remoteManifest =
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
 
-        // Find conflicts
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
 
-        assertEquals(1, conflicts.size(), "Should detect conflict for binary file");
+        assertEquals(1, conflicts.size(), "both sides modified without a base: conflict");
         assertTrue(conflicts.get(0).isBinary(), "File should be marked as binary");
+    }
+
+    // ========== fast-mode timestamp fallback ==========
+
+    @Test
+    void fastMode_noHashes_fallsBackToTimestampArbitration() throws IOException {
+        Path localDir = tempDir.resolve("local");
+        Path remoteDir = tempDir.resolve("remote");
+        Files.createDirectories(localDir);
+        Files.createDirectories(remoteDir);
+        // A binary path: quick mode hashes only text files, so both sides lack an md5 and the
+        // arbitration has to fall back to the timestamp rule it always had.
+        Path localFile = localDir.resolve("image.bin");
+        Path remoteFile = remoteDir.resolve("image.bin");
+        Files.write(localFile, new byte[] {0x00, 0x01, 0x02});
+        Files.write(remoteFile, new byte[] {0x00, 0x03, 0x04});
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(5000L));
+
+        FileChangeDetector.FileManifest localManifest =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
+        FileChangeDetector.FileManifest remoteManifest =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
+        assertNull(localManifest.getFiles().get("image.bin").getMd5(), "fast mode: no hash");
+
+        // Receiver newer than the window: conflict, exactly as before the base arbitration.
+        List<ConflictInfo> conflicts =
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
+        assertEquals(
+                1,
+                conflicts.size(),
+                "fast mode with a newer receiver must keep reporting the conflict");
+
+        // Receiver older than the window: no conflict, exactly as before.
+        Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(1000L));
+        Files.setLastModifiedTime(localFile, FileTime.fromMillis(5000L));
+        FileChangeDetector.FileManifest localManifest2 =
+                FileChangeDetector.generateManifest(localDir.toFile(), false, true);
+        FileChangeDetector.FileManifest remoteManifest2 =
+                FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
+        List<ConflictInfo> conflicts2 =
+                ConflictAnalyzer.findConflicts(
+                        localManifest2,
+                        remoteManifest2,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state2.json").toFile()));
+        assertTrue(
+                conflicts2.isEmpty(),
+                "fast mode with an older receiver must keep transferring without a dialog");
     }
 
     @Test
@@ -236,7 +322,8 @@ class ConflictAnalyzerTest {
     // ========== exemptPrefixShapedConflicts tests ==========
 
     /**
-     * Receiver holds the first 64 bytes of the sender's 96-byte binary file, with a newer mtime.
+     * Receiver holds the first {@code prefixLength} bytes of the sender's binary file; with no base
+     * recorded this classifies as a conflict (first-sync semantics) before the exemption runs.
      */
     private List<ConflictInfo> createBinaryPrefixConflict(
             Path localDir, Path remoteDir, byte[] fullContent, int prefixLength)
@@ -249,7 +336,6 @@ class ConflictAnalyzerTest {
         Path remoteFile = remoteDir.resolve("archive.gz");
         Files.write(localFile, fullContent);
         Files.write(remoteFile, prefix);
-        // Receiver's copy is newer (e.g. an outside-the-sync copy made after the sender's file)
         Files.setLastModifiedTime(localFile, FileTime.fromMillis(1000L));
         Files.setLastModifiedTime(remoteFile, FileTime.fromMillis(6000L));
 
@@ -258,7 +344,11 @@ class ConflictAnalyzerTest {
         FileChangeDetector.FileManifest remoteManifest =
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
 
-        return ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+        return ConflictAnalyzer.findConflicts(
+                localManifest,
+                remoteManifest,
+                localDir.toFile(),
+                new SyncStateStore(localDir.resolve("state.json").toFile()));
     }
 
     @Test
@@ -310,7 +400,11 @@ class ConflictAnalyzerTest {
         FileChangeDetector.FileManifest remoteManifest =
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
         assertEquals(1, conflicts.size());
 
         Set<String> exempted =
@@ -350,7 +444,11 @@ class ConflictAnalyzerTest {
         FileChangeDetector.FileManifest remoteManifest =
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, true);
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
         assertEquals(1, conflicts.size());
         assertNull(conflicts.get(0).getRemoteInfo().getMd5(), "fast mode: no binary md5");
 
@@ -379,7 +477,11 @@ class ConflictAnalyzerTest {
         FileChangeDetector.FileManifest remoteManifest =
                 FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
         List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(localManifest, remoteManifest, localDir.toFile());
+                ConflictAnalyzer.findConflicts(
+                        localManifest,
+                        remoteManifest,
+                        localDir.toFile(),
+                        new SyncStateStore(localDir.resolve("state.json").toFile()));
         assertEquals(1, conflicts.size());
 
         Set<String> exempted =

@@ -118,6 +118,11 @@ class DeltaSyncCoordinatorTest {
             SignatureCache createSignatureCache(File syncFolder) {
                 return new SignatureCache(new File(syncFolder, "sigcache-test.json"));
             }
+
+            @Override
+            SyncStateStore createSyncStateStore(File syncFolder) {
+                return new SyncStateStore(new File(syncFolder, "syncstate-test.json"));
+            }
         };
     }
 
@@ -131,7 +136,8 @@ class DeltaSyncCoordinatorTest {
     private FileChangeDetector.FileManifest remoteManifest(String... paths) {
         Map<String, FileChangeDetector.FileInfo> files = new HashMap<>();
         for (String p : paths) {
-            // md5 differs from local and mtime=0 (older) -> changed but not a conflict.
+            // A remote state differing from local; the last-synced base for these paths is the
+            // remote state itself (below), so only the sender modified the files.
             files.put(
                     p,
                     new FileChangeDetector.FileInfo(
@@ -160,6 +166,14 @@ class DeltaSyncCoordinatorTest {
         // Remote knows big.bin, big.txt, small.bin (all "changed"), but not new.bin.
         when(mockProtocol.receiveManifest(anyInt()))
                 .thenReturn(remoteManifest("big.bin", "big.txt", "small.bin"));
+
+        // Each remote entry is the last agreed-on state (R == B): only the sender changed these
+        // files, so they transfer normally instead of raising conflicts.
+        SyncStateStore base = new SyncStateStore(new File(syncFolder, "syncstate-test.json"));
+        for (String path : List.of("big.bin", "big.txt", "small.bin")) {
+            base.confirm(path, "deadbeefdeadbeefdeadbeefdeadbeef", 9999L);
+        }
+        base.flush();
 
         SyncPreviewPlan plan = createCoordinator().createSyncPreviewPlan();
 
@@ -246,6 +260,7 @@ class DeltaSyncCoordinatorTest {
                         anyBoolean(),
                         anyLong(),
                         anyLong(),
+                        nullable(String.class),
                         nullable(String.class));
 
         createCoordinator().handleIncomingFileDelta(msg);
@@ -275,6 +290,7 @@ class DeltaSyncCoordinatorTest {
                         anyBoolean(),
                         anyLong(),
                         anyLong(),
+                        nullable(String.class),
                         nullable(String.class));
 
         org.junit.jupiter.api.Assertions.assertThrows(
@@ -306,7 +322,13 @@ class DeltaSyncCoordinatorTest {
                                         SignatureUtil.chooseBlockSize(data.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
+        when(mockProtocol.sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(false);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -314,7 +336,14 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("big.bin", data.length));
 
         verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol)
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol, never())
                 .sendBatch(
                         anyList(),
@@ -344,7 +373,13 @@ class DeltaSyncCoordinatorTest {
                 new SignatureSet(List.of(SignatureUtil.compute("big.bin", base, blockSize)));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
+        when(mockProtocol.sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(false);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -352,7 +387,14 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("big.bin", source.length));
 
         verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol)
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol, never())
                 .sendBatch(
                         anyList(),
@@ -401,7 +443,13 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -450,7 +498,13 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -485,7 +539,13 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("big.bin", data.length));
 
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -510,7 +570,13 @@ class DeltaSyncCoordinatorTest {
                                         SignatureUtil.chooseBlockSize(data.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
+        when(mockProtocol.sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(false);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -519,13 +585,26 @@ class DeltaSyncCoordinatorTest {
 
         coordinator.startSyncWithPlan(plan);
         verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol)
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
 
         // Second sync against the same receiver state: no signature exchange, cached signatures.
         coordinator.startSyncWithPlan(plan);
         verify(mockProtocol, times(1)).requestDeltaSignatures(anyList());
         verify(mockProtocol, times(2))
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
     }
 
     @Test
@@ -550,7 +629,13 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("big.bin", data.length));
 
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -607,7 +692,13 @@ class DeltaSyncCoordinatorTest {
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.sendFileAppend(
-                        anyString(), any(), anyLong(), anyLong(), anyLong(), anyString()))
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(false);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -623,11 +714,18 @@ class DeltaSyncCoordinatorTest {
                         anyLong(),
                         eq((long) base.length),
                         eq((long) grown.length),
-                        anyString());
+                        anyString(),
+                        nullable(String.class));
         assertArrayEquals(tail, tailCaptor.getValue(), "only the appended tail may be sent");
         verify(mockProtocol, never()).requestDeltaSignatures(anyList());
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol, never())
                 .sendBatch(
                         anyList(),
@@ -675,7 +773,14 @@ class DeltaSyncCoordinatorTest {
                 appendPlanFor("app.log", grown.length, base.length, remoteMd5));
 
         verify(mockProtocol, never())
-                .sendFileAppend(anyString(), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol)
                 .sendBatch(
@@ -708,7 +813,14 @@ class DeltaSyncCoordinatorTest {
                 appendPlanFor("app.log", grown.length, grown.length + 1000, "deadbeef"));
 
         verify(mockProtocol, never())
-                .sendFileAppend(anyString(), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol).requestDeltaSignatures(anyList());
     }
 
@@ -742,7 +854,14 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(appendPlanFor("app.log", grown.length, base.length, null));
 
         verify(mockProtocol, never())
-                .sendFileAppend(anyString(), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol).requestDeltaSignatures(anyList());
     }
 
@@ -766,7 +885,13 @@ class DeltaSyncCoordinatorTest {
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.sendFileAppend(
-                        anyString(), any(), anyLong(), anyLong(), anyLong(), anyString()))
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenThrow(new IOException("verification failed on receiver"));
         when(mockProtocol.sendBatch(
                         anyList(),
@@ -825,7 +950,13 @@ class DeltaSyncCoordinatorTest {
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.sendFileAppend(
-                        anyString(), any(), anyLong(), anyLong(), anyLong(), anyString()))
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenAnswer(
                         invocation -> {
                             // While a.log's tail is on the wire, b.log's prefix changes on disk.
@@ -873,9 +1004,23 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(plan);
 
         verify(mockProtocol)
-                .sendFileAppend(eq("a.log"), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        eq("a.log"),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol, never())
-                .sendFileAppend(eq("b.log"), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        eq("b.log"),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .requestDeltaSignatures(
                         argThat(
@@ -912,7 +1057,13 @@ class DeltaSyncCoordinatorTest {
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.sendFileAppend(
-                        anyString(), any(), anyLong(), anyLong(), anyLong(), anyString()))
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(false);
 
         SyncCoordinator coordinator = createCoordinator();
@@ -928,7 +1079,8 @@ class DeltaSyncCoordinatorTest {
                         anyLong(),
                         eq((long) base.length),
                         eq((long) grown.length),
-                        anyString());
+                        anyString(),
+                        nullable(String.class));
         assertArrayEquals(tail, tailCaptor.getValue(), "only the appended tail may be sent");
         verify(mockProtocol, never()).requestDeltaSignatures(anyList());
         verify(mockProtocol).sendSyncComplete();
@@ -976,7 +1128,14 @@ class DeltaSyncCoordinatorTest {
                 appendPlanFor("app.log", grown.length, base.length, remoteMd5));
 
         verify(mockProtocol, never())
-                .sendFileAppend(anyString(), any(), anyLong(), anyLong(), anyLong(), anyString());
+                .sendFileAppend(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol)
                 .sendBatch(
@@ -1108,7 +1267,7 @@ class DeltaSyncCoordinatorTest {
 
         verify(mockProtocol).sendAck();
         verify(mockProtocol)
-                .receiveFileAppend(syncFolder, "app.log", 50, false, 100L, 600L, 650L, "abc");
+                .receiveFileAppend(syncFolder, "app.log", 50, false, 100L, 600L, 650L, "abc", null);
         verify(pendingWriteService).markWritten("app.log");
     }
 
@@ -1134,6 +1293,7 @@ class DeltaSyncCoordinatorTest {
                         anyLong(),
                         anyLong(),
                         anyLong(),
+                        nullable(String.class),
                         nullable(String.class));
 
         createCoordinator().handleIncomingFileAppend(msg);
@@ -1272,7 +1432,13 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("big.bin", data.length));
 
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -1300,7 +1466,13 @@ class DeltaSyncCoordinatorTest {
         coordinator.startSyncWithPlan(planFor("ghost.bin", data.length));
 
         verify(mockProtocol, never())
-                .sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         verify(mockProtocol)
                 .sendBatch(
                         anyList(),
@@ -1324,14 +1496,27 @@ class DeltaSyncCoordinatorTest {
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
         // sendFileDelta reports the delta was compressed -> covers the "(compressed)" log branch.
-        when(mockProtocol.sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString()))
+        when(mockProtocol.sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class)))
                 .thenReturn(true);
 
         SyncCoordinator coordinator = createCoordinator();
         coordinator.setExecutor(null);
         coordinator.startSyncWithPlan(planFor("big.bin", data.length));
 
-        verify(mockProtocol).sendFileDelta(anyString(), any(), anyLong(), anyLong(), anyString());
+        verify(mockProtocol)
+                .sendFileDelta(
+                        anyString(),
+                        any(),
+                        anyLong(),
+                        anyLong(),
+                        anyString(),
+                        nullable(String.class));
         assertTrue(
                 postedEvents.stream()
                         .filter(e -> e instanceof SyncEvent.LogEvent)

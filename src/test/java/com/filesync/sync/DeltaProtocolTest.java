@@ -68,7 +68,8 @@ class DeltaProtocolTest {
                 false,
                 12345L,
                 source.length,
-                HashUtil.md5Hex(source));
+                HashUtil.md5Hex(source),
+                null);
 
         assertArrayEquals(
                 source, Files.readAllBytes(existing), "file must match the sender's source");
@@ -98,7 +99,8 @@ class DeltaProtocolTest {
                 true,
                 0L,
                 source.length,
-                HashUtil.md5Hex(source));
+                HashUtil.md5Hex(source),
+                null);
 
         assertArrayEquals(source, Files.readAllBytes(existing));
     }
@@ -129,7 +131,8 @@ class DeltaProtocolTest {
                                         false,
                                         0L,
                                         source.length,
-                                        "00000000000000000000000000000000"));
+                                        "00000000000000000000000000000000",
+                                        null));
 
         assertTrue(
                 thrown.getMessage().contains("verification failed"),
@@ -175,7 +178,8 @@ class DeltaProtocolTest {
                                         false,
                                         0L,
                                         source.length,
-                                        HashUtil.md5Hex(source)));
+                                        HashUtil.md5Hex(source),
+                                        null));
 
         assertTrue(
                 thrown.getMessage().contains("existing file missing"),
@@ -207,7 +211,8 @@ class DeltaProtocolTest {
                                         false,
                                         0L,
                                         source.length,
-                                        HashUtil.md5Hex(source)));
+                                        HashUtil.md5Hex(source),
+                                        null));
         assertTrue(thrown.getMessage().contains("existing file missing"));
     }
 
@@ -228,7 +233,14 @@ class DeltaProtocolTest {
             serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
 
             protocol.receiveFileDelta(
-                    tempDir.toFile(), "big.bin", delta.length, false, 0L, source.length, blankMd5);
+                    tempDir.toFile(),
+                    "big.bin",
+                    delta.length,
+                    false,
+                    0L,
+                    source.length,
+                    blankMd5,
+                    null);
             assertArrayEquals(source, Files.readAllBytes(existing), "sourceMd5=" + blankMd5);
         }
     }
@@ -248,7 +260,14 @@ class DeltaProtocolTest {
                         TransferCancelledException.class,
                         () ->
                                 protocol.receiveFileDelta(
-                                        tempDir.toFile(), "big.bin", 50, false, 0L, 100, "abc"));
+                                        tempDir.toFile(),
+                                        "big.bin",
+                                        50,
+                                        false,
+                                        0L,
+                                        100,
+                                        "abc",
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("cancelled by sender"),
                 "cancel must be reported as such: " + thrown.getMessage());
@@ -268,7 +287,14 @@ class DeltaProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.receiveFileDelta(
-                                        tempDir.toFile(), "big.bin", 50, false, 0L, 100, "abc"));
+                                        tempDir.toFile(),
+                                        "big.bin",
+                                        50,
+                                        false,
+                                        0L,
+                                        100,
+                                        "abc",
+                                        null));
         assertFalse(
                 thrown instanceof TransferCancelledException,
                 "a short transfer is not a cancel: " + thrown.getMessage());
@@ -309,7 +335,8 @@ class DeltaProtocolTest {
                 12345L,
                 base.length,
                 full.length,
-                HashUtil.md5Hex(full));
+                HashUtil.md5Hex(full),
+                null);
 
         assertArrayEquals(full, Files.readAllBytes(existing), "file must be base + tail");
     }
@@ -337,7 +364,8 @@ class DeltaProtocolTest {
                 0L,
                 base.length,
                 full.length,
-                HashUtil.md5Hex(full));
+                HashUtil.md5Hex(full),
+                null);
 
         assertArrayEquals(full, Files.readAllBytes(existing));
     }
@@ -368,7 +396,8 @@ class DeltaProtocolTest {
                                         0L,
                                         base.length,
                                         base.length + tail.length,
-                                        "00000000000000000000000000000000"));
+                                        "00000000000000000000000000000000",
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("verification failed"),
                 "error must mention verification: " + thrown.getMessage());
@@ -414,7 +443,8 @@ class DeltaProtocolTest {
                                         0L,
                                         base.length - 1,
                                         base.length - 1 + tail.length,
-                                        HashUtil.md5Hex(concat(base, tail))));
+                                        HashUtil.md5Hex(concat(base, tail)),
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("size drifted"),
                 "error must mention the drift: " + thrown.getMessage());
@@ -441,7 +471,8 @@ class DeltaProtocolTest {
                                         0L,
                                         200,
                                         230,
-                                        "abc"));
+                                        "abc",
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("existing file missing"),
                 "error must mention missing base: " + thrown.getMessage());
@@ -471,7 +502,8 @@ class DeltaProtocolTest {
                                         0L,
                                         base.length,
                                         base.length + tail.length + 1,
-                                        "abc"));
+                                        "abc",
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("Append size mismatch"),
                 "error must mention the size mismatch: " + thrown.getMessage());
@@ -504,7 +536,8 @@ class DeltaProtocolTest {
                                         0L,
                                         base.length,
                                         Integer.MAX_VALUE + 1L,
-                                        HashUtil.md5Hex(concat(base, tail))));
+                                        HashUtil.md5Hex(concat(base, tail)),
+                                        null));
         assertTrue(
                 thrown.getMessage().contains("too large"),
                 "error must mention the oversized target: " + thrown.getMessage());
@@ -532,6 +565,7 @@ class DeltaProtocolTest {
                 0L,
                 base.length,
                 full.length,
+                null,
                 null);
         assertArrayEquals(full, Files.readAllBytes(existing));
     }
