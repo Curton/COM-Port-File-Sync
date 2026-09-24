@@ -1,10 +1,12 @@
 package com.filesync.ui;
 
 import com.filesync.config.SettingsManager;
+import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncPreviewPlan;
 import java.awt.Color;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
@@ -154,6 +156,12 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     public void startSync() {
         logController.log("[DEBUG] startSync: sender=" + state.isSender());
+        if (state.isPreviewInProgress()) {
+            // Another Start Sync / preview is already running its manifest roundtrip; two at
+            // once would steal each other's protocol responses.
+            logController.log("Sync preparation already in progress, ignoring request");
+            return;
+        }
         if (!ensureSenderRoleReady()) {
             logController.log("Waiting for sync from sender...");
             return;
@@ -172,8 +180,139 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         runSyncWithPreflight(this::runSyncPreview);
     }
 
+    /**
+     * Start Sync after the folder-mapping preflight. The manifest roundtrip runs here first so the
+     * operations that would otherwise destroy receiver-side data silently are confirmed by the
+     * user: conflicts (an unresolved conflict defaults to "local wins", overwriting the receiver's
+     * newer version) and strict-mode deletions. The computed plan is handed to {@code initiateSync}
+     * so manifests are not generated a second time.
+     */
     private void doStartSync() {
-        syncManager.initiateSync();
+        logController.log("[DEBUG] doStartSync: preparing plan for confirmation");
+        state.setPreviewInProgress(true);
+        updateSyncButtonState();
+
+        SwingWorker<SyncPreviewPlan, Void> confirmWorker =
+                new SwingWorker<SyncPreviewPlan, Void>() {
+                    @Override
+                    protected SyncPreviewPlan doInBackground() {
+                        return syncManager.previewSync();
+                    }
+
+                    @Override
+                    protected void done() {
+                        state.setPreviewInProgress(false);
+                        updateSyncButtonState();
+                        try {
+                            SyncPreviewPlan plan = get();
+                            if (plan == null) {
+                                // The pre-check could not produce a plan; start without the
+                                // warning and let the sync itself report real failures.
+                                logController.log(
+                                        "Sync plan unavailable; starting without confirmation");
+                                syncManager.initiateSync();
+                                return;
+                            }
+                            if (!plan.getConflicts().isEmpty()
+                                    || !plan.getFilesToDelete().isEmpty()
+                                    || !plan.getEmptyDirectoriesToDelete().isEmpty()) {
+                                if (!confirmDestructiveSync(plan)) {
+                                    logController.log(
+                                            "Sync cancelled: destructive changes not confirmed");
+                                    resetProgressBar();
+                                    return;
+                                }
+                            }
+                            startSyncWithPlan(plan);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            logController.log("Sync start interrupted");
+                        } catch (java.util.concurrent.ExecutionException e) {
+                            Throwable cause = e.getCause();
+                            String message = cause != null ? cause.getMessage() : e.getMessage();
+                            logController.log(
+                                    "Sync plan failed"
+                                            + (message != null && !message.isEmpty()
+                                                    ? ": " + message
+                                                    : ""));
+                            // Same fallback as a null plan: initiateSync runs its own checks
+                            // and reports failures through the usual error events.
+                            syncManager.initiateSync();
+                        }
+                    }
+                };
+        confirmWorker.execute();
+    }
+
+    /** Clear the progress bar after a sync the user aborted before any transfer started. */
+    private void resetProgressBar() {
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setString("");
+        components.getProgressBar().setValue(0);
+    }
+
+    private static final int MAX_LISTED_PATHS = 10;
+
+    /**
+     * Warning shown when a direct Start Sync would destroy receiver-side data the plain flow never
+     * mentions: the receiver's newer version of conflicted files (an unresolved conflict defaults
+     * to "local wins") and strict-mode deletions. Returns true when the user confirmed.
+     */
+    private boolean confirmDestructiveSync(SyncPreviewPlan plan) {
+        List<ConflictInfo> conflicts = plan.getConflicts();
+        List<String> deletions = new ArrayList<>(plan.getFilesToDelete());
+        for (String dir : plan.getEmptyDirectoriesToDelete()) {
+            deletions.add(dir + "/");
+        }
+
+        StringBuilder msg = new StringBuilder();
+        msg.append("This sync will:\n");
+        if (!conflicts.isEmpty()) {
+            msg.append("  - overwrite the receiver's newer version of ")
+                    .append(conflicts.size())
+                    .append(conflicts.size() == 1 ? " file\n" : " files\n");
+        }
+        if (!deletions.isEmpty()) {
+            msg.append("  - delete ")
+                    .append(deletions.size())
+                    .append(deletions.size() == 1 ? " file/directory\n" : " files/directories\n")
+                    .append("    on the receiver (strict mode)\n");
+        }
+        msg.append('\n');
+        if (!conflicts.isEmpty()) {
+            msg.append("Conflicts (receiver's newer version will be lost):\n");
+            appendPathList(msg, conflicts.stream().map(ConflictInfo::getPath).toList());
+            msg.append('\n');
+        }
+        if (!deletions.isEmpty()) {
+            msg.append("Deletions on the receiver:\n");
+            appendPathList(msg, deletions);
+            msg.append('\n');
+        }
+        msg.append("Continue?");
+
+        int response =
+                JOptionPane.showOptionDialog(
+                        owner,
+                        msg.toString(),
+                        "Confirm Sync",
+                        JOptionPane.OK_CANCEL_OPTION,
+                        JOptionPane.WARNING_MESSAGE,
+                        null,
+                        new Object[] {"Continue", "Cancel"},
+                        "Cancel");
+        return response == 0;
+    }
+
+    /** Append up to {@link #MAX_LISTED_PATHS} paths, indented, plus a "(N more)" tail. */
+    private void appendPathList(StringBuilder msg, List<String> paths) {
+        int shown = Math.min(MAX_LISTED_PATHS, paths.size());
+        for (int i = 0; i < shown; i++) {
+            msg.append("  ").append(paths.get(i)).append('\n');
+        }
+        if (paths.size() > shown) {
+            msg.append("  ... and ").append(paths.size() - shown).append(" more\n");
+        }
     }
 
     public void cancelSync() {
@@ -461,7 +600,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     /** Disable the sync controls and start the sync with the (already filtered) plan. */
     private void startSyncWithPlan(SyncPreviewPlan plan) {
-        logController.log("[DEBUG] runSyncPreview: calling initiateSync");
+        logController.log("[DEBUG] startSyncWithPlan: calling initiateSync");
         components.getSyncButton().setEnabled(false);
         components.getPreviewSyncButton().setEnabled(false);
         components.getProgressBar().setValue(0);
