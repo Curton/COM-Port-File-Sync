@@ -93,14 +93,14 @@ public class SyncCoordinator {
     private volatile SignatureCache activeSignatureCache;
 
     /**
-     * This side's confirmed-state store (the base conflict arbitration compares against), keyed by
-     * the sync folder it was opened for. Both roles use it: as receiver it advances as files are
-     * verified and written, and as sender it advances once per successful session. One instance per
-     * folder keeps a superseded role's unflushed map from overwriting newer entries.
+     * This side's confirmed-state (base) store — what conflict arbitration compares against — keyed
+     * by the sync folder it was opened for. Both roles advance it: as receiver, per file verified
+     * and written; as sender, once per successful session. One instance per folder keeps a
+     * superseded role's unflushed map from overwriting newer entries.
      */
-    private volatile SyncStateStore receiverStateStore;
+    private volatile SyncStateStore baseStateStore;
 
-    private volatile File receiverStateStoreFolder;
+    private volatile File baseStateStoreFolder;
 
     /**
      * Paths this side could not write during the current receive session (write failure, locked
@@ -1219,30 +1219,29 @@ public class SyncCoordinator {
      * The state store for the current sync folder, reopened when the folder changes. Flushes a
      * superseded instance on the way out so a folder switch never strands unflushed confirmations.
      */
-    SyncStateStore receiverStateStore() {
+    SyncStateStore baseStateStore() {
         File folder = syncFolderSupplier.get();
         if (folder == null) {
             return null;
         }
-        SyncStateStore store = receiverStateStore;
-        File openedFor = receiverStateStoreFolder;
+        SyncStateStore store = baseStateStore;
+        File openedFor = baseStateStoreFolder;
         if (store != null && openedFor != null && openedFor.equals(folder)) {
             return store;
         }
         synchronized (this) {
-            if (receiverStateStore != null
-                    && (receiverStateStoreFolder == null
-                            || !receiverStateStoreFolder.equals(folder))) {
-                receiverStateStore.flush();
-                receiverStateStore = null;
-                receiverStateStoreFolder = null;
+            if (baseStateStore != null
+                    && (baseStateStoreFolder == null || !baseStateStoreFolder.equals(folder))) {
+                baseStateStore.flush();
+                baseStateStore = null;
+                baseStateStoreFolder = null;
             }
-            if (receiverStateStore == null) {
-                receiverStateStore = createSyncStateStore(folder);
-                receiverStateStoreFolder = folder;
+            if (baseStateStore == null) {
+                baseStateStore = createSyncStateStore(folder);
+                baseStateStoreFolder = folder;
                 confirmsSinceFlush.set(0);
             }
-            return receiverStateStore;
+            return baseStateStore;
         }
     }
 
@@ -1255,7 +1254,7 @@ public class SyncCoordinator {
         if (manifestMd5 == null || manifestMd5.isEmpty()) {
             return;
         }
-        SyncStateStore store = receiverStateStore();
+        SyncStateStore store = baseStateStore();
         if (store == null) {
             return;
         }
@@ -1285,7 +1284,7 @@ public class SyncCoordinator {
             return;
         }
         int count = Math.max(0, Math.min(msg.getParamAsInt(0), msg.getParams().length - 1));
-        SyncStateStore store = receiverStateStore();
+        SyncStateStore store = baseStateStore();
         if (store == null || count == 0) {
             return;
         }
@@ -1321,7 +1320,7 @@ public class SyncCoordinator {
         if (count == 0) {
             return;
         }
-        SyncStateStore store = receiverStateStore();
+        SyncStateStore store = baseStateStore();
         if (store == null) {
             return;
         }
@@ -1377,7 +1376,7 @@ public class SyncCoordinator {
      * </ul>
      */
     private void recordSenderBase(SyncPreviewPlan plan, Set<String> writeFailures) {
-        SyncStateStore store = receiverStateStore();
+        SyncStateStore store = baseStateStore();
         if (store == null) {
             return;
         }
@@ -1445,7 +1444,7 @@ public class SyncCoordinator {
     public void handleSyncComplete() {
         // The receive session is done: persist every confirmed state first, then tell the sender
         // which paths it must withdraw from its optimistic record (usually none).
-        SyncStateStore store = receiverStateStore();
+        SyncStateStore store = baseStateStore();
         if (store != null) {
             store.flush();
         }
@@ -1476,7 +1475,7 @@ public class SyncCoordinator {
                 eventBus.post(new SyncEvent.LogEvent("File deleted: " + relativePath));
                 // The path no longer exists on this side, so its confirmed state has nothing to
                 // describe; keeping it would only let a later reconcile target a ghost.
-                SyncStateStore store = receiverStateStore();
+                SyncStateStore store = baseStateStore();
                 if (store != null) {
                     store.remove(relativePath);
                     store.flush();
