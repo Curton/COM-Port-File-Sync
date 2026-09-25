@@ -133,7 +133,16 @@ class FileSyncManagerTest {
             // reconnect attempt so the UI can return to the initial disconnected state.
             serial.causeReadLineFailure();
 
-            waitUntil(() -> !fsm.isRunning(), Duration.ofSeconds(10));
+            // The disconnect event is posted after the teardown flips isRunning, so wait for the
+            // event itself rather than asserting on it the moment the loop stops.
+            waitUntil(
+                    () ->
+                            events.stream()
+                                    .anyMatch(
+                                            e ->
+                                                    e instanceof SyncEvent.ConnectionEvent ce
+                                                            && !ce.isConnected()),
+                    Duration.ofSeconds(10));
 
             assertTrue(
                     events.stream()
