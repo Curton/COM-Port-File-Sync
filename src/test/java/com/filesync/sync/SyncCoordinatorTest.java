@@ -1947,6 +1947,59 @@ class SyncCoordinatorTest {
     }
 
     @Test
+    void performSync_missingWriteFailureReport_keepsPreSessionBase() throws IOException {
+        // Last session agreed on "base content"; the sender has since rewritten the file. The
+        // receiver's write fails, and its end-of-session report never arrives — today that is
+        // indistinguishable from "no failures".
+        String baseMd5 = FileChangeDetector.manifestMd5("base content".getBytes());
+        String sentMd5 = FileChangeDetector.manifestMd5("sent content".getBytes());
+        seedBase("victim.txt", baseMd5, "base content".length());
+        Files.writeString(new File(syncFolder, "victim.txt").toPath(), "sent content");
+        FileChangeDetector.FileInfo victim =
+                new FileChangeDetector.FileInfo("victim.txt", 12L, 1L, sentMd5);
+        stubSuccessfulBatches();
+        // The failure report never arrives (bounded wait times out, the link dies, or the frame
+        // is unusable): waitForWriteFailures reports that as null, not as "no failures".
+        when(mockProtocol.waitForWriteFailures()).thenReturn(null);
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(victim),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        12L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("victim.txt", victim)));
+
+        // Unknown write outcomes must not advance the base: the receiver still holds the old
+        // content, and a base claiming the new one would flip the next arbitration.
+        SyncStateStore store = stateStore();
+        SyncStateStore.Confirmed base = store.base("victim.txt");
+        assertNotNull(base, "the pre-session base survives a reportless session");
+        assertEquals(baseMd5, base.md5(), "the base must stay at the pre-session state");
+
+        // Next sync against a receiver still holding the base: a normal retransfer, not a
+        // conflict whose KEEP_REMOTE resolution would overwrite the sender's only copy.
+        File receiverDir = tempDir.resolve("receiver").toFile();
+        Files.createDirectories(receiverDir.toPath());
+        Files.writeString(new File(receiverDir, "victim.txt").toPath(), "base content");
+        assertTrue(
+                ConflictAnalyzer.findConflicts(
+                                FileChangeDetector.generateManifest(syncFolder, false, false),
+                                FileChangeDetector.generateManifest(receiverDir, false, false),
+                                syncFolder,
+                                store)
+                        .isEmpty(),
+                "a receiver still on the base must not arbitrate as diverged");
+    }
+
+    @Test
     void handleConflictAdopted_recordsAnnouncedStates() throws IOException {
         String frame = "[[SYNC:CONFLICT_ADOPTED:2:a.txt:aa11:10:sub/b.txt:bb22:20]]";
         SyncProtocol.Message msg = SyncProtocol.parseMessage(frame);

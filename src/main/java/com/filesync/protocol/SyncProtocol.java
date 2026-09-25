@@ -2263,11 +2263,17 @@ public class SyncProtocol {
 
     /**
      * Sender side: bounded wait for the receiver's end-of-session failure report (sent in response
-     * to this side's SYNC_COMPLETE). A timeout — or any other missing report — is treated as "no
-     * failures": the sender then keeps its optimistic confirmations, which at worst costs a
-     * redundant transfer on the next sync instead of a false conflict.
+     * to this side's SYNC_COMPLETE).
      *
-     * @return the reported failure paths (empty when the report did not arrive)
+     * @return the reported failure paths: empty when the report arrived and named none, or null
+     *     when the report did not arrive (bounded wait timed out, link failed, or the frame was
+     *     unusable). A null result must not be read as "no failures": every write's outcome is then
+     *     unknown, so recording the session's optimistic confirmations would advance the base past
+     *     content the receiver may still not hold — the next arbitration would then flag the
+     *     receiver as diverged and a KEEP_REMOTE resolution could overwrite the sender's only copy
+     *     of that content. Callers keep their pre-session base instead.
+     * @throws TransferCancelledException when the peer cancels the session during the wait (a
+     *     cancel is a session outcome, not a lost report)
      */
     public java.util.Set<String> waitForWriteFailures() throws IOException {
         int savedTimeout = timeoutMs;
@@ -2276,13 +2282,10 @@ public class SyncProtocol {
         }
         try {
             SyncProtocol.Message msg = waitForCommand(CMD_WRITE_FAILURES);
-            if (msg == null) {
-                return java.util.Set.of();
+            if (msg == null || msg.getParams().length == 0) {
+                return null; // no usable report within the bound
             }
             String[] params = msg.getParams();
-            if (params.length < 2) {
-                return java.util.Set.of(); // count-only (or empty) report: no failures
-            }
             int count = Math.max(0, Math.min(msg.getParamAsInt(0), params.length - 1));
             java.util.Set<String> paths = new java.util.LinkedHashSet<>();
             for (int i = 0; i < count; i++) {
@@ -2292,8 +2295,10 @@ public class SyncProtocol {
                 }
             }
             return paths;
+        } catch (TransferCancelledException e) {
+            throw e;
         } catch (IOException | RuntimeException e) {
-            return java.util.Set.of();
+            return null; // report lost: the outcome of every write is unknown
         } finally {
             setTimeout(savedTimeout);
         }

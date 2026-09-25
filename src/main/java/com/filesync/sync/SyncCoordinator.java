@@ -1454,7 +1454,8 @@ public class SyncCoordinator {
             // instance to the protocol layer would make the report and the reset race.
             protocol.sendWriteFailures(Set.copyOf(receiverWriteFailures));
         } catch (IOException e) {
-            // Best-effort: a missing report is treated by the sender as "no failures".
+            // Best-effort: without the report the sender cannot know which writes landed, so it
+            // keeps its pre-session base rather than optimistically confirming anything.
         }
         receiverWriteFailures.clear();
         syncing.set(false);
@@ -2285,17 +2286,29 @@ public class SyncCoordinator {
             protocol.sendSyncComplete();
             // The receiver reports the paths it could not write (almost never any): subtract them
             // from the optimistic record below, so a locked or corrupt target diverges no further
-            // instead of being remembered as synced.
+            // instead of being remembered as synced. A missing report (null) leaves every write's
+            // outcome unknown: recording the optimistic base would advance it past content the
+            // receiver may not hold, flipping the next arbitration into a false conflict whose
+            // KEEP_REMOTE resolution could overwrite the sender's only copy. Keep the pre-session
+            // base instead — genuinely failed paths then retransfer silently against the old base.
             Set<String> writeFailures = protocol.waitForWriteFailures();
-            if (!writeFailures.isEmpty()) {
+            if (writeFailures == null) {
                 eventBus.post(
                         new SyncEvent.LogEvent(
-                                "Receiver could not write "
-                                        + writeFailures.size()
-                                        + " file(s); they will be retransmitted on the next"
-                                        + " sync"));
+                                "No write-failure report from the receiver; keeping the previous"
+                                        + " sync state (failed writes, if any, will be"
+                                        + " retransmitted)"));
+            } else {
+                if (!writeFailures.isEmpty()) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Receiver could not write "
+                                            + writeFailures.size()
+                                            + " file(s); they will be retransmitted on the next"
+                                            + " sync"));
+                }
+                recordSenderBase(syncPlan, writeFailures);
             }
-            recordSenderBase(syncPlan, writeFailures);
             eventBus.post(new SyncEvent.LogEvent("Sync completed successfully"));
             eventBus.post(new SyncEvent.TransferCompleteEvent());
             eventBus.post(new SyncEvent.SyncCompleteEvent());
