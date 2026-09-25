@@ -1,6 +1,5 @@
 package com.filesync.ui;
 
-import com.filesync.sync.ConflictAnalyzer;
 import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.GitStatusUtil;
@@ -1326,13 +1325,13 @@ public class SyncPreviewRenderer {
      * @return true if all conflicts were resolved (user did not cancel), false if user cancelled
      */
     /**
-     * Resolve conflicts for selected files in one unified window. Fetches remote content for text
-     * conflicts, then shows ConflictResolutionDialog with Next/Previous navigation and progress
-     * indicator.
+     * Resolve conflicts for selected files in one unified window: opens ConflictResolutionDialog
+     * with Next/Previous navigation and a progress indicator.
      *
-     * <p>The fetch runs on a worker thread: it is a blocking serial round trip per file (a 10 s
-     * timeout each, possibly a whole XMODEM transfer), so doing it on the event dispatch thread
-     * would freeze the UI for as long as the slowest answer takes.
+     * <p>Remote content is fetched lazily, one conflict at a time as its card is shown, on a worker
+     * thread - it is a blocking serial round trip per file (a 10 s timeout each, possibly a whole
+     * XMODEM transfer), so doing it on the event dispatch thread would freeze the UI for as long as
+     * the slowest answer takes.
      *
      * @param plan the sync plan with conflicts
      * @param previewModel the table model to refresh after resolution
@@ -1387,38 +1386,20 @@ public class SyncPreviewRenderer {
             return;
         }
 
-        SwingWorker<List<ConflictInfo>, Void> fetchWorker =
+        // The dialog is modal, so it has to be opened on the event dispatch thread; calling into
+        // this method from a worker (the preview flow does) hops there through done().
+        SwingWorker<Void, Void> dialogWorker =
                 new SwingWorker<>() {
                     @Override
-                    protected List<ConflictInfo> doInBackground() {
-                        List<ConflictInfo> fetched = new ArrayList<>(toResolve.size());
-                        for (int i = 0; i < toResolve.size(); i++) {
-                            ConflictInfo conflict = toResolve.get(i);
-                            logSink.accept(
-                                    "Fetching remote version "
-                                            + (i + 1)
-                                            + " of "
-                                            + toResolve.size()
-                                            + ": "
-                                            + conflict.getPath());
-                            byte[] remoteContent =
-                                    effectiveResolver.fetchRemoteContent(conflict.getPath());
-                            if (remoteContent != null) {
-                                conflict.setRemoteContent(remoteContent);
-                            }
-                            fetched.add(conflict);
-                        }
-                        return fetched;
+                    protected Void doInBackground() {
+                        return null;
                     }
 
                     @Override
                     protected void done() {
-                        boolean resolved;
                         try {
-                            resolved = finishConflictResolution(get(), previewModel, rows);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            resolved = false;
+                            finishConflictResolution(
+                                    toResolve, previewModel, rows, effectiveResolver, onComplete);
                         } catch (Exception e) {
                             Throwable cause = e.getCause() != null ? e.getCause() : e;
                             logSink.accept(
@@ -1426,56 +1407,101 @@ public class SyncPreviewRenderer {
                                             + (cause.getMessage() != null
                                                     ? cause.getMessage()
                                                     : cause.getClass().getSimpleName()));
-                            resolved = false;
+                            onComplete.accept(false);
                         }
-                        onComplete.accept(resolved);
                     }
                 };
-        fetchWorker.execute();
+        dialogWorker.execute();
     }
 
     /**
-     * Filter the trivial conflicts, show the resolution dialog for the rest, and refresh the
-     * preview table. Runs on the event dispatch thread once the remote content is available.
+     * Open the unified conflict resolution dialog. Extracted as a seam: the dialog is a modal
+     * window and cannot be created where no display is available, so tests substitute a stub that
+     * models a completed resolution.
      */
-    private boolean finishConflictResolution(
+    protected ConflictResolutionDialog.Result showConflictDialog(
+            List<ConflictInfo> conflicts, ConflictResolver resolver) {
+        return ConflictResolutionDialog.showDialog(
+                owner, conflicts, resolver != null ? resolver::fetchRemoteContent : null);
+    }
+
+    /**
+     * Show the unified conflict dialog for the collected conflicts, then settle the remote content
+     * its resolutions still need. Invokes {@code onComplete} exactly once, on the event dispatch
+     * thread.
+     *
+     * <p>The dialog fetches the remote version of a text conflict lazily, when its card is shown,
+     * and needs no content at all for a binary card. A "Remote version" resolution still writes
+     * that version to the local file, so its bytes are fetched here, after the dialog closes and
+     * off the event dispatch thread like every other blocking round trip.
+     */
+    private void finishConflictResolution(
             List<ConflictInfo> toResolve,
             DefaultTableModel previewModel,
-            List<SyncPreviewRow> rows) {
-        // Filter out trivial conflicts (whitespace-only changes) after remote content is available
-        List<ConflictInfo> nonTrivial = new ArrayList<>();
-        ConflictAnalyzer.filterTrivialConflicts(toResolve);
-        for (ConflictInfo conflict : toResolve) {
-            if (conflict.isResolved()
-                    && conflict.getResolution() == ConflictInfo.Resolution.KEEP_LOCAL
-                    && !conflict.hasMeaningfulDifferences()) {
-                // Trivial conflict already marked KEEP_LOCAL — release remote content
-                conflict.setRemoteContent(null);
-            } else {
-                nonTrivial.add(conflict);
-            }
-        }
-
-        if (nonTrivial.isEmpty()) {
-            return true; // All conflicts were trivial, nothing to resolve
-        }
-
-        final ConflictResolutionDialog.Result[] resultHolder =
-                new ConflictResolutionDialog.Result[1];
+            List<SyncPreviewRow> rows,
+            ConflictResolver resolver,
+            java.util.function.Consumer<Boolean> onComplete) {
+        ConflictResolutionDialog.Result dialogResult;
         try {
-            resultHolder[0] = ConflictResolutionDialog.showDialog(owner, nonTrivial);
+            dialogResult = showConflictDialog(toResolve, resolver);
         } catch (Exception e) {
             throw new RuntimeException(
                     "Failed to show conflict resolution dialog: " + e.getMessage(), e);
         }
-        ConflictResolutionDialog.Result result = resultHolder[0];
-        if (result != ConflictResolutionDialog.Result.COMPLETED) {
-            return false;
+        if (dialogResult != ConflictResolutionDialog.Result.COMPLETED) {
+            onComplete.accept(false);
+            return;
         }
 
-        // Refresh table to show resolved labels
-        refreshConflictTypeLabels(previewModel, rows);
-        return true;
+        List<ConflictInfo> needRemoteContent = new ArrayList<>();
+        for (ConflictInfo conflict : toResolve) {
+            if (conflict.getResolution() == ConflictInfo.Resolution.KEEP_REMOTE
+                    && conflict.getApplyTarget() == ConflictInfo.ApplyTarget.BOTH
+                    && conflict.getRemoteContent() == null) {
+                needRemoteContent.add(conflict);
+            }
+        }
+        if (needRemoteContent.isEmpty()) {
+            refreshConflictTypeLabels(previewModel, rows);
+            onComplete.accept(true);
+            return;
+        }
+
+        SwingWorker<Void, Void> fetchWorker =
+                new SwingWorker<>() {
+                    @Override
+                    protected Void doInBackground() {
+                        for (ConflictInfo conflict : needRemoteContent) {
+                            logSink.accept(
+                                    "Fetching remote version for " + conflict.getPath() + "...");
+                            byte[] content =
+                                    resolver != null
+                                            ? resolver.fetchRemoteContent(conflict.getPath())
+                                            : null;
+                            if (content != null) {
+                                conflict.setRemoteContent(content);
+                            } else {
+                                // Local writes and the adopted-state announcement both need the
+                                // remote bytes: without them the resolution cannot be honored, so
+                                // it degrades to SKIP instead of transferring the version the user
+                                // explicitly rejected.
+                                conflict.setResolution(ConflictInfo.Resolution.SKIP);
+                                logSink.accept(
+                                        "Remote version of "
+                                                + conflict.getPath()
+                                                + " unavailable; skipping it instead");
+                            }
+                        }
+                        return null;
+                    }
+
+                    @Override
+                    protected void done() {
+                        refreshConflictTypeLabels(previewModel, rows);
+                        onComplete.accept(true);
+                    }
+                };
+        fetchWorker.execute();
     }
 
     /** Interface for fetching remote file content needed for conflict resolution. */

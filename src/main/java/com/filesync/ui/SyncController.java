@@ -183,9 +183,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     /**
      * Start Sync after the folder-mapping preflight. The manifest roundtrip runs here first so the
      * operations that would otherwise destroy receiver-side data silently are confirmed by the
-     * user: conflicts (an unresolved conflict defaults to "local wins", overwriting the receiver's
-     * newer version) and strict-mode deletions. The computed plan is handed to {@code initiateSync}
-     * so manifests are not generated a second time.
+     * user: conflicts (an unresolved conflict defaults to "local wins", discarding the receiver's
+     * version) and strict-mode deletions. The computed plan is handed to {@code initiateSync} so
+     * manifests are not generated a second time.
      */
     private void doStartSync() {
         logController.log("[DEBUG] doStartSync: preparing plan for confirmation");
@@ -255,8 +255,8 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     /**
      * Warning shown when a direct Start Sync would destroy receiver-side data the plain flow never
-     * mentions: the receiver's newer version of conflicted files (an unresolved conflict defaults
-     * to "local wins") and strict-mode deletions. Returns true when the user confirmed.
+     * mentions: the receiver's version of conflicted files (an unresolved conflict defaults to
+     * "local wins") and strict-mode deletions. Returns true when the user confirmed.
      */
     private boolean confirmDestructiveSync(SyncPreviewPlan plan) {
         List<ConflictInfo> conflicts = plan.getConflicts();
@@ -268,7 +268,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         StringBuilder msg = new StringBuilder();
         msg.append("This sync will:\n");
         if (!conflicts.isEmpty()) {
-            msg.append("  - overwrite the receiver's newer version of ")
+            msg.append("  - overwrite the receiver's version of ")
                     .append(conflicts.size())
                     .append(conflicts.size() == 1 ? " file\n" : " files\n");
         }
@@ -280,7 +280,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         }
         msg.append('\n');
         if (!conflicts.isEmpty()) {
-            msg.append("Conflicts (receiver's newer version will be lost):\n");
+            msg.append("Conflicts (the receiver's version will be lost):\n");
             appendPathList(msg, conflicts.stream().map(ConflictInfo::getPath).toList());
             msg.append('\n');
         }

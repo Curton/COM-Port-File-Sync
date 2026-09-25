@@ -63,6 +63,22 @@ public class TextMergePanel extends JPanel {
     private java.util.List<DiffHunk> hunks;
     private ConflictInfo currentConflict;
     private final boolean mergeAvailable;
+    private final java.util.List<Runnable> selectionChangeListeners = new ArrayList<>();
+
+    /**
+     * Register a callback for a change of the selected resolution. The unified dialog uses it to
+     * re-evaluate the controls that depend on the current choice (e.g. "use this for all
+     * remaining").
+     */
+    public void addSelectionChangeListener(Runnable listener) {
+        selectionChangeListeners.add(listener);
+    }
+
+    private void fireSelectionChanged() {
+        for (Runnable listener : selectionChangeListeners) {
+            listener.run();
+        }
+    }
 
     public TextMergePanel(ConflictInfo conflict) {
         setLayout(new BorderLayout(8, 8));
@@ -183,6 +199,7 @@ public class TextMergePanel extends JPanel {
                     mergeTextArea.setText(buildFullFileGitStyleMergeContent(conflict));
                     revalidate();
                     repaint();
+                    fireSelectionChanged();
                 });
 
         if (!mergeAvailable) {
@@ -191,8 +208,16 @@ public class TextMergePanel extends JPanel {
                     "The local version could not be loaded, so it cannot be merged.");
         }
 
-        keepLocalRadio.addActionListener(e -> mergePanel.setVisible(false));
-        keepRemoteRadio.addActionListener(e -> mergePanel.setVisible(false));
+        keepLocalRadio.addActionListener(
+                e -> {
+                    mergePanel.setVisible(false);
+                    fireSelectionChanged();
+                });
+        keepRemoteRadio.addActionListener(
+                e -> {
+                    mergePanel.setVisible(false);
+                    fireSelectionChanged();
+                });
 
         choicePanel.add(new JLabel("Resolution:"));
         choicePanel.add(keepLocalRadio);
@@ -460,6 +485,24 @@ public class TextMergePanel extends JPanel {
             return mergeTextArea.getText();
         }
         return null;
+    }
+
+    // Package-private accessors for the choice controls: the dialog drives them in tests to check
+    // how a selection maps onto a resolution and an apply target.
+    javax.swing.JRadioButton getKeepLocalRadio() {
+        return keepLocalRadio;
+    }
+
+    javax.swing.JRadioButton getKeepRemoteRadio() {
+        return keepRemoteRadio;
+    }
+
+    javax.swing.JRadioButton getMergeRadio() {
+        return mergeRadio;
+    }
+
+    javax.swing.JTextArea getMergeTextArea() {
+        return mergeTextArea;
     }
 
     /** Whether the manual merge option is offered for this conflict. */

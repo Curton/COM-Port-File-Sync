@@ -26,13 +26,16 @@ COM Port File Sync enables reliable file transfer between two machines connected
 - **Fast Mode** - Skips full content comparison when building the manifest, which speeds up preparation on large folders, at the cost of possibly missing a change. It is **enabled by default**. It does not change transfer speed in any way - see [Troubleshooting](#troubleshooting)
 
 ### Conflict Resolution
-When the same file has been modified on both sides, the sync stops and asks instead of silently overwriting:
+When both sides changed the same file since the last successful sync, the sync stops and asks instead of silently overwriting:
 
 - **Unified Conflict Dialog** - One window walks every conflict with Previous / Next navigation and a `Conflict 2/5` progress counter; cancelling aborts the whole resolution
+- **Last Synced State Decides** - "Both sides" means neither side still holds the version the last successful sync left behind. Only the sender changed a file? It is an ordinary transfer, no dialog. The receiver changed it too, or there is no recorded history (a first pairing, or a wiped cache)? It is a conflict. In Fast Mode binaries are not hashed, and timestamps decide there instead
 - **Text Conflicts** - Local and remote panes side by side with Previous/Next Change navigation between change regions, and an editable merged version you can hand-tune. The panes show one change region at a time, not the whole file
 - **Binary Conflicts** - Size, modified time, and the first 8 characters of the MD5 for both sides (or `N/A (fast mode)`), so the choice is informed
 - **Resolutions** - Text files offer **Keep Local**, **Keep Remote**, or **Merge**. Binary files offer **Local version**, **Remote version**, or **Skip (Do Not Transfer)**. Merge is text-only and Skip is binary-only; they are never offered together
 - **The Chosen Version Decides What Gets Written** - There is no separate apply-target control. Keeping the local version overwrites the receiver and leaves your own file alone; keeping the remote version overwrites your local file too; merging writes the merged text to both. A binary Skip leaves both sides untouched
+- **Use This For All Remaining** - Applies the current resolution to every conflict still queued, so a large queue does not have to be walked one card at a time. Disabled while Merge is selected, since a merge is built per file
+- **Remote Versions Are Fetched Lazily** - A text conflict's remote version is downloaded only when its card is shown; a binary card needs no content to choose. One round trip at a time, so a long queue never stalls the start of the resolution
 - **Merge Can Be Unavailable** - If the local file is larger than 1 MiB or cannot be read, its content is never loaded, and the Merge option is disabled with an explanation. Only Keep Local and Keep Remote remain, so a merge can never silently discard the local version
 - **Whitespace-Only Differences Are Not Surfaced** - A text conflict whose differences are purely whitespace or blank lines is resolved automatically in favour of the sender's version without opening the dialog. Only conflicts with meaningful differences reach the queue
 - **Partial Copies Are Completed** - A receiver copy that merely stops short of the sender's version is finished off instead of being flagged as a conflict. This requires a receiver-side MD5 to verify the prefix, so it does not apply in Fast Mode, which leaves binaries unhashed
@@ -155,14 +158,15 @@ The preview is a dry run with respect to your files: no planned sync operation i
 
 ### Resolving Conflicts
 
-When both sides changed the same file, a **Resolve Conflicts** dialog appears:
+When both sides changed the same file since the last successful sync, a **Resolve Conflicts** dialog appears:
 
 1. The header shows your position in the queue (for example, `Conflict 2/5`) and the file path.
 2. Text files open with local and remote panes showing one change region at a time, Previous/Next Change navigation, and an editable merged version. Binary files show size, modified time and an MD5 prefix for both sides.
 3. Choose a resolution: **Keep Local / Keep Remote / Merge** for text, **Local version / Remote version / Skip** for binary. Merge is disabled when the local file could not be read.
 4. Use **Previous** / **Next** to walk the queue; the last page's button becomes **Done**. **Cancel** aborts the entire resolution and restores the sync controls.
+5. **Use this for all remaining** applies the current resolution to every conflict still in the queue, so a queue of fifty files does not have to be walked one by one. It is disabled while **Merge** is selected, because a merge is built per file.
 
-Conflicts that differ only in whitespace or blank lines never reach this dialog - they are resolved in favour of the sender's version automatically.
+Each conflict's remote version is fetched only when its card is shown, one at a time - a text conflict you never open is never downloaded, and a binary card needs no content at all. Conflicts that differ only in whitespace or blank lines are resolved in favour of the sender's version automatically and never reach the dialog. If the remote version of a chosen binary "Remote version" cannot be fetched, that file is skipped rather than overwritten with the local version.
 
 ## Known Limitations
 
@@ -188,7 +192,7 @@ Conflicts that differ only in whitespace or blank lines never reach this dialog 
 - **Permission errors**: Ensure write permissions on the sync folder
 - **A destination file is locked**: another program holds it open. It is queued with retry / skip / skip-all controls; close the file and retry, or skip it
 - **A transfer ended with a read error on the sender**: the source file could not be read during transfer. This can end the session rather than skipping the one file
-- **Unexpected conflicts**: both sides changed the file after the last sync, and the receiver's copy is the newer one. If only the sender changed, that is an ordinary transfer and no conflict is raised
+- **Unexpected conflicts**: both sides changed the file since the last successful sync, so neither version can be adopted automatically. If only the sender changed it, that is an ordinary transfer and no conflict is raised. A first sync between two folders - or a wiped cache - has no recorded history, so every differing file goes through the dialog once before later syncs arbitrate silently
 - **"Select Changes (git)" selects nothing**: either git could not be run - the reason is then shown next to the button and logged - or it ran successfully but none of the changed paths appear in the preview, which happens when they are filtered out of the sync folder or lie outside it
 
 ### Virtual COM Port Setup (Windows)

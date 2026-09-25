@@ -5,6 +5,7 @@ import com.filesync.sync.FileChangeDetector;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import javax.swing.ButtonGroup;
 import javax.swing.JLabel;
@@ -26,6 +27,22 @@ public class BinaryConflictPanel extends JPanel {
     private final JRadioButton keepLocalRadio;
     private final JRadioButton keepRemoteRadio;
     private final JRadioButton skipRadio;
+    private final java.util.List<Runnable> selectionChangeListeners = new ArrayList<>();
+
+    /**
+     * Register a callback for a change of the selected resolution. The unified dialog uses it to
+     * re-evaluate the controls that depend on the current choice (e.g. "use this for all
+     * remaining").
+     */
+    public void addSelectionChangeListener(Runnable listener) {
+        selectionChangeListeners.add(listener);
+    }
+
+    private void fireSelectionChanged() {
+        for (Runnable listener : selectionChangeListeners) {
+            listener.run();
+        }
+    }
 
     public BinaryConflictPanel(ConflictInfo conflict) {
         setLayout(new BorderLayout(8, 8));
@@ -53,6 +70,10 @@ public class BinaryConflictPanel extends JPanel {
         group.add(keepLocalRadio);
         group.add(keepRemoteRadio);
         group.add(skipRadio);
+
+        for (JRadioButton radio : new JRadioButton[] {keepLocalRadio, keepRemoteRadio, skipRadio}) {
+            radio.addActionListener(e -> fireSelectionChanged());
+        }
 
         choicePanel.add(new JLabel("Use:"));
         choicePanel.add(keepLocalRadio);
@@ -111,6 +132,20 @@ public class BinaryConflictPanel extends JPanel {
             return Resolution.SKIP;
         }
         return Resolution.KEEP_LOCAL;
+    }
+
+    // Package-private accessors for the choice radios: the dialog drives them in tests to check
+    // how a selection maps onto a resolution and an apply target.
+    javax.swing.JRadioButton getKeepLocalRadio() {
+        return keepLocalRadio;
+    }
+
+    javax.swing.JRadioButton getKeepRemoteRadio() {
+        return keepRemoteRadio;
+    }
+
+    javax.swing.JRadioButton getSkipRadio() {
+        return skipRadio;
     }
 
     /**

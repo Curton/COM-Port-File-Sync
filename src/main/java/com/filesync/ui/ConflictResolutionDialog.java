@@ -1,20 +1,34 @@
 package com.filesync.ui;
 
+import com.filesync.sync.ConflictAnalyzer;
 import com.filesync.sync.ConflictInfo;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.util.ArrayList;
+import java.util.List;
 import javax.swing.JButton;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.SwingWorker;
 
 /**
  * Unified dialog for resolving multiple file conflicts in one window. Shows one conflict at a time
  * with Next/Previous navigation and progress (e.g. 2/5). User can cancel at any time to abort the
  * entire resolution.
+ *
+ * <p>Cards are built on demand: a conflict's panel is only constructed when its card is first
+ * shown, and the remote version of a text conflict is only fetched at that moment. Fetching is a
+ * blocking serial round trip per file (a 10 s timeout each, possibly a whole XMODEM transfer), so a
+ * queue of fifty conflicts must not pay for all fifty up front — it pays for the ones the user
+ * actually walks through, one at a time, off the event dispatch thread. Binary conflicts need no
+ * content at all: their panels show what the manifests already carry (size, modified time, MD5
+ * prefix). Text conflicts that turn out to differ only in whitespace are resolved locally and
+ * dropped from the queue without ever showing a card, which is what the pre-fetch filter used to
+ * guarantee.
  */
 public class ConflictResolutionDialog extends JDialog {
 
@@ -25,10 +39,35 @@ public class ConflictResolutionDialog extends JDialog {
         CANCELLED
     }
 
+    /**
+     * Fetches the remote version of a path. Contract-blocking: calls happen on a worker thread,
+     * never on the event dispatch thread.
+     */
+    public interface RemoteContentFetcher {
+        byte[] fetch(String path);
+    }
+
+    private static final String LOADING_TEXT = "Loading remote version...";
+
     private Result result = Result.CANCELLED;
-    private final java.util.List<ConflictInfo> conflicts;
-    private final java.util.List<JPanel> conflictPanels;
+
+    /** One queue entry: the conflict plus the state of its (possibly not yet built) card. */
+    private static final class Card {
+        private final ConflictInfo conflict;
+        private final String layoutName;
+        private JPanel panel;
+        private boolean remoteContentRequested;
+
+        private Card(ConflictInfo conflict, String layoutName) {
+            this.conflict = conflict;
+            this.layoutName = layoutName;
+        }
+    }
+
+    private final RemoteContentFetcher remoteContentFetcher;
+    private final List<Card> cards = new ArrayList<>();
     private int currentIndex = 0;
+    private int nextLayoutName = 0;
 
     private final JLabel progressLabel;
     private final JLabel pathLabel;
@@ -36,11 +75,17 @@ public class ConflictResolutionDialog extends JDialog {
     private final CardLayout cardLayout;
     private final JButton previousButton;
     private final JButton nextButton;
+    private final JButton applyToAllButton;
 
-    public ConflictResolutionDialog(JFrame parent, java.util.List<ConflictInfo> conflicts) {
+    public ConflictResolutionDialog(
+            JFrame parent,
+            List<ConflictInfo> conflicts,
+            RemoteContentFetcher remoteContentFetcher) {
         super(parent, "Resolve Conflicts", true);
-        this.conflicts = conflicts;
-        this.conflictPanels = new java.util.ArrayList<>(conflicts.size());
+        this.remoteContentFetcher = remoteContentFetcher;
+        for (int i = 0; i < conflicts.size(); i++) {
+            cards.add(new Card(conflicts.get(i), "conflict_" + nextLayoutName++));
+        }
 
         setMinimumSize(new Dimension(920, 720));
         setLocationRelativeTo(parent);
@@ -48,16 +93,8 @@ public class ConflictResolutionDialog extends JDialog {
         cardLayout = new CardLayout();
         cardPanel = new JPanel(cardLayout);
 
-        for (int i = 0; i < conflicts.size(); i++) {
-            ConflictInfo c = conflicts.get(i);
-            JPanel panel = c.isBinary() ? new BinaryConflictPanel(c) : new TextMergePanel(c);
-            conflictPanels.add(panel);
-            cardPanel.add(panel, "conflict_" + i);
-        }
-
         progressLabel = new JLabel();
         pathLabel = new JLabel();
-        updateLabels();
 
         JPanel headerPanel = new JPanel(new BorderLayout(8, 4));
         headerPanel.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 0, 8, 0));
@@ -70,6 +107,9 @@ public class ConflictResolutionDialog extends JDialog {
         nextButton = new JButton("Next");
         nextButton.addActionListener(e -> goNext());
 
+        applyToAllButton = new JButton("Use this for all remaining");
+        applyToAllButton.addActionListener(e -> applyCurrentResolutionToAllRemaining());
+
         JButton cancelButton = new JButton("Cancel");
         cancelButton.addActionListener(
                 e -> {
@@ -79,6 +119,7 @@ public class ConflictResolutionDialog extends JDialog {
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         buttonPanel.add(cancelButton);
+        buttonPanel.add(applyToAllButton);
         buttonPanel.add(previousButton);
         buttonPanel.add(nextButton);
 
@@ -89,48 +130,264 @@ public class ConflictResolutionDialog extends JDialog {
         mainPanel.add(buttonPanel, BorderLayout.SOUTH);
 
         setContentPane(mainPanel);
+        showCard(0);
+    }
+
+    /**
+     * Show the unified conflict resolution dialog.
+     *
+     * @param parent the parent frame
+     * @param conflicts list of conflicts to resolve
+     * @param remoteContentFetcher used to fetch the remote version of a text conflict when its card
+     *     is shown; may be null, in which case panels are built from whatever content they already
+     *     carry
+     * @return COMPLETED if user resolved all, CANCELLED if user cancelled
+     */
+    public static Result showDialog(
+            JFrame parent,
+            List<ConflictInfo> conflicts,
+            RemoteContentFetcher remoteContentFetcher) {
+        if (conflicts == null || conflicts.isEmpty()) {
+            return Result.COMPLETED;
+        }
+        ConflictResolutionDialog dialog =
+                new ConflictResolutionDialog(parent, conflicts, remoteContentFetcher);
+        dialog.setVisible(true);
+        return dialog.getResult();
+    }
+
+    // ========== card lifecycle ==========
+
+    /**
+     * Make the card at {@code index} the visible one, building it (and starting its remote fetch)
+     * on first view.
+     */
+    private void showCard(int index) {
+        if (index < 0 || index >= cards.size()) {
+            return;
+        }
+        currentIndex = index;
+        updateLabels();
+        updateButtonStates();
+
+        Card card = cards.get(index);
+        if (card.panel != null) {
+            cardLayout.show(cardPanel, card.layoutName);
+            return;
+        }
+        if (card.conflict.isBinary()) {
+            // A binary card shows manifest metadata only: no remote bytes are needed to choose.
+            attachPanel(card, new BinaryConflictPanel(card.conflict), true);
+            return;
+        }
+        if (card.remoteContentRequested) {
+            // The fetch is in flight (or came back empty). The placeholder stays until the worker
+            // replaces it; navigating back later finds the built panel.
+            cardLayout.show(cardPanel, card.layoutName);
+            return;
+        }
+        card.remoteContentRequested = true;
+        if (card.conflict.getRemoteContent() != null || remoteContentFetcher == null) {
+            attachPanel(card, new TextMergePanel(card.conflict), true);
+        } else {
+            attachPanel(card, placeholder(LOADING_TEXT), true);
+            startRemoteFetch(card);
+        }
+    }
+
+    private void startRemoteFetch(Card card) {
+        new SwingWorker<byte[], Void>() {
+            @Override
+            protected byte[] doInBackground() {
+                return remoteContentFetcher.fetch(card.conflict.getPath());
+            }
+
+            @Override
+            protected void done() {
+                byte[] content = null;
+                try {
+                    content = get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (java.util.concurrent.ExecutionException e) {
+                    // An unreachable peer leaves the conflict with the metadata the manifests
+                    // already carry; the panel is built from that so the user can still choose.
+                }
+                onRemoteContentArrived(card, content);
+            }
+        }.execute();
+    }
+
+    private void onRemoteContentArrived(Card card, byte[] content) {
+        // The card may have moved while the fetch ran (another one was dropped), so look its
+        // position up rather than trusting the one captured when the fetch started.
+        int index = cards.indexOf(card);
+        if (index < 0) {
+            return;
+        }
+        if (content != null) {
+            card.conflict.setRemoteContent(content);
+            // With both sides in hand, a difference that is pure whitespace or blank lines never
+            // deserved a page of its own: resolve it for the sender and drop the card.
+            List<ConflictInfo> single = new ArrayList<>();
+            single.add(card.conflict);
+            ConflictAnalyzer.filterTrivialConflicts(single);
+            if (card.conflict.getResolution() == ConflictInfo.Resolution.KEEP_LOCAL
+                    && !card.conflict.hasMeaningfulDifferences()) {
+                dropCard(index);
+                return;
+            }
+        }
+        if (card.panel == null) {
+            // The user may have walked on while the fetch was running; only bring the finished card
+            // to the front when it is the one they are looking at.
+            attachPanel(card, new TextMergePanel(card.conflict), index == currentIndex);
+        }
+    }
+
+    /**
+     * Remove a card from the queue (a trivial conflict resolved without the user). Shows the card
+     * that takes its place, or the previous one when it was the last, or finishes when the queue
+     * ran dry.
+     */
+    private void dropCard(int index) {
+        if (index < 0 || index >= cards.size()) {
+            return;
+        }
+        Card removed = cards.remove(index);
+        if (removed.panel != null) {
+            cardPanel.remove(removed.panel);
+        }
+        if (cards.isEmpty()) {
+            result = Result.COMPLETED;
+            dispose();
+            return;
+        }
+        if (index < currentIndex) {
+            currentIndex--; // the current card shifted down
+        }
+        // When the current card itself was dropped, the one that took its place now sits at the
+        // same index; when it was the last card, clamp back to the new last.
+        currentIndex = Math.min(currentIndex, cards.size() - 1);
+        showCard(currentIndex);
+    }
+
+    private void attachPanel(Card card, JPanel panel, boolean show) {
+        if (card.panel != null) {
+            cardPanel.remove(card.panel);
+        }
+        card.panel = panel;
+        if (panel instanceof BinaryConflictPanel) {
+            ((BinaryConflictPanel) panel).addSelectionChangeListener(this::updateButtonStates);
+        } else if (panel instanceof TextMergePanel) {
+            ((TextMergePanel) panel).addSelectionChangeListener(this::updateButtonStates);
+        }
+        cardPanel.add(panel, card.layoutName);
+        cardPanel.revalidate();
+        cardPanel.repaint();
+        if (show) {
+            cardLayout.show(cardPanel, card.layoutName);
+        }
         updateButtonStates();
     }
 
+    private JPanel placeholder(String message) {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.add(new JLabel(message, JLabel.CENTER), BorderLayout.CENTER);
+        return panel;
+    }
+
+    // ========== header and buttons ==========
+
     private void updateLabels() {
-        int total = conflicts.size();
-        int current = currentIndex + 1;
-        progressLabel.setText("Conflict " + current + "/" + total);
+        int total = cards.size();
+        progressLabel.setText("Conflict " + (currentIndex + 1) + "/" + total);
         progressLabel.setFont(progressLabel.getFont().deriveFont(java.awt.Font.BOLD));
-        if (currentIndex < conflicts.size()) {
-            pathLabel.setText(conflicts.get(currentIndex).getPath());
+        if (currentIndex < cards.size()) {
+            pathLabel.setText(cards.get(currentIndex).conflict.getPath());
         }
     }
 
     private void updateButtonStates() {
         previousButton.setEnabled(currentIndex > 0);
-        if (currentIndex < conflicts.size() - 1) {
-            nextButton.setText("Next");
-        } else {
-            nextButton.setText("Done");
-        }
+        nextButton.setText(currentIndex < cards.size() - 1 ? "Next" : "Done");
+        applyToAllButton.setEnabled(canApplyCurrentResolutionToAllRemaining());
     }
 
-    private void applyCurrentResolution() {
-        ConflictInfo conflict = conflicts.get(currentIndex);
-        JPanel panel = conflictPanels.get(currentIndex);
+    /**
+     * "Use this for all remaining" only makes sense when the current choice is content-free: a
+     * merge is built per file, so there is no merged text to hand to the conflicts whose merge view
+     * was never opened. Nothing to apply to is another reason to stay disabled.
+     */
+    private boolean canApplyCurrentResolutionToAllRemaining() {
+        if (currentIndex >= cards.size() - 1) {
+            return false;
+        }
+        Card card = cards.get(currentIndex);
+        return card.panel instanceof BinaryConflictPanel || card.panel instanceof TextMergePanel
+                ? currentResolution() != ConflictInfo.Resolution.MERGE
+                : false;
+    }
 
-        if (conflict.isBinary()) {
+    private ConflictInfo.Resolution currentResolution() {
+        JPanel panel = cards.get(currentIndex).panel;
+        if (panel instanceof BinaryConflictPanel) {
+            return toConflictInfoResolution(((BinaryConflictPanel) panel).getResolution());
+        }
+        if (panel instanceof TextMergePanel) {
+            return toConflictInfoResolution(((TextMergePanel) panel).getResolution());
+        }
+        return ConflictInfo.Resolution.UNRESOLVED;
+    }
+
+    // ========== resolution bookkeeping ==========
+
+    private void applyCurrentResolution() {
+        if (currentIndex >= cards.size()) {
+            return;
+        }
+        Card card = cards.get(currentIndex);
+        JPanel panel = card.panel;
+
+        if (panel instanceof BinaryConflictPanel) {
             BinaryConflictPanel bp = (BinaryConflictPanel) panel;
-            conflict.setResolution(toConflictInfoResolution(bp.getResolution()));
-            conflict.setApplyTarget(bp.getApplyTarget());
-        } else {
+            card.conflict.setResolution(toConflictInfoResolution(bp.getResolution()));
+            card.conflict.setApplyTarget(bp.getApplyTarget());
+        } else if (panel instanceof TextMergePanel) {
             TextMergePanel tp = (TextMergePanel) panel;
             TextMergePanel.Resolution r = tp.getResolution();
-            conflict.setResolution(toConflictInfoResolution(r));
-            conflict.setApplyTarget(tp.getApplyTarget());
+            card.conflict.setResolution(toConflictInfoResolution(r));
+            card.conflict.setApplyTarget(tp.getApplyTarget());
             if (r == TextMergePanel.Resolution.MERGE) {
                 String merged = tp.getMergedContent();
                 if (merged != null) {
-                    conflict.setMergedContent(merged);
+                    card.conflict.setMergedContent(merged);
                 }
             }
+        } else {
+            // The card's remote version is still in flight. Leaving it records the default the
+            // sync would apply anyway, so every conflict carries an explicit resolution once the
+            // dialog closes.
+            card.conflict.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+            card.conflict.setApplyTarget(ConflictInfo.ApplyTarget.REMOTE_ONLY);
         }
+    }
+
+    /**
+     * Hand the current resolution to every conflict after this one, without opening their cards.
+     * Their content-dependent choices (a merge) are excluded by the button's enabled state.
+     */
+    private void applyCurrentResolutionToAllRemaining() {
+        applyCurrentResolution();
+        ConflictInfo.Resolution resolution = currentResolution();
+        ConflictInfo.ApplyTarget applyTarget = cards.get(currentIndex).conflict.getApplyTarget();
+        for (int i = currentIndex + 1; i < cards.size(); i++) {
+            ConflictInfo conflict = cards.get(i).conflict;
+            conflict.setResolution(resolution);
+            conflict.setApplyTarget(applyTarget);
+        }
+        result = Result.COMPLETED;
+        dispose();
     }
 
     private ConflictInfo.Resolution toConflictInfoResolution(BinaryConflictPanel.Resolution r) {
@@ -152,41 +409,21 @@ public class ConflictResolutionDialog extends JDialog {
     private void goPrevious() {
         applyCurrentResolution();
         currentIndex--;
-        cardLayout.show(cardPanel, "conflict_" + currentIndex);
-        updateLabels();
-        updateButtonStates();
+        showCard(currentIndex);
     }
 
     private void goNext() {
         applyCurrentResolution();
-        if (currentIndex >= conflicts.size() - 1) {
+        if (currentIndex >= cards.size() - 1) {
             result = Result.COMPLETED;
             dispose();
             return;
         }
         currentIndex++;
-        cardLayout.show(cardPanel, "conflict_" + currentIndex);
-        updateLabels();
-        updateButtonStates();
+        showCard(currentIndex);
     }
 
     public Result getResult() {
         return result;
-    }
-
-    /**
-     * Show the unified conflict resolution dialog.
-     *
-     * @param parent the parent frame
-     * @param conflicts list of conflicts to resolve (remote content must be fetched for text files)
-     * @return COMPLETED if user resolved all, CANCELLED if user cancelled
-     */
-    public static Result showDialog(JFrame parent, java.util.List<ConflictInfo> conflicts) {
-        if (conflicts == null || conflicts.isEmpty()) {
-            return Result.COMPLETED;
-        }
-        ConflictResolutionDialog dialog = new ConflictResolutionDialog(parent, conflicts);
-        dialog.setVisible(true);
-        return dialog.getResult();
     }
 }

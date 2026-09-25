@@ -1619,7 +1619,7 @@ public class SyncCoordinator {
                                 || conflict.getResolution() == ConflictInfo.Resolution.SKIP)) {
                     // Do not transfer files where the user chose to keep the remote
                     // version or skip entirely. Sending the local version would
-                    // overwrite the remote's newer content.
+                    // overwrite the remote's content.
                     skippedCount++;
                     eventBus.post(
                             new SyncEvent.LogEvent(

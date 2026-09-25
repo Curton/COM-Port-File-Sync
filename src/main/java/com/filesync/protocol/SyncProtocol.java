@@ -1103,8 +1103,8 @@ public class SyncProtocol {
     /**
      * Best-effort salvage of an interrupted staged append: merge the decoded tail prefix into the
      * base file, growing it into a longer prefix of the sender's file, and stamp the sender's
-     * lastModified so the next preview plans another append instead of a receiver-newer conflict.
-     * The merge is skipped — and the base left untouched — when the whole tail arrived (its
+     * lastModified so the next preview plans another append instead of raising a conflict. The
+     * merge is skipped — and the base left untouched — when the whole tail arrived (its
      * reconstruction cannot be verified against the sender's final MD5 mid-failure, so the next
      * sync retransfers the tail as before) or when the base drifted mid-transfer (appending then
      * would corrupt it).
@@ -1882,7 +1882,7 @@ public class SyncProtocol {
     /**
      * Best-effort salvage of an interrupted staged transfer: decode the staged prefix (an in-order
      * run of XMODEM-verified blocks) and write it to the target path, stamped with the sender's
-     * lastModified so the next preview plans an append instead of a receiver-newer conflict.
+     * lastModified so the next preview plans an append instead of raising a conflict.
      *
      * @return the number of original bytes kept on disk (0 when nothing usable was staged)
      */
