@@ -1,5 +1,6 @@
 package com.filesync.sync;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -21,6 +22,9 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -274,6 +278,95 @@ class FileSyncManagerTest {
             assertTrue(
                     java.util.Arrays.equals(result, expected),
                     "Decoded remote content should match the scripted response");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void fetchRemoteFileContent_concurrentFetches_waitForTheirTurnOnTheWire() throws Exception {
+        File folder = tempDir.resolve("root-concurrent").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        try {
+            fsm.startListening("TEST");
+
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+
+            byte[] contentA = "content-a".getBytes(StandardCharsets.UTF_8);
+            byte[] contentB = "content-b".getBytes(StandardCharsets.UTF_8);
+            String encodedPathA = SyncProtocol.encodePathForProtocol("a.txt");
+            String encodedPathB = SyncProtocol.encodePathForProtocol("b.txt");
+
+            // The conflict dialog starts one fetch per card view on SwingWorker's shared pool, so
+            // two fetches can be in flight while the user pages through cards. The first fetch
+            // parks in its receive loop here: its request is on the wire, but no response is fed.
+            AtomicReference<byte[]> resultA = new AtomicReference<>();
+            AtomicReference<byte[]> resultB = new AtomicReference<>();
+            CountDownLatch aDone = new CountDownLatch(1);
+            CountDownLatch bDone = new CountDownLatch(1);
+            Thread fetchA =
+                    new Thread(
+                            () -> {
+                                resultA.set(fsm.fetchRemoteFileContent("a.txt"));
+                                aDone.countDown();
+                            },
+                            "fsm-test-fetch-a");
+            fetchA.start();
+            waitUntil(
+                    () ->
+                            serial.getWrittenLines().stream()
+                                    .anyMatch(l -> l.contains("FILE_CONTENT_REQ:" + encodedPathA)),
+                    Duration.ofSeconds(5));
+
+            Thread fetchB =
+                    new Thread(
+                            () -> {
+                                resultB.set(fsm.fetchRemoteFileContent("b.txt"));
+                                bDone.countDown();
+                            },
+                            "fsm-test-fetch-b");
+            fetchB.start();
+
+            // While the first exchange is unanswered, the second fetch must not put its own
+            // request on the wire: frames name no request they answer, so two in-flight requests
+            // would let either caller consume the other's response (wrong content, silently).
+            Thread.sleep(1500);
+            assertFalse(
+                    serial.getWrittenLines().stream()
+                            .anyMatch(l -> l.contains("FILE_CONTENT_REQ:" + encodedPathB)),
+                    "a second fetch must not send while the first exchange is still in flight");
+
+            // Answering the first exchange releases the wire; only then may the second request go
+            // out, and each fetch must receive its own content.
+            serial.feedLine(
+                    "[[SYNC:FILE_CONTENT_DATA:"
+                            + encodedPathA
+                            + ":"
+                            + Base64.getEncoder().encodeToString(contentA)
+                            + "]]");
+            assertTrue(
+                    aDone.await(5, TimeUnit.SECONDS), "the first fetch must finish once answered");
+            waitUntil(
+                    () ->
+                            serial.getWrittenLines().stream()
+                                    .anyMatch(l -> l.contains("FILE_CONTENT_REQ:" + encodedPathB)),
+                    Duration.ofSeconds(5));
+            serial.feedLine(
+                    "[[SYNC:FILE_CONTENT_DATA:"
+                            + encodedPathB
+                            + ":"
+                            + Base64.getEncoder().encodeToString(contentB)
+                            + "]]");
+            assertTrue(
+                    bDone.await(5, TimeUnit.SECONDS), "the second fetch must finish once answered");
+
+            assertArrayEquals(contentA, resultA.get(), "the first fetch must get its own content");
+            assertArrayEquals(contentB, resultB.get(), "the second fetch must get its own content");
         } finally {
             stopQuietly(fsm);
         }

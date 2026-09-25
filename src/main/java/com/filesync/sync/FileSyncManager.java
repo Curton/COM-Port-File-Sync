@@ -54,6 +54,17 @@ public class FileSyncManager {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean syncing = new AtomicBoolean(false);
     private final AtomicBoolean senderBlockingProtocolExchange = new AtomicBoolean(false);
+
+    /**
+     * Mutually excludes the sender's blocking request/response exchanges (file content, remote
+     * folder context, remote log). The wire carries one exchange at a time: frames name no request
+     * they answer, so two overlapping exchanges consume each other's responses and the content ends
+     * up attributed to the wrong file. The {@code senderBlockingProtocolExchange} flag only parks
+     * the listener loop — it does not serialize callers, and the conflict dialog starts one fetch
+     * per card view on SwingWorker's shared pool.
+     */
+    private final Object senderBlockingExchangeLock = new Object();
+
     private final AtomicBoolean connectionAlive = new AtomicBoolean(false);
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
     private final AtomicBoolean isSender = new AtomicBoolean(true);
@@ -482,28 +493,30 @@ public class FileSyncManager {
      * @return remote sync folder path (normalized), or empty string on timeout/error
      */
     public String requestRemoteFolderContext() {
-        if (!roleNegotiationService.isSender()) {
-            return "";
-        }
-        File folder = getSyncFolder();
-        if (folder == null || !folder.exists()) {
-            return "";
-        }
-        senderBlockingProtocolExchange.set(true);
-        try {
-            int savedTimeout = protocol.getTimeout();
-            protocol.setTimeout(FOLDER_CONTEXT_TIMEOUT_MS);
-            try {
-                protocol.sendFolderContextRequest();
-                return protocol.receiveFolderContextResponse();
-            } finally {
-                protocol.setTimeout(savedTimeout);
+        synchronized (senderBlockingExchangeLock) {
+            if (!roleNegotiationService.isSender()) {
+                return "";
             }
-        } catch (IOException e) {
-            return "";
-        } finally {
-            senderBlockingProtocolExchange.set(false);
-            connectionService.recordMessageActivity();
+            File folder = getSyncFolder();
+            if (folder == null || !folder.exists()) {
+                return "";
+            }
+            senderBlockingProtocolExchange.set(true);
+            try {
+                int savedTimeout = protocol.getTimeout();
+                protocol.setTimeout(FOLDER_CONTEXT_TIMEOUT_MS);
+                try {
+                    protocol.sendFolderContextRequest();
+                    return protocol.receiveFolderContextResponse();
+                } finally {
+                    protocol.setTimeout(savedTimeout);
+                }
+            } catch (IOException e) {
+                return "";
+            } finally {
+                senderBlockingProtocolExchange.set(false);
+                connectionService.recordMessageActivity();
+            }
         }
     }
 
@@ -620,84 +633,90 @@ public class FileSyncManager {
      * @return the file content bytes, or null if unavailable/timeout/error
      */
     public byte[] fetchRemoteFileContent(String relativePath) {
-        if (!isSender() || !connectionAlive.get() || syncFolder == null) {
-            return null;
-        }
+        synchronized (senderBlockingExchangeLock) {
+            // Rechecked after the lock: a caller queued behind a previous fetch must not run its
+            // exchange against a link that died in the meantime.
+            if (!isSender() || !connectionAlive.get() || syncFolder == null) {
+                return null;
+            }
 
-        final long TIMEOUT_MS =
-                10000; // 10 seconds - may need adjustment for slow serial connections
-        senderBlockingProtocolExchange.set(true);
-        protocol.setAwaitingCommand(true);
+            final long TIMEOUT_MS =
+                    10000; // 10 seconds - may need adjustment for slow serial connections
+            senderBlockingProtocolExchange.set(true);
+            protocol.setAwaitingCommand(true);
 
-        try {
-            protocol.sendCommand(
-                    SyncProtocol.CMD_FILE_CONTENT_REQ,
-                    SyncProtocol.encodePathForProtocol(relativePath));
+            try {
+                protocol.sendCommand(
+                        SyncProtocol.CMD_FILE_CONTENT_REQ,
+                        SyncProtocol.encodePathForProtocol(relativePath));
 
-            long startTime = System.currentTimeMillis();
-            while (System.currentTimeMillis() - startTime < TIMEOUT_MS) {
-                SyncProtocol.Message msg = protocol.receiveCommand();
-                if (msg == null) {
-                    try {
-                        Thread.sleep(10);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
+                long startTime = System.currentTimeMillis();
+                while (System.currentTimeMillis() - startTime < TIMEOUT_MS) {
+                    SyncProtocol.Message msg = protocol.receiveCommand();
+                    if (msg == null) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        }
+                        continue;
+                    }
+                    String cmd = msg.getCommand();
+                    if (SyncProtocol.CMD_FILE_CONTENT_DATA.equals(cmd)) {
+                        String contentBase64 = msg.getParam(1);
+                        if (contentBase64 != null && !contentBase64.isEmpty()) {
+                            return Base64.getDecoder().decode(contentBase64);
+                        }
                         return null;
                     }
-                    continue;
-                }
-                String cmd = msg.getCommand();
-                if (SyncProtocol.CMD_FILE_CONTENT_DATA.equals(cmd)) {
-                    String contentBase64 = msg.getParam(1);
-                    if (contentBase64 != null && !contentBase64.isEmpty()) {
-                        return Base64.getDecoder().decode(contentBase64);
+                    if (SyncProtocol.CMD_FILE_CONTENT_XFER.equals(cmd)) {
+                        int fileSize = msg.getParamAsInt(0);
+                        byte[] content = protocol.receiveFileContentViaXmodem(fileSize);
+                        // XMODEM progress events disable the sync controls while the transfer is
+                        // in flight; refresh them now that the transfer has completed.
+                        eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+                        return content;
                     }
-                    return null;
+                    if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
+                        return null;
+                    }
+                    if (SyncProtocol.CMD_ERROR.equals(cmd)) {
+                        String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                        throw new IOException(
+                                "Remote error during file content request: " + errMsg);
+                    }
+                    if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
+                        protocol.sendHeartbeatAck();
+                        connectionService.recordMessageActivity();
+                    } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
+                        connectionService.recordMessageActivity();
+                    } else {
+                        protocol.stashAsyncMessage(msg);
+                    }
                 }
-                if (SyncProtocol.CMD_FILE_CONTENT_XFER.equals(cmd)) {
-                    int fileSize = msg.getParamAsInt(0);
-                    byte[] content = protocol.receiveFileContentViaXmodem(fileSize);
-                    // XMODEM progress events disable the sync controls while the transfer is in
-                    // flight; refresh them now that the transfer has completed.
-                    eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-                    return content;
-                }
-                if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
-                    return null;
-                }
-                if (SyncProtocol.CMD_ERROR.equals(cmd)) {
-                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                    throw new IOException("Remote error during file content request: " + errMsg);
-                }
-                if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
-                    protocol.sendHeartbeatAck();
-                    connectionService.recordMessageActivity();
-                } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
-                    connectionService.recordMessageActivity();
-                } else {
-                    protocol.stashAsyncMessage(msg);
-                }
+            } catch (TransferCancelledException e) {
+                // A peer cancel is an expected outcome; log it benignly instead of raising an
+                // error.
+                eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+                // The cancelled XMODEM content transfer already disabled the sync controls via
+                // its progress events; nothing else in this path refreshes them, so do it here.
+                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            } catch (IOException e) {
+                // A failed preview fetch is not a fatal error: the preview dialog still opens and
+                // explains that the peer's version is unavailable, and the user can retry after
+                // reconnecting. Log it like the peer-cancel case above rather than raising an
+                // ERROR that would also paint the progress bar red.
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "preview: peer did not answer the file content request - "
+                                        + e.getMessage()));
+            } finally {
+                senderBlockingProtocolExchange.set(false);
+                protocol.setAwaitingCommand(false);
             }
-        } catch (TransferCancelledException e) {
-            // A peer cancel is an expected outcome; log it benignly instead of raising an error.
-            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
-            // The cancelled XMODEM content transfer already disabled the sync controls via its
-            // progress events; nothing else in this path refreshes them, so do it here.
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-        } catch (IOException e) {
-            // A failed preview fetch is not a fatal error: the preview dialog still opens and
-            // explains that the peer's version is unavailable, and the user can retry after
-            // reconnecting. Log it like the peer-cancel case above rather than raising an ERROR
-            // that would also paint the progress bar red.
-            eventBus.post(
-                    new SyncEvent.LogEvent(
-                            "preview: peer did not answer the file content request - "
-                                    + e.getMessage()));
-        } finally {
-            senderBlockingProtocolExchange.set(false);
-            protocol.setAwaitingCommand(false);
+            return null;
         }
-        return null;
     }
 
     /** Default timeout for a remote log fetch (mirrors the file content fetch). */
@@ -715,105 +734,109 @@ public class FileSyncManager {
     }
 
     String fetchRemoteLogText(long timeoutMs) {
-        if (!isSender() || !connectionAlive.get()) {
-            return null;
-        }
+        synchronized (senderBlockingExchangeLock) {
+            if (!isSender() || !connectionAlive.get()) {
+                return null;
+            }
 
-        senderBlockingProtocolExchange.set(true);
-        protocol.setAwaitingCommand(true);
-        try {
-            // Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the
-            // combined-log save can align the two machines' clocks. Best-effort: a peer that does
-            // not ACK within the timeout (or an IO failure) falls back to a marker-less merge.
+            senderBlockingProtocolExchange.set(true);
+            protocol.setAwaitingCommand(true);
             try {
-                protocol.sendLogMarkerRequest();
-                long markerDeadline = System.currentTimeMillis() + timeoutMs;
-                while (System.currentTimeMillis() < markerDeadline) {
-                    SyncProtocol.Message markerResponse = protocol.receiveCommand();
-                    if (markerResponse == null) {
+                // Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so the
+                // combined-log save can align the two machines' clocks. Best-effort: a peer that
+                // does not ACK within the timeout (or an IO failure) falls back to a marker-less
+                // merge.
+                try {
+                    protocol.sendLogMarkerRequest();
+                    long markerDeadline = System.currentTimeMillis() + timeoutMs;
+                    while (System.currentTimeMillis() < markerDeadline) {
+                        SyncProtocol.Message markerResponse = protocol.receiveCommand();
+                        if (markerResponse == null) {
+                            try {
+                                Thread.sleep(10);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                            continue;
+                        }
+                        if (SyncProtocol.CMD_ACK.equals(markerResponse.getCommand())) {
+                            break;
+                        }
+                        // Any other frame during the marker exchange is not part of the log
+                        // fetch; ignore it rather than stash it (the fetch loop below never
+                        // replays stashed messages).
+                    }
+                } catch (IOException e) {
+                    // Fall back to fetching without a marker; the merge will use raw timestamps.
+                }
+
+                protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
+
+                long startTime = System.currentTimeMillis();
+                while (System.currentTimeMillis() - startTime < timeoutMs) {
+                    SyncProtocol.Message msg = protocol.receiveCommand();
+                    if (msg == null) {
                         try {
                             Thread.sleep(10);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
-                            break;
+                            return null;
                         }
                         continue;
                     }
-                    if (SyncProtocol.CMD_ACK.equals(markerResponse.getCommand())) {
-                        break;
+                    String cmd = msg.getCommand();
+                    if (SyncProtocol.CMD_LOG_DATA.equals(cmd)) {
+                        String logBase64 = msg.getParam(0);
+                        if (logBase64 == null) {
+                            return null;
+                        }
+                        if (logBase64.isEmpty()) {
+                            return "";
+                        }
+                        return new String(
+                                Base64.getDecoder().decode(logBase64), StandardCharsets.UTF_8);
                     }
-                    // Any other frame during the marker exchange is not part of the log fetch;
-                    // ignore it rather than stash it (the fetch loop below never replays stashed
-                    // messages).
+                    if (SyncProtocol.CMD_LOG_XFER.equals(cmd)) {
+                        int logSize = msg.getParamAsInt(0);
+                        byte[] data = protocol.receiveFileContentViaXmodem(logSize);
+                        // XMODEM progress events disable the sync controls while the transfer is
+                        // in flight; refresh them now that the transfer has completed.
+                        eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+                        return data != null ? new String(data, StandardCharsets.UTF_8) : null;
+                    }
+                    if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
+                        return null;
+                    }
+                    if (SyncProtocol.CMD_ERROR.equals(cmd)) {
+                        String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                        throw new IOException("Remote error during log request: " + errMsg);
+                    }
+                    if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
+                        protocol.sendHeartbeatAck();
+                        connectionService.recordMessageActivity();
+                    } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
+                        connectionService.recordMessageActivity();
+                    } else {
+                        protocol.stashAsyncMessage(msg);
+                    }
                 }
+            } catch (TransferCancelledException e) {
+                // A peer cancel is an expected outcome; log it benignly instead of raising an
+                // error.
+                eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+                // The cancelled XMODEM log transfer already disabled the sync controls via its
+                // progress events; nothing else in this path refreshes them, so do it here.
+                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             } catch (IOException e) {
-                // Fall back to fetching without a marker; the merge will use raw timestamps.
+                eventBus.post(
+                        new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
+            } finally {
+                senderBlockingProtocolExchange.set(false);
+                protocol.setAwaitingCommand(false);
             }
-
-            protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
-
-            long startTime = System.currentTimeMillis();
-            while (System.currentTimeMillis() - startTime < timeoutMs) {
-                SyncProtocol.Message msg = protocol.receiveCommand();
-                if (msg == null) {
-                    try {
-                        Thread.sleep(10);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return null;
-                    }
-                    continue;
-                }
-                String cmd = msg.getCommand();
-                if (SyncProtocol.CMD_LOG_DATA.equals(cmd)) {
-                    String logBase64 = msg.getParam(0);
-                    if (logBase64 == null) {
-                        return null;
-                    }
-                    if (logBase64.isEmpty()) {
-                        return "";
-                    }
-                    return new String(
-                            Base64.getDecoder().decode(logBase64), StandardCharsets.UTF_8);
-                }
-                if (SyncProtocol.CMD_LOG_XFER.equals(cmd)) {
-                    int logSize = msg.getParamAsInt(0);
-                    byte[] data = protocol.receiveFileContentViaXmodem(logSize);
-                    // XMODEM progress events disable the sync controls while the transfer is in
-                    // flight; refresh them now that the transfer has completed.
-                    eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-                    return data != null ? new String(data, StandardCharsets.UTF_8) : null;
-                }
-                if (SyncProtocol.CMD_CANCEL.equals(cmd)) {
-                    return null;
-                }
-                if (SyncProtocol.CMD_ERROR.equals(cmd)) {
-                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
-                    throw new IOException("Remote error during log request: " + errMsg);
-                }
-                if (SyncProtocol.CMD_HEARTBEAT.equals(cmd)) {
-                    protocol.sendHeartbeatAck();
-                    connectionService.recordMessageActivity();
-                } else if (SyncProtocol.CMD_HEARTBEAT_ACK.equals(cmd)) {
-                    connectionService.recordMessageActivity();
-                } else {
-                    protocol.stashAsyncMessage(msg);
-                }
-            }
-        } catch (TransferCancelledException e) {
-            // A peer cancel is an expected outcome; log it benignly instead of raising an error.
-            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
-            // The cancelled XMODEM log transfer already disabled the sync controls via its
-            // progress events; nothing else in this path refreshes them, so do it here.
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-        } catch (IOException e) {
-            eventBus.post(
-                    new SyncEvent.ErrorEvent("Failed to fetch remote log: " + e.getMessage()));
-        } finally {
-            senderBlockingProtocolExchange.set(false);
-            protocol.setAwaitingCommand(false);
+            return null;
         }
-        return null;
     }
 
     /**
