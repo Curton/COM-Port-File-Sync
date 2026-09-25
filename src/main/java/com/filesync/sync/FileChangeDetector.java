@@ -310,6 +310,9 @@ public class FileChangeDetector {
         // dominates anyway — a full pre-count gives an exact denominator.
         AtomicInteger totalFiles = new AtomicInteger(0);
         AtomicInteger processedFiles = new AtomicInteger(0);
+        // Serializes progress emission for THIS generation (independent generations keep their
+        // own), so a listener observes the reports in a consistent order.
+        Object progressLock = new Object();
         ManifestProgressCallback progressCallback = resolvedOptions.getProgressCallback();
 
         if (progressCallback != null) {
@@ -459,7 +462,11 @@ public class FileChangeDetector {
                                             relativePath, size, lastModified, cachedInfo.getMd5()));
                             markParentHasChild(relativePath, dirHasChildren);
                             reportProgress(
-                                    relativePath, processedFiles, totalFiles, progressCallback);
+                                    relativePath,
+                                    processedFiles,
+                                    totalFiles,
+                                    progressCallback,
+                                    progressLock);
                         } else if (needsHash) {
                             Future<?> future =
                                     hashExecutor.submit(
@@ -501,7 +508,8 @@ public class FileChangeDetector {
                                                         relativePath,
                                                         processedFiles,
                                                         totalFiles,
-                                                        progressCallback);
+                                                        progressCallback,
+                                                        progressLock);
                                             });
                             hashTasks.add(future);
                         } else {
@@ -521,7 +529,11 @@ public class FileChangeDetector {
                                     new FileInfo(relativePath, size, lastModified, hash));
                             markParentHasChild(relativePath, dirHasChildren);
                             reportProgress(
-                                    relativePath, processedFiles, totalFiles, progressCallback);
+                                    relativePath,
+                                    processedFiles,
+                                    totalFiles,
+                                    progressCallback,
+                                    progressLock);
                         }
 
                         return FileVisitResult.CONTINUE;
@@ -1334,26 +1346,33 @@ public class FileChangeDetector {
             String relativePath,
             AtomicInteger processedFiles,
             AtomicInteger totalFiles,
-            ManifestProgressCallback progressCallback) {
+            ManifestProgressCallback progressCallback,
+            Object progressLock) {
         if (progressCallback == null) {
             return;
         }
-        int processed = processedFiles.incrementAndGet();
-        // The total may be an estimate from the persisted cache (the pre-count walk is skipped
-        // there); grow it monotonically so the fraction can never exceed 1 when files beyond the
-        // estimate show up. Every reporting site (the walk predicate's inline branches and the hash
-        // pool's tasks) is a producer, so the CAS loop below is the only race here.
-        int total = totalFiles.get();
-        int observedTotal = total;
-        while (total < processed && !totalFiles.compareAndSet(total, processed)) {
-            total = totalFiles.get();
+        // The CAS loop below keeps the total monotonic, but it is not enough on its own: reports
+        // come from the hash pool and the walk, and without mutual exclusion a producer can read
+        // the
+        // total, be preempted, and emit after a later producer that already grew it — the listener
+        // would then see the denominator (and the percentage) jump backwards. Serializing the
+        // bookkeeping and the emission makes the (processed, total) sequence a single ordered log.
+        synchronized (progressLock) {
+            int processed = processedFiles.incrementAndGet();
+            // The total may be an estimate from the persisted cache (the pre-count walk is skipped
+            // there); grow it monotonically so the fraction can never exceed 1 when files beyond
+            // the estimate show up.
+            int total = totalFiles.get();
+            while (total < processed && !totalFiles.compareAndSet(total, processed)) {
+                total = totalFiles.get();
+            }
+            // Read the possibly-grown value once and hand the same number to both callbacks: two
+            // separate reads can straddle another producer's growth, which would report a different
+            // denominator to onProgress than to onFileProcessed for the same file.
+            int reportedTotal = totalFiles.get();
+            progressCallback.onProgress(processed, reportedTotal);
+            progressCallback.onFileProcessed(relativePath, processed, reportedTotal);
         }
-        // Read the possibly-grown value once and hand the same number to both callbacks: two
-        // separate reads can straddle another producer's growth, which would report a different
-        // denominator to onProgress than to onFileProcessed for the same file.
-        int reportedTotal = totalFiles.get();
-        progressCallback.onProgress(processed, reportedTotal);
-        progressCallback.onFileProcessed(relativePath, processed, reportedTotal);
     }
 
     private static FileManifest loadPersistedManifest(File manifestFile) {
