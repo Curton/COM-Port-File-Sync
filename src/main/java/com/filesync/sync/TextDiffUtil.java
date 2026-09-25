@@ -439,9 +439,7 @@ public final class TextDiffUtil {
                 workLeft--;
             }
             for (int i = 0; i < prefix; i++) {
-                out.add(
-                        new DiffLine(
-                                DiffLineType.UNCHANGED, a[a0 + i], a0 + i + 1, b0 + i + 1));
+                out.add(new DiffLine(DiffLineType.UNCHANGED, a[a0 + i], a0 + i + 1, b0 + i + 1));
             }
             int suffix = 0;
             while (suffix < n - prefix
@@ -472,12 +470,12 @@ public final class TextDiffUtil {
         }
 
         /**
-         * Runs the greedy sweep for one middle range. If the sweep reaches both ends within the step
-         * budget, the trace is walked back into the full diff. If the distance outruns the budget,
-         * the range is split at the middle snake instead — a snake on an optimal path, so the two
-         * halves' optimal distances add back up to this range's and no slack accumulates down the
-         * recursion. Spending the work budget or the split depth reports the range as fully changed
-         * instead, which bounds worst-case time.
+         * Runs the greedy sweep for one middle range. If the sweep reaches both ends within the
+         * step budget, the trace is walked back into the full diff. If the distance outruns the
+         * budget, the range is split at the middle snake instead — a snake on an optimal path, so
+         * the two halves' optimal distances add back up to this range's and no slack accumulates
+         * down the recursion. Spending the work budget or the split depth reports the range as
+         * fully changed instead, which bounds worst-case time.
          */
         private void diffMiddle(int a0, int aEnd, int b0, int bEnd, int depth) {
             int n = aEnd - a0;
@@ -538,7 +536,8 @@ public final class TextDiffUtil {
             // Distance outruns the trace budget, so tracing the whole range as one piece is out.
             // Split at the middle snake instead. Its search is bounded by half the range's rows —
             // the step at which the two frontiers are guaranteed to have crossed — so a range whose
-            // rows outrun that bound is halved first rather than burning the budget on a search that
+            // rows outrun that bound is halved first rather than burning the budget on a search
+            // that
             // cannot succeed.
             int snakeBudget = Math.min(MAX_SEARCH_STEPS, (n + m + 1) / 2);
             int[] snake = findMiddleSnake(a0, aEnd, b0, bEnd, snakeBudget);
@@ -701,21 +700,16 @@ public final class TextDiffUtil {
                     sy--;
                     reversed.add(
                             new DiffLine(
-                                    DiffLineType.UNCHANGED,
-                                    a[a0 + sx],
-                                    a0 + sx + 1,
-                                    b0 + sy + 1));
+                                    DiffLineType.UNCHANGED, a[a0 + sx], a0 + sx + 1, b0 + sy + 1));
                 }
 
                 // The edit step
                 if (fromAbove) {
                     reversed.add(
-                            new DiffLine(
-                                    DiffLineType.ADDED, b[b0 + prevY], -1, b0 + prevY + 1));
+                            new DiffLine(DiffLineType.ADDED, b[b0 + prevY], -1, b0 + prevY + 1));
                 } else {
                     reversed.add(
-                            new DiffLine(
-                                    DiffLineType.REMOVED, a[a0 + prevX], a0 + prevX + 1, -1));
+                            new DiffLine(DiffLineType.REMOVED, a[a0 + prevX], a0 + prevX + 1, -1));
                 }
 
                 cx = prevX;
@@ -727,8 +721,7 @@ public final class TextDiffUtil {
                 cx--;
                 cy--;
                 reversed.add(
-                        new DiffLine(
-                                DiffLineType.UNCHANGED, a[a0 + cx], a0 + cx + 1, b0 + cy + 1));
+                        new DiffLine(DiffLineType.UNCHANGED, a[a0 + cx], a0 + cx + 1, b0 + cy + 1));
             }
             return reversed;
         }

@@ -221,7 +221,9 @@ class TextDiffUtilTest {
 
     // ========== large conflicting texts stay bounded ==========
 
-    /** Drops the trailing newline so line counts read directly, without the shared empty last line. */
+    /**
+     * Drops the trailing newline so line counts read directly, without the shared empty last line.
+     */
     private static String textOf(StringBuilder sb) {
         sb.setLength(sb.length() - 1);
         return sb.toString();
@@ -242,8 +244,7 @@ class TextDiffUtilTest {
             local.append("base line ").append(i).append('\n');
             remote.append(i % 2 == 0 ? "changed line " : "base line ").append(i).append('\n');
         }
-        DiffResult result =
-                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        DiffResult result = TextDiffUtil.computeDiff(textOf(local), textOf(remote));
         assertEquals(lines / 2, result.getAddedCount());
         assertEquals(lines / 2, result.getRemovedCount());
         assertEquals(lines / 2, result.getUnchangedCount());
@@ -262,8 +263,7 @@ class TextDiffUtilTest {
             local.append("local content number ").append(i).append('\n');
             remote.append("remote content number ").append(i).append('\n');
         }
-        DiffResult result =
-                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        DiffResult result = TextDiffUtil.computeDiff(textOf(local), textOf(remote));
         assertTrue(result.hasChanges());
         assertEquals(lines, result.getAddedCount());
         assertEquals(lines, result.getRemovedCount());
@@ -285,8 +285,7 @@ class TextDiffUtilTest {
             local.append("stable line ").append(i).append('\n');
             remote.append(changed ? "edited line " : "stable line ").append(i).append('\n');
         }
-        DiffResult result =
-                TextDiffUtil.computeDiff(textOf(local), textOf(remote));
+        DiffResult result = TextDiffUtil.computeDiff(textOf(local), textOf(remote));
         assertEquals(2 * edits, result.getChangeCount());
         assertEquals(lines - edits, result.getUnchangedCount());
     }
