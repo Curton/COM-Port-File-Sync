@@ -7,6 +7,7 @@ import com.filesync.delta.SignatureSet;
 import com.filesync.delta.SignatureUtil;
 import com.filesync.protocol.BatchTransferSession;
 import com.filesync.protocol.FileWriteException;
+import com.filesync.protocol.ManifestMismatchException;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.protocol.TransferCancelledException;
 import java.io.File;
@@ -19,17 +20,20 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -89,6 +93,27 @@ public class SyncCoordinator {
     private volatile SignatureCache activeSignatureCache;
 
     /**
+     * This side's confirmed-state store (the base conflict arbitration compares against), keyed by
+     * the sync folder it was opened for. Both roles use it: as receiver it advances as files are
+     * verified and written, and as sender it advances once per successful session. One instance per
+     * folder keeps a superseded role's unflushed map from overwriting newer entries.
+     */
+    private volatile SyncStateStore receiverStateStore;
+
+    private volatile File receiverStateStoreFolder;
+
+    /**
+     * Paths this side could not write during the current receive session (write failure, locked
+     * target, or manifest-md5 mismatch), reported to the sender once at SYNC_COMPLETE so it
+     * withdraws those paths from its optimistic confirmations. Cleared when the next session's
+     * manifest request arrives, so an aborted session never leaks into the next one.
+     */
+    private final Set<String> receiverWriteFailures = ConcurrentHashMap.newKeySet();
+
+    /** Confirmed paths since the last receiver-side flush (see {@link #CONFIRM_FLUSH_INTERVAL}). */
+    private final AtomicInteger confirmsSinceFlush = new AtomicInteger(0);
+
+    /**
      * Cancellation token of one sync session. A shared flag cannot express "cancel the old worker":
      * cancelOngoingSync() clears syncing immediately, and a restart that reset a shared flag would
      * revive a superseded worker still stuck in an uninterruptible stage, letting two performSync
@@ -145,6 +170,13 @@ public class SyncCoordinator {
      * batch session that measured ~300 ms slower end to end.
      */
     static final long MIN_DELTA_SAVINGS_BYTES = 2 * 1024L;
+
+    /**
+     * How many received-file confirmations the receiver holds in memory before flushing the state
+     * store to disk. A session's SYNC_COMPLETE always flushes regardless; this only bounds the
+     * damage of a session that dies without that exchange.
+     */
+    private static final int CONFIRM_FLUSH_INTERVAL = 64;
 
     public SyncCoordinator(
             SyncProtocol protocol,
@@ -485,7 +517,8 @@ public class SyncCoordinator {
                 deltaCandidatePaths,
                 appendResumablePaths,
                 new HashSet<>(remoteManifest.getFiles().keySet()),
-                remoteManifest.getFiles());
+                remoteManifest.getFiles(),
+                localManifest.getFiles());
     }
 
     /**
@@ -760,6 +793,10 @@ public class SyncCoordinator {
         // is single-threaded and manifest requests are processed sequentially (one peer
         // sends a manifest, the other receives it, then roles swap). The check is thus
         // unnecessary and this simplification ensures onSyncIdle always runs after completion.
+        // A manifest request opens the peer's session: its receive transfers (and failures)
+        // follow it and end at SYNC_COMPLETE. Start the failure set clean so a session that was
+        // aborted before that exchange cannot leak paths into this one's report.
+        receiverWriteFailures.clear();
         syncing.set(true);
         // Time-sync marker paired with the sender's (posted in performSync) so the combined-log
         // save can measure the clock offset between the two machines.
@@ -876,6 +913,9 @@ public class SyncCoordinator {
             BatchTransferSession.WriteFailureHandler failureHandler =
                     (path, data, lastModified, message, cause) -> {
                         failedCount[0]++;
+                        // Either way the sender must withdraw this path from its optimistic
+                        // record: it never landed here as sent.
+                        noteReceiverWriteFailure(path);
                         if (cause == BatchTransferSession.WriteFailureCause.HASH_MISMATCH) {
                             // Corrupt content: report it, but never write or retry these bytes.
                             eventBus.post(
@@ -893,7 +933,12 @@ public class SyncCoordinator {
                     };
             int written =
                     protocol.receiveBatch(
-                            expectedSize, 0, callback, syncFolder, failureHandler, null);
+                            expectedSize,
+                            0,
+                            callback,
+                            syncFolder,
+                            failureHandler,
+                            this::confirmReceiverState);
             if (failedCount[0] > 0) {
                 eventBus.post(
                         new SyncEvent.LogEvent(
@@ -940,6 +985,11 @@ public class SyncCoordinator {
             // The transfer succeeded but the target file is locked by another program: queue it
             // for a user decision instead of dropping it or tearing down the connection.
             lockedTarget = e;
+        } catch (ManifestMismatchException e) {
+            // The decoded content did not reproduce the announced manifest md5. The protocol
+            // layer already reported the path as a write failure; these bytes must not be
+            // written or retried, so the file is left alone and retransferred next sync.
+            eventBus.post(new SyncEvent.ErrorEvent(e.getMessage()));
         } finally {
             // Cleared on every exit path, success included: the sender sends no CMD_SYNC_COMPLETE
             // for a single file, so a flag left set would keep the receiver's Sync Control button
@@ -1163,7 +1213,250 @@ public class SyncCoordinator {
         cache.flush();
     }
 
+    // ========== confirmed-state (base) bookkeeping ==========
+
+    /**
+     * The state store for the current sync folder, reopened when the folder changes. Flushes a
+     * superseded instance on the way out so a folder switch never strands unflushed confirmations.
+     */
+    SyncStateStore receiverStateStore() {
+        File folder = syncFolderSupplier.get();
+        if (folder == null) {
+            return null;
+        }
+        SyncStateStore store = receiverStateStore;
+        File openedFor = receiverStateStoreFolder;
+        if (store != null && openedFor != null && openedFor.equals(folder)) {
+            return store;
+        }
+        synchronized (this) {
+            if (receiverStateStore != null
+                    && (receiverStateStoreFolder == null
+                            || !receiverStateStoreFolder.equals(folder))) {
+                receiverStateStore.flush();
+                receiverStateStore = null;
+                receiverStateStoreFolder = null;
+            }
+            if (receiverStateStore == null) {
+                receiverStateStore = createSyncStateStore(folder);
+                receiverStateStoreFolder = folder;
+                confirmsSinceFlush.set(0);
+            }
+            return receiverStateStore;
+        }
+    }
+
+    /**
+     * Receiver-side wiring for {@link SyncProtocol#setTransferConfirmedHandler}: record the
+     * confirmed state of a path whose transfer was verified and written. Entries without a hash
+     * (fast mode) record nothing — arbitration there has no base to consult anyway.
+     */
+    void confirmReceiverState(String relativePath, String manifestMd5, long size) {
+        if (manifestMd5 == null || manifestMd5.isEmpty()) {
+            return;
+        }
+        SyncStateStore store = receiverStateStore();
+        if (store == null) {
+            return;
+        }
+        store.confirm(relativePath, manifestMd5, size);
+        if (confirmsSinceFlush.incrementAndGet() >= CONFIRM_FLUSH_INTERVAL) {
+            store.flush();
+            confirmsSinceFlush.set(0);
+        }
+    }
+
+    /**
+     * Receiver-side wiring for {@link SyncProtocol#setWriteFailedHandler}: remember a path whose
+     * received bytes could not be honored, for the end-of-session CMD_WRITE_FAILURES report.
+     */
+    void noteReceiverWriteFailure(String relativePath) {
+        receiverWriteFailures.add(relativePath);
+    }
+
+    /**
+     * Sender-side wiring for {@link SyncProtocol#CMD_WRITE_FAILURES} when the report arrives
+     * outside the bounded wait (e.g. stashed behind a heartbeat): withdraw the reported paths'
+     * confirmations. Redundant with the synchronous wait in {@link #performSync}, which already
+     * skipped them before flushing.
+     */
+    public void handleWriteFailures(SyncProtocol.Message msg) {
+        if (msg.getParams().length == 0) {
+            return;
+        }
+        int count = Math.max(0, Math.min(msg.getParamAsInt(0), msg.getParams().length - 1));
+        SyncStateStore store = receiverStateStore();
+        if (store == null || count == 0) {
+            return;
+        }
+        boolean dirty = false;
+        for (int i = 0; i < count; i++) {
+            String path = msg.getParam(1 + i);
+            if (path != null && !path.isEmpty()) {
+                store.remove(path);
+                dirty = true;
+            }
+        }
+        if (dirty) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Receiver reported "
+                                    + count
+                                    + " path(s) it could not write; they"
+                                    + " will be retransferred on the next sync"));
+            store.flush();
+        }
+    }
+
+    /**
+     * Receiver-side wiring for {@link SyncProtocol#CMD_CONFLICT_ADOPTED}: the sender resolved
+     * KEEP_REMOTE + BOTH conflicts by adopting the receiver's version, so this side's base for
+     * those paths is now the shared version — record it without re-transferring anything.
+     */
+    public void handleConflictAdopted(SyncProtocol.Message msg) {
+        if (msg.getParams().length < 1) {
+            return;
+        }
+        int count = Math.max(0, Math.min(msg.getParamAsInt(0), (msg.getParams().length - 1) / 3));
+        if (count == 0) {
+            return;
+        }
+        SyncStateStore store = receiverStateStore();
+        if (store == null) {
+            return;
+        }
+        for (int i = 0; i < count; i++) {
+            int base = 1 + i * 3;
+            String path = msg.getParam(base);
+            String md5 = msg.getParam(base + 1);
+            long size = msg.getParams().length > base + 2 ? msg.getParamAsLong(base + 2) : 0L;
+            if (path != null) {
+                store.confirm(path, md5, size);
+            }
+        }
+        store.flush();
+    }
+
+    /**
+     * The KEEP_REMOTE resolutions with ApplyTarget.BOTH from the plan: the sender just overwrote
+     * its local copy with the receiver's version, so both sides now agree on the receiver's state
+     * and announce it to the peer via CMD_CONFLICT_ADOPTED.
+     */
+    private Map<String, SyncStateStore.Confirmed> collectAdoptedResolutions(SyncPreviewPlan plan) {
+        Map<String, SyncStateStore.Confirmed> adopted = new LinkedHashMap<>();
+        for (ConflictInfo conflict : plan.getConflicts()) {
+            if (conflict.getResolution() != ConflictInfo.Resolution.KEEP_REMOTE
+                    || conflict.getApplyTarget() != ConflictInfo.ApplyTarget.BOTH) {
+                continue;
+            }
+            FileChangeDetector.FileInfo remoteInfo = conflict.getRemoteInfo();
+            if (remoteInfo != null) {
+                adopted.put(
+                        conflict.getPath(),
+                        new SyncStateStore.Confirmed(remoteInfo.getMd5(), remoteInfo.getSize()));
+            }
+        }
+        return adopted;
+    }
+
+    /**
+     * Record the confirmed (base) state of everything this successful session brought into
+     * agreement, then prune paths that no longer exist locally. Run on both session outcomes: the
+     * normal path after SYNC_COMPLETE (minus the receiver's reported write failures) and the
+     * zero-operations early return.
+     *
+     * <ul>
+     *   <li>Transferred files: their final content (the local bytes, or the merged result for MERGE
+     *       resolutions) is now on both sides. SKIP and KEEP_REMOTE resolutions stayed in the
+     *       transfer list only to be counted and dropped, so they record nothing — the divergence
+     *       must resurface until it is actually resolved.
+     *   <li>KEEP_REMOTE + BOTH: both sides hold the receiver's version (already announced).
+     *   <li>Converged files (local md5 == remote md5): nothing was transferred, but the base must
+     *       keep tracking them or a later cache wipe would resurrect old conflicts.
+     *   <li>Deselected / failed writes: nothing is recorded.
+     * </ul>
+     */
+    private void recordSenderBase(SyncPreviewPlan plan, Set<String> writeFailures) {
+        SyncStateStore store = receiverStateStore();
+        if (store == null) {
+            return;
+        }
+        Map<String, SyncStateStore.Confirmed> confirmations = new LinkedHashMap<>();
+
+        for (FileChangeDetector.FileInfo fi : plan.getFilesToTransfer()) {
+            String path = fi.getPath();
+            if (writeFailures.contains(path)) {
+                continue;
+            }
+            ConflictInfo conflict = plan.getConflict(path);
+            if (conflict != null
+                    && (conflict.getResolution() == ConflictInfo.Resolution.SKIP
+                            || conflict.getResolution() == ConflictInfo.Resolution.KEEP_REMOTE)) {
+                // Neither side will end up with this path's local content: nothing to confirm.
+                continue;
+            }
+            if (conflict != null
+                    && conflict.getResolution() == ConflictInfo.Resolution.MERGE
+                    && conflict.getMergedContentAsBytes() != null) {
+                byte[] merged = conflict.getMergedContentAsBytes();
+                try {
+                    confirmations.put(
+                            path,
+                            new SyncStateStore.Confirmed(
+                                    FileChangeDetector.manifestMd5(merged), merged.length));
+                } catch (IOException e) {
+                    // Unreadable content hash (never observed in practice): skip the entry, the
+                    // next sync re-arbitrates the file conservatively.
+                }
+            } else {
+                confirmations.put(path, new SyncStateStore.Confirmed(fi.getMd5(), fi.getSize()));
+            }
+        }
+
+        for (Map.Entry<String, SyncStateStore.Confirmed> e :
+                collectAdoptedResolutions(plan).entrySet()) {
+            if (!writeFailures.contains(e.getKey())) {
+                confirmations.put(e.getKey(), e.getValue());
+            }
+        }
+
+        for (Map.Entry<String, FileChangeDetector.FileInfo> e :
+                plan.getLocalFileInfos().entrySet()) {
+            String path = e.getKey();
+            FileChangeDetector.FileInfo local = e.getValue();
+            if (local.getMd5() == null || writeFailures.contains(path)) {
+                continue; // no hash: no base to keep fresh
+            }
+            if (confirmations.containsKey(path)) {
+                continue; // already decided by a transfer or an adopted resolution
+            }
+            FileChangeDetector.FileInfo remote = plan.getRemoteFileInfo(path);
+            if (remote != null && local.getMd5().equals(remote.getMd5())) {
+                confirmations.put(
+                        path, new SyncStateStore.Confirmed(local.getMd5(), local.getSize()));
+            }
+        }
+
+        store.confirmAll(confirmations);
+        store.prune(plan.getLocalFileInfos().keySet());
+        store.flush();
+    }
+
     public void handleSyncComplete() {
+        // The receive session is done: persist every confirmed state first, then tell the sender
+        // which paths it must withdraw from its optimistic record (usually none).
+        SyncStateStore store = receiverStateStore();
+        if (store != null) {
+            store.flush();
+        }
+        try {
+            // Report a snapshot: the live set is cleared right after, and handing the mutable
+            // instance to the protocol layer would make the report and the reset race.
+            protocol.sendWriteFailures(Set.copyOf(receiverWriteFailures));
+        } catch (IOException e) {
+            // Best-effort: a missing report is treated by the sender as "no failures".
+        }
+        receiverWriteFailures.clear();
         syncing.set(false);
         protocol.resetXmodemInProgress();
         touchHeartbeat();
@@ -1180,6 +1473,13 @@ public class SyncCoordinator {
             eventBus.post(new SyncEvent.LogEvent("Deleting file: " + relativePath));
             if (fileToDelete.delete()) {
                 eventBus.post(new SyncEvent.LogEvent("File deleted: " + relativePath));
+                // The path no longer exists on this side, so its confirmed state has nothing to
+                // describe; keeping it would only let a later reconcile target a ghost.
+                SyncStateStore store = receiverStateStore();
+                if (store != null) {
+                    store.remove(relativePath);
+                    store.flush();
+                }
                 cleanupEmptyDirectories(fileToDelete.getParentFile(), syncFolder);
                 flushSharedTextBetweenOperations();
             } else {
@@ -1266,9 +1566,30 @@ public class SyncCoordinator {
             // writes
             applyConflictResolutionsToLocalFiles(syncPlan, syncFolder);
 
+            // KEEP_REMOTE + BOTH made both sides agree on the receiver's version without a
+            // transfer: tell the receiver so its base advances in this same session. Best-effort —
+            // the local writes already happened, and a lost notification only costs a conservative
+            // conflict on the next sync.
+            Map<String, SyncStateStore.Confirmed> adopted = collectAdoptedResolutions(syncPlan);
+            if (!adopted.isEmpty()) {
+                try {
+                    protocol.sendConflictAdopted(adopted);
+                } catch (IOException e) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Could not notify the receiver about adopted conflicts ("
+                                            + e.getMessage()
+                                            + ")"));
+                }
+            }
+
             int rawTotalOperations = syncPlan.getTotalOperations();
             if (rawTotalOperations == 0) {
                 eventBus.post(new SyncEvent.LogEvent("No files need to be synced or deleted"));
+                // Nothing was transferred, but the resolutions above and every converged file
+                // still advanced the base — record them so a KEEP_REMOTE-only sync leaves both
+                // ends' stores consistent.
+                recordSenderBase(syncPlan, Set.of());
                 eventBus.post(new SyncEvent.SyncCompleteEvent());
                 syncing.set(false);
                 onSyncIdle.run();
@@ -1962,6 +2283,19 @@ public class SyncCoordinator {
             exitSyncIfCancelled(session);
 
             protocol.sendSyncComplete();
+            // The receiver reports the paths it could not write (almost never any): subtract them
+            // from the optimistic record below, so a locked or corrupt target diverges no further
+            // instead of being remembered as synced.
+            Set<String> writeFailures = protocol.waitForWriteFailures();
+            if (!writeFailures.isEmpty()) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Receiver could not write "
+                                        + writeFailures.size()
+                                        + " file(s); they will be retransmitted on the next"
+                                        + " sync"));
+            }
+            recordSenderBase(syncPlan, writeFailures);
             eventBus.post(new SyncEvent.LogEvent("Sync completed successfully"));
             eventBus.post(new SyncEvent.TransferCompleteEvent());
             eventBus.post(new SyncEvent.SyncCompleteEvent());

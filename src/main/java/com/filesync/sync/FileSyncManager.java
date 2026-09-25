@@ -162,6 +162,10 @@ public class FileSyncManager {
 
         protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
         protocol.setBaseStaleHandler(syncCoordinator::handleIncomingBaseStale);
+        // Confirmed-state bookkeeping: a verified, written transfer advances the local base, and a
+        // failed one is reported to the sender once at the end of the session.
+        protocol.setTransferConfirmedHandler(syncCoordinator::confirmReceiverState);
+        protocol.setWriteFailedHandler(syncCoordinator::noteReceiverWriteFailure);
 
         protocol.setProgressListener(
                 new XModemTransfer.TransferProgressListener() {
@@ -1035,6 +1039,8 @@ public class FileSyncManager {
             case SyncProtocol.CMD_FILE_DELTA -> syncCoordinator.handleIncomingFileDelta(msg);
             case SyncProtocol.CMD_FILE_APPEND -> syncCoordinator.handleIncomingFileAppend(msg);
             case SyncProtocol.CMD_BASE_STALE -> syncCoordinator.handleIncomingBaseStale(msg);
+            case SyncProtocol.CMD_CONFLICT_ADOPTED -> syncCoordinator.handleConflictAdopted(msg);
+            case SyncProtocol.CMD_WRITE_FAILURES -> syncCoordinator.handleWriteFailures(msg);
             case SyncProtocol.CMD_BATCH_DATA -> {
                 int expectedSize = msg.getParamAsInt(0);
                 protocol.sendAck();

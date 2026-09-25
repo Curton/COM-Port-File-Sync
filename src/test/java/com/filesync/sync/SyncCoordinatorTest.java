@@ -3,6 +3,7 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +50,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 /** Unit tests for SyncCoordinator to improve code coverage. */
 class SyncCoordinatorTest {
@@ -1612,10 +1615,451 @@ class SyncCoordinatorTest {
 
     private String getLastErrorMessage() {
         for (int i = postedEvents.size() - 1; i >= 0; i--) {
-            if (postedEvents.get(i) instanceof SyncEvent.ErrorEvent) {
-                return ((SyncEvent.ErrorEvent) postedEvents.get(i)).getMessage();
+            SyncEvent e = postedEvents.get(i);
+            if (e instanceof SyncEvent.ErrorEvent) {
+                return ((SyncEvent.ErrorEvent) e).getMessage();
             }
         }
         return null;
+    }
+
+    // ========== Confirmed-state (base) recording ==========
+
+    /** A fresh read of the store the coordinator maintains for the test sync folder. */
+    private SyncStateStore stateStore() {
+        return SyncStateStore.forFolder(syncFolder);
+    }
+
+    /**
+     * Pre-seed one confirmed state into the on-disk store and close it again. Assertions must never
+     * reuse this instance: the coordinator opens its own, and a later read has to go through a new
+     * {@link #stateStore()} to observe what the coordinator persisted.
+     */
+    private void seedBase(String path, String md5, long size) throws IOException {
+        SyncStateStore seeder = stateStore();
+        seeder.confirm(path, md5, size);
+        seeder.flush();
+    }
+
+    /**
+     * Stub the batch transfer so every batch entry succeeds without touching the wire, remembering
+     * nothing about failures.
+     */
+    private void stubSuccessfulBatches() throws IOException {
+        when(mockProtocol.sendBatch(
+                        anyList(),
+                        anyInt(),
+                        isA(BatchTransferSession.BatchProgressCallback.class),
+                        isA(File.class)))
+                .thenAnswer(
+                        invocation -> {
+                            BatchTransferSession.BatchProgressCallback cb =
+                                    invocation.getArgument(2);
+                            @SuppressWarnings("unchecked")
+                            List<Object[]> batch = invocation.getArgument(0);
+                            int size = batch.size();
+                            for (int i = 0; i < size; i++) {
+                                cb.onEntryProcessed(i, size, (String) batch.get(i)[1]);
+                            }
+                            return true;
+                        });
+        when(mockProtocol.waitForWriteFailures()).thenReturn(java.util.Set.of());
+    }
+
+    /** Run one full sender session against the given plan. */
+    private void runSync(SyncPreviewPlan plan) {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.setExecutor(null);
+        coordinator.startSyncWithPlan(plan);
+    }
+
+    @Test
+    void performSync_success_recordsBaseForTransferredAndConvergedFiles() throws IOException {
+        Files.writeString(new File(syncFolder, "sent.txt").toPath(), "sender content");
+        Files.writeString(new File(syncFolder, "converged.txt").toPath(), "same on both sides");
+
+        List<FileChangeDetector.FileInfo> transfer =
+                List.of(new FileChangeDetector.FileInfo("sent.txt", 4L, 1L, "local-md5"));
+        Map<String, FileChangeDetector.FileInfo> local = new java.util.HashMap<>();
+        local.put("sent.txt", transfer.get(0));
+        local.put(
+                "converged.txt",
+                new FileChangeDetector.FileInfo("converged.txt", 16L, 1L, "shared-md5"));
+        Map<String, FileChangeDetector.FileInfo> remote = new java.util.HashMap<>(local);
+        stubSuccessfulBatches();
+
+        runSync(
+                new SyncPreviewPlan(
+                        transfer,
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        4L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        remote,
+                        local));
+
+        SyncStateStore store = stateStore();
+        SyncStateStore.Confirmed sent = store.base("sent.txt");
+        assertNotNull(sent, "a transferred file is confirmed with its local state");
+        assertEquals("local-md5", sent.md5());
+        SyncStateStore.Confirmed converged = store.base("converged.txt");
+        assertNotNull(converged, "a converged file keeps its base fresh without a transfer");
+        assertEquals("shared-md5", converged.md5());
+    }
+
+    @Test
+    void performSync_success_prunesBasesForDeletedPaths() throws IOException {
+        Map<String, FileChangeDetector.FileInfo> local = new java.util.HashMap<>();
+        local.put("kept.txt", new FileChangeDetector.FileInfo("kept.txt", 5L, 1L, "md5-kept"));
+        // A leftover base for a path the local manifest no longer has: pruned at session end.
+        seedBase("gone.txt", "md5-gone", 3L);
+        seedBase("kept.txt", "md5-kept-old", 5L);
+        stubSuccessfulBatches();
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        0L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(local),
+                        local));
+
+        SyncStateStore store = stateStore();
+        SyncStateStore.Confirmed kept = store.base("kept.txt");
+        assertNotNull(kept, "a still-present path keeps (a refreshed) base");
+        assertEquals("md5-kept", kept.md5(), "the refreshed base reflects the manifest md5");
+        assertNull(store.base("gone.txt"), "a base for a path gone from the manifest is pruned");
+    }
+
+    @Test
+    void performSync_success_recordsMergedContentForMergeResolutions() throws IOException {
+        Files.writeString(new File(syncFolder, "merged.txt").toPath(), "old content");
+        FileChangeDetector.FileInfo fi =
+                new FileChangeDetector.FileInfo("merged.txt", 11L, 1L, "stale-local-md5");
+        ConflictInfo conflict =
+                new ConflictInfo("merged.txt", fi, fi, false, "old content".getBytes());
+        conflict.setResolution(ConflictInfo.Resolution.MERGE);
+        conflict.setMergedContent("merged content");
+        stubSuccessfulBatches();
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(fi),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        11L,
+                        false,
+                        List.of(conflict),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("merged.txt", fi)));
+
+        SyncStateStore.Confirmed base = stateStore().base("merged.txt");
+        assertNotNull(base, "a merged file is confirmed with the merged content's hash");
+        assertEquals(
+                FileChangeDetector.manifestMd5("merged content".getBytes()),
+                base.md5(),
+                "the merged result is not in any manifest, so its hash is computed from the"
+                        + " content actually sent");
+        assertEquals("merged content".length(), base.size());
+    }
+
+    @Test
+    void performSync_success_skipsBaseForSkippedConflictsAndUnresolved() throws IOException {
+        Files.writeString(new File(syncFolder, "skipped.txt").toPath(), "x");
+        Files.writeString(new File(syncFolder, "untouched.txt").toPath(), "x");
+        FileChangeDetector.FileInfo skipped =
+                new FileChangeDetector.FileInfo("skipped.txt", 1L, 1L, "md5-skip");
+        FileChangeDetector.FileInfo diverged =
+                new FileChangeDetector.FileInfo("untouched.txt", 1L, 1L, "md5-diverged");
+        ConflictInfo skipConflict = new ConflictInfo("skipped.txt", skipped, skipped, false, null);
+        skipConflict.setResolution(ConflictInfo.Resolution.SKIP);
+        stubSuccessfulBatches();
+
+        // untouched.txt differs on both sides but is not part of the transfer: a diverged file that
+        // was neither sent nor converged must keep its divergence alive instead of being blessed.
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(skipped),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        1L,
+                        false,
+                        List.of(skipConflict),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("skipped.txt", skipped, "untouched.txt", diverged)));
+
+        assertNull(
+                stateStore().base("skipped.txt"),
+                "a SKIP resolution must not record a base: the divergence has to resurface");
+        assertNull(
+                stateStore().base("untouched.txt"),
+                "a diverged file that was not sent and is not converged records nothing");
+    }
+
+    @Test
+    void performSync_success_keepRemoteBoth_announcesAndRecordsRemoteState() throws IOException {
+        FileChangeDetector.FileInfo local =
+                new FileChangeDetector.FileInfo("adopted.txt", 3L, 1L, "local-md5");
+        FileChangeDetector.FileInfo remote =
+                new FileChangeDetector.FileInfo("adopted.txt", 7L, 9L, "remote-md5");
+        ConflictInfo conflict =
+                new ConflictInfo("adopted.txt", local, remote, false, "local\n".getBytes());
+        conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+        conflict.setApplyTarget(ConflictInfo.ApplyTarget.BOTH);
+        conflict.setRemoteContent("remote content".getBytes());
+        stubSuccessfulBatches();
+
+        // The local manifest really knows the file (prune only keeps what it lists), and the
+        // remote manifest reports the diverged state that provoked the conflict.
+        Map<String, FileChangeDetector.FileInfo> localManifest =
+                java.util.Map.of("adopted.txt", local);
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(local),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        3L,
+                        false,
+                        List.of(conflict),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Map.of("adopted.txt", remote),
+                        localManifest));
+
+        // The resolution is broadcast so the peer's base advances in the same session...
+        ArgumentCaptor<Map<String, SyncStateStore.Confirmed>> captor =
+                ArgumentCaptor.forClass(Map.class);
+        verify(mockProtocol).sendConflictAdopted(captor.capture());
+        assertEquals(
+                new SyncStateStore.Confirmed("remote-md5", 7L),
+                captor.getValue().get("adopted.txt"),
+                "the adopted state announces the receiver's md5 and size");
+        // ...and recorded locally: both sides now hold the remote version.
+        SyncStateStore.Confirmed base = stateStore().base("adopted.txt");
+        assertNotNull(base, "KEEP_REMOTE+BOTH records the remote state as the base");
+        assertEquals("remote-md5", base.md5());
+        assertEquals(7L, base.size());
+        assertEquals(
+                "remote content",
+                Files.readString(new File(syncFolder, "adopted.txt").toPath()),
+                "the local file was overwritten with the remote content");
+    }
+
+    @Test
+    void performSync_zeroOperations_stillRecordsResolvedAndConvergedFiles() throws IOException {
+        FileChangeDetector.FileInfo local =
+                new FileChangeDetector.FileInfo("adopted.txt", 3L, 1L, "local-md5");
+        FileChangeDetector.FileInfo remote =
+                new FileChangeDetector.FileInfo("adopted.txt", 7L, 9L, "remote-md5");
+        ConflictInfo conflict =
+                new ConflictInfo("adopted.txt", local, remote, false, "l".getBytes());
+        conflict.setResolution(ConflictInfo.Resolution.KEEP_REMOTE);
+        conflict.setApplyTarget(ConflictInfo.ApplyTarget.BOTH);
+        conflict.setRemoteContent("remote content".getBytes());
+        Map<String, FileChangeDetector.FileInfo> locals = new java.util.HashMap<>();
+        locals.put("adopted.txt", local);
+        locals.put(
+                "converged.txt",
+                new FileChangeDetector.FileInfo("converged.txt", 4L, 1L, "shared-md5"));
+        Files.writeString(new File(syncFolder, "converged.txt").toPath(), "same");
+        when(mockProtocol.waitForWriteFailures()).thenReturn(java.util.Set.of());
+
+        // KEEP_REMOTE-only plans filter the file out of filesToTransfer, so totalOperations is 0
+        // and the early-return path runs — the bases must still be recorded.
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        0L,
+                        false,
+                        List.of(conflict),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of("converged.txt"),
+                        locals,
+                        locals));
+
+        SyncStateStore store = stateStore();
+        SyncStateStore.Confirmed adopted = store.base("adopted.txt");
+        assertNotNull(adopted, "the early return still records adopted resolutions");
+        assertEquals("remote-md5", adopted.md5());
+        assertNotNull(store.base("converged.txt"), "and keeps converged bases fresh");
+        verify(mockProtocol, never()).sendSyncComplete();
+    }
+
+    @Test
+    void performSync_success_excludesReportedWriteFailuresFromBase() throws IOException {
+        Files.writeString(new File(syncFolder, "ok.txt").toPath(), "x");
+        Files.writeString(new File(syncFolder, "locked.txt").toPath(), "x");
+        FileChangeDetector.FileInfo ok =
+                new FileChangeDetector.FileInfo("ok.txt", 1L, 1L, "md5-ok");
+        FileChangeDetector.FileInfo locked =
+                new FileChangeDetector.FileInfo("locked.txt", 1L, 1L, "md5-locked");
+        stubSuccessfulBatches();
+        // The receiver reports locked.txt as unwritable: its confirmation must be withdrawn.
+        when(mockProtocol.waitForWriteFailures()).thenReturn(java.util.Set.of("locked.txt"));
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(ok, locked),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        2L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("ok.txt", ok, "locked.txt", locked)));
+
+        SyncStateStore store = stateStore();
+        assertNotNull(store.base("ok.txt"), "a written file is confirmed");
+        assertNull(
+                store.base("locked.txt"),
+                "a reported write failure withdraws the path's optimistic confirmation");
+    }
+
+    @Test
+    void handleConflictAdopted_recordsAnnouncedStates() throws IOException {
+        String frame = "[[SYNC:CONFLICT_ADOPTED:2:a.txt:aa11:10:sub/b.txt:bb22:20]]";
+        SyncProtocol.Message msg = SyncProtocol.parseMessage(frame);
+        assertNotNull(msg, "test frame must parse");
+
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.handleConflictAdopted(msg);
+
+        SyncStateStore.Confirmed a = stateStore().base("a.txt");
+        assertNotNull(a, "the adopted path is confirmed from the frame");
+        assertEquals("aa11", a.md5());
+        assertEquals(10L, a.size());
+        SyncStateStore.Confirmed b = stateStore().base("sub/b.txt");
+        assertNotNull(b, "nested paths are announced like any other");
+        assertEquals("bb22", b.md5());
+        assertEquals(20L, b.size());
+    }
+
+    @Test
+    void handleConflictAdopted_emptyFrame_recordsNothing() throws IOException {
+        SyncProtocol.Message msg = SyncProtocol.parseMessage("[[SYNC:CONFLICT_ADOPTED:0]]");
+        assertNotNull(msg);
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.handleConflictAdopted(msg);
+        verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
+    }
+
+    @Test
+    void handleWriteFailures_withdrawsConfirmedPaths() throws IOException {
+        seedBase("a.txt", "md5-a", 1L);
+        seedBase("b.txt", "md5-b", 2L);
+
+        SyncProtocol.Message msg = SyncProtocol.parseMessage("[[SYNC:WRITE_FAILURES:1:a.txt]]");
+        assertNotNull(msg);
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.handleWriteFailures(msg);
+
+        SyncStateStore store = stateStore();
+        assertNull(store.base("a.txt"), "a reported failure withdraws the confirmation");
+        assertNotNull(store.base("b.txt"), "other paths are untouched");
+    }
+
+    @Test
+    void handleSyncComplete_flushesStoreAndReportsFailures() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+
+        // Simulate a receive session: one confirmed transfer and one failed write.
+        coordinator.confirmReceiverState("good.txt", "md5-good", 12L);
+        coordinator.noteReceiverWriteFailure("locked.txt");
+
+        coordinator.handleSyncComplete();
+
+        SyncStateStore store = stateStore();
+        assertNotNull(store.base("good.txt"), "a confirmed path was persisted before reporting");
+        assertEquals("md5-good", store.base("good.txt").md5());
+        ArgumentCaptor<java.util.Collection<String>> captor =
+                ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(mockProtocol).sendWriteFailures(captor.capture());
+        assertEquals(
+                List.of("locked.txt"),
+                List.copyOf(captor.getValue()),
+                "the failure set is reported to the sender once");
+    }
+
+    @Test
+    void confirmReceiverState_skipsEntriesWithoutHash() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+
+        coordinator.confirmReceiverState("fast.bin", null, 10L);
+        coordinator.confirmReceiverState("fast.bin", "", 10L);
+
+        assertNull(
+                stateStore().base("fast.bin"),
+                "fast mode leaves no hash, and without one no base can be compared");
+    }
+
+    @Test
+    void handleFileDelete_removesBaseForDeletedPath() throws IOException {
+        File file = new File(syncFolder, "doomed.txt");
+        Files.writeString(file.toPath(), "content");
+        seedBase("doomed.txt", "md5-doomed", 7L);
+
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        coordinator.handleFileDelete("doomed.txt");
+
+        assertFalse(file.exists());
+        assertNull(stateStore().base("doomed.txt"), "a deleted path drops its base with the file");
+    }
+
+    @Test
+    void handleManifestRequest_resetsFailureSetFromPriorSession() throws IOException {
+        SyncCoordinator coordinator =
+                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
+        // A failure recorded by a session that never reached SYNC_COMPLETE.
+        coordinator.noteReceiverWriteFailure("stale-locked.txt");
+        stubManifestExchangeForPreview();
+
+        // The next session's manifest request must start the failure set clean, so the stale
+        // path is not reported as this session's failure.
+        coordinator.handleManifestRequest(null, null);
+        coordinator.handleSyncComplete();
+
+        ArgumentCaptor<java.util.Collection<String>> captor =
+                ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(mockProtocol).sendWriteFailures(captor.capture());
+        assertTrue(
+                captor.getValue().isEmpty(),
+                "a new session reports only its own failures, got: " + captor.getValue());
     }
 }

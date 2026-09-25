@@ -23,6 +23,7 @@ public final class SyncPreviewPlan {
     private final Set<String> appendResumablePaths;
     private final Set<String> existingRemotePaths;
     private final Map<String, FileChangeDetector.FileInfo> remoteFileInfos;
+    private final Map<String, FileChangeDetector.FileInfo> localFileInfos;
 
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,
@@ -153,6 +154,39 @@ public final class SyncPreviewPlan {
             Set<String> appendResumablePaths,
             Set<String> existingRemotePaths,
             Map<String, FileChangeDetector.FileInfo> remoteFileInfos) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                deltaCandidatePaths,
+                appendResumablePaths,
+                existingRemotePaths,
+                remoteFileInfos,
+                Collections.emptyMap());
+    }
+
+    /**
+     * Full constructor additionally carrying the local manifest's per-file metadata. The end-of-
+     * session base recording needs it to tell converged files (local == remote, nothing
+     * transferred) from diverged ones, so their confirmed state stays fresh without re-sending.
+     */
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths,
+            Set<String> appendResumablePaths,
+            Set<String> existingRemotePaths,
+            Map<String, FileChangeDetector.FileInfo> remoteFileInfos,
+            Map<String, FileChangeDetector.FileInfo> localFileInfos) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
@@ -180,6 +214,10 @@ public final class SyncPreviewPlan {
         this.remoteFileInfos =
                 remoteFileInfos != null
                         ? Collections.unmodifiableMap(new HashMap<>(remoteFileInfos))
+                        : Collections.emptyMap();
+        this.localFileInfos =
+                localFileInfos != null
+                        ? Collections.unmodifiableMap(new HashMap<>(localFileInfos))
                         : Collections.emptyMap();
     }
 
@@ -220,7 +258,8 @@ public final class SyncPreviewPlan {
                 filteredDeltaCandidates,
                 filteredAppendResumable,
                 existingRemotePaths,
-                remoteFileInfos);
+                remoteFileInfos,
+                localFileInfos);
     }
 
     /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
@@ -363,6 +402,15 @@ public final class SyncPreviewPlan {
      */
     public FileChangeDetector.FileInfo getRemoteFileInfo(String path) {
         return remoteFileInfos.get(path);
+    }
+
+    /**
+     * Local manifest metadata (size, md5, lastModified) per path, for the end-of-session base
+     * recording: a path whose local md5 equals the remote one is already converged and keeps its
+     * confirmed state fresh without any transfer.
+     */
+    public Map<String, FileChangeDetector.FileInfo> getLocalFileInfos() {
+        return localFileInfos;
     }
 
     public boolean hasConflict(String path) {

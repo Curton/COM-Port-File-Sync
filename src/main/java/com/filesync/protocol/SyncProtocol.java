@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -95,6 +96,8 @@ public class SyncProtocol {
     public static final String CMD_FILE_DELTA = "FILE_DELTA";
     public static final String CMD_FILE_APPEND = "FILE_APPEND";
     public static final String CMD_BASE_STALE = "BASE_STALE";
+    public static final String CMD_CONFLICT_ADOPTED = "CONFLICT_ADOPTED";
+    public static final String CMD_WRITE_FAILURES = "WRITE_FAILURES";
 
     // Protocol markers
     private static final String START_MARKER = "[[SYNC:";
@@ -104,6 +107,10 @@ public class SyncProtocol {
     private static final char ESCAPE_CHAR = '\\';
 
     private static final int DEFAULT_TIMEOUT_MS = 30000;
+
+    /** Bounded wait for the receiver's end-of-session CMD_WRITE_FAILURES report. */
+    private static final int WRITE_FAILURES_WAIT_MS = 5000;
+
     private static final int SHARED_TEXT_INLINE_BUDGET_MS = 5000;
     private static final int MIN_SHARED_TEXT_INLINE_ENCODED_CHARS = 128;
     private static final String SHARED_TEXT_TRANSFER_NAME = "shared-text.txt";
@@ -2208,6 +2215,88 @@ public class SyncProtocol {
     /** Notify peer that a sync was cancelled. */
     public void sendCancelCommand() throws IOException {
         sendCommand(CMD_CANCEL);
+    }
+
+    /**
+     * Sender side: announce the paths a KEEP_REMOTE + ApplyTarget.BOTH conflict resolution just
+     * brought into agreement (the sender overwrote its local copy with the receiver's version). The
+     * receiver records the same confirmed state, so both ends' bases advance in the same session
+     * and the other direction does not re-report the file as a conflict.
+     *
+     * @param adopted path -> confirmed state (manifest md5 + size); announced as {@code (count,
+     *     path, md5, size)*count} — usually an empty map
+     */
+    public void sendConflictAdopted(Map<String, com.filesync.sync.SyncStateStore.Confirmed> adopted)
+            throws IOException {
+        if (adopted == null || adopted.isEmpty()) {
+            return;
+        }
+        String[] params = new String[1 + adopted.size() * 3];
+        params[0] = String.valueOf(adopted.size());
+        int index = 1;
+        for (Map.Entry<String, com.filesync.sync.SyncStateStore.Confirmed> entry :
+                adopted.entrySet()) {
+            params[index++] = entry.getKey();
+            params[index++] = entry.getValue().md5();
+            params[index++] = String.valueOf(entry.getValue().size());
+        }
+        sendCommand(CMD_CONFLICT_ADOPTED, params);
+    }
+
+    /**
+     * Receiver side: report the paths this session could not write (write failure, locked target,
+     * or manifest-md5 mismatch). Sent once when the sender's SYNC_COMPLETE arrives; the count is
+     * usually 0.
+     */
+    public void sendWriteFailures(java.util.Collection<String> failedPaths) throws IOException {
+        int count = failedPaths == null ? 0 : failedPaths.size();
+        String[] params = new String[1 + count];
+        params[0] = String.valueOf(count);
+        int index = 1;
+        if (failedPaths != null) {
+            for (String path : failedPaths) {
+                params[index++] = path;
+            }
+        }
+        sendCommand(CMD_WRITE_FAILURES, params);
+    }
+
+    /**
+     * Sender side: bounded wait for the receiver's end-of-session failure report (sent in response
+     * to this side's SYNC_COMPLETE). A timeout — or any other missing report — is treated as "no
+     * failures": the sender then keeps its optimistic confirmations, which at worst costs a
+     * redundant transfer on the next sync instead of a false conflict.
+     *
+     * @return the reported failure paths (empty when the report did not arrive)
+     */
+    public java.util.Set<String> waitForWriteFailures() throws IOException {
+        int savedTimeout = timeoutMs;
+        if (savedTimeout <= 0 || savedTimeout > WRITE_FAILURES_WAIT_MS) {
+            setTimeout(WRITE_FAILURES_WAIT_MS);
+        }
+        try {
+            SyncProtocol.Message msg = waitForCommand(CMD_WRITE_FAILURES);
+            if (msg == null) {
+                return java.util.Set.of();
+            }
+            String[] params = msg.getParams();
+            if (params.length < 2) {
+                return java.util.Set.of(); // count-only (or empty) report: no failures
+            }
+            int count = Math.max(0, Math.min(msg.getParamAsInt(0), params.length - 1));
+            java.util.Set<String> paths = new java.util.LinkedHashSet<>();
+            for (int i = 0; i < count; i++) {
+                String path = params[1 + i];
+                if (path != null && !path.isEmpty()) {
+                    paths.add(path);
+                }
+            }
+            return paths;
+        } catch (IOException | RuntimeException e) {
+            return java.util.Set.of();
+        } finally {
+            setTimeout(savedTimeout);
+        }
     }
 
     /**
