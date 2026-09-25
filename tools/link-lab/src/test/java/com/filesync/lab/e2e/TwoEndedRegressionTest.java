@@ -3,6 +3,8 @@ package com.filesync.lab.e2e;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.config.SettingsManager;
@@ -14,6 +16,7 @@ import com.filesync.lab.port.DuplexLink;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncEventType;
 import com.filesync.sync.SyncPreviewPlan;
+import com.filesync.sync.SyncStateStore;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -359,6 +362,121 @@ class TwoEndedRegressionTest {
         retrySender.sync();
         awaitFileContent(retryReceiver.workspace(), "dropped-ack.bin", payload);
         awaitSyncIdle();
+    }
+
+    /**
+     * The arbitration matrix against two real managers: which side diverged decides whether a file
+     * is transferred silently or surfaces as a conflict, and a resolved session advances the base
+     * so the next sync is quiet. The conflict is left unresolved on purpose - this harness has no
+     * dialog - which is exactly the "local wins" default the UI offers as well, so the observable
+     * outcome (transfer, then a shared base) is the same.
+     */
+    @Test
+    @Timeout(180)
+    void arbitrationTracksWhichSideActuallyChangedTheFile() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] agreed = "version one\n".getBytes(StandardCharsets.UTF_8);
+        writeFile(sender.workspace(), "shared.txt", agreed);
+        writeFile(receiver.workspace(), "shared.txt", agreed);
+
+        // Identical content on both sides is no conflict even with no history recorded yet.
+        SyncPreviewPlan first = sender.sync();
+        assertTrue(
+                first.getConflicts().isEmpty(),
+                "identical content never conflicts, there is nothing to arbitrate");
+        awaitSyncIdle();
+
+        // Only the sender changed it: the receiver still holds the base, so it is an ordinary
+        // transfer and nothing is asked.
+        byte[] senderEdit = "version two, edited on the sender\n".getBytes(StandardCharsets.UTF_8);
+        writeFile(sender.workspace(), "shared.txt", senderEdit);
+        SyncPreviewPlan second = sender.sync();
+        assertTrue(
+                second.getConflicts().isEmpty(),
+                "the receiver still holds the last synced state, so only the sender changed it");
+        awaitFileContent(receiver.workspace(), "shared.txt", senderEdit);
+        awaitSyncIdle();
+        assertNotNull(
+                SyncStateStore.forFolder(sender.workspace()).base("shared.txt"),
+                "a completed transfer records the base on the sender");
+
+        // Only the receiver changed it - and the edit is stamped older than the sender's copy, the
+        // case a timestamp rule cannot see: transferring the sender's version would silently
+        // discard it. The base says the receiver moved away from the agreed state, so it surfaces.
+        byte[] receiverEdit = "edited on the receiver instead\n".getBytes(StandardCharsets.UTF_8);
+        long olderThanTheSendersCopy =
+                new File(sender.workspace(), "shared.txt").lastModified() - 60_000L;
+        writeFile(receiver.workspace(), "shared.txt", receiverEdit);
+        assertTrue(
+                new File(receiver.workspace(), "shared.txt")
+                        .setLastModified(olderThanTheSendersCopy),
+                "stamping the older timestamp must succeed for the test to mean anything");
+        SyncPreviewPlan third = sender.sync();
+        assertEquals(
+                1,
+                third.getConflicts().size(),
+                "the receiver diverged from the base even though its copy looks older");
+        awaitFileContent(receiver.workspace(), "shared.txt", senderEdit);
+        awaitSyncIdle();
+
+        // Both sides changed it since the base: again one conflict.
+        byte[] bothSender = "sender side of the double edit\n".getBytes(StandardCharsets.UTF_8);
+        byte[] bothReceiver = "receiver side of the double edit\n".getBytes(StandardCharsets.UTF_8);
+        writeFile(sender.workspace(), "shared.txt", bothSender);
+        writeFile(receiver.workspace(), "shared.txt", bothReceiver);
+        SyncPreviewPlan fourth = sender.sync();
+        assertEquals(1, fourth.getConflicts().size(), "both sides diverged from the base");
+        awaitFileContent(receiver.workspace(), "shared.txt", bothSender);
+        awaitSyncIdle();
+
+        // The resolution above advanced the base on both ends, so a quiet sync follows.
+        SyncPreviewPlan fifth = sender.sync();
+        assertTrue(fifth.getConflicts().isEmpty(), "both ends now agree on the recorded base");
+        assertTrue(
+                fifth.getFilesToTransfer().isEmpty(),
+                "nothing left to move once the base matches the manifest");
+        awaitSyncIdle();
+    }
+
+    /**
+     * A path the receiver could not write must not be recorded as synced: the sender withdraws the
+     * optimistic confirmation on the receiver's end-of-session report and sends the file again on
+     * the next sync, where it succeeds once the obstruction is gone.
+     */
+    @Test
+    @Timeout(180)
+    void aWriteFailureWithdrawsTheBaseAndTheFileIsRetransferred() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] payload = "the payload that needs a home\n".getBytes(StandardCharsets.UTF_8);
+        writeFile(sender.workspace(), "blocked.txt", payload);
+        // A directory where the file has to land makes every write of that path fail.
+        File obstruction = new File(receiver.workspace(), "blocked.txt");
+        assertTrue(obstruction.mkdirs(), "the obstruction must be in place");
+
+        SyncPreviewPlan blocked = sender.sync();
+        assertTrue(
+                blocked.getFilesToTransfer().stream()
+                        .anyMatch(fi -> fi.getPath().equals("blocked.txt")),
+                "the sender cannot know the receiver cannot write the path");
+        awaitSyncIdle();
+        assertNull(
+                SyncStateStore.forFolder(sender.workspace()).base("blocked.txt"),
+                "a path reported as unwritten is withdrawn from the sender's record");
+        assertFalse(obstruction.isFile(), "no bytes were written into the directory");
+
+        assertTrue(obstruction.delete(), "the obstruction must be removable for the retry");
+        SyncPreviewPlan retry = sender.sync();
+        assertTrue(
+                retry.getFilesToTransfer().stream()
+                        .anyMatch(fi -> fi.getPath().equals("blocked.txt")),
+                "the withdrawn base makes the file eligible again");
+        awaitFileContent(receiver.workspace(), "blocked.txt", payload);
+        awaitSyncIdle();
+        assertNotNull(
+                SyncStateStore.forFolder(sender.workspace()).base("blocked.txt"),
+                "the successful retry records the base");
     }
 
     /**
