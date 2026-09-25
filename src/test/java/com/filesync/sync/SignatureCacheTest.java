@@ -18,9 +18,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Tests for {@link SignatureCache}: hit only when the receiver file identity (size, lastModified,
- * md5) matches exactly, persistence across instances, pruning, and graceful handling of corrupt or
- * incompatible cache files.
+ * Tests for {@link SignatureCache}: hit only when the receiver file identity (size, md5) matches
+ * exactly - a timestamp change with the same hash is not a change - plus persistence across
+ * instances, pruning, and graceful handling of corrupt or incompatible cache files.
  */
 class SignatureCacheTest {
 
@@ -68,11 +68,23 @@ class SignatureCacheTest {
         cache.store("app.log", remote(500, 42L, "md5-value"), signatures(randomBytes(500, 2)));
 
         assertNull(cache.lookup("app.log", remote(501, 42L, "md5-value")), "size changed");
-        assertNull(cache.lookup("app.log", remote(500, 43L, "md5-value")), "mtime changed");
         assertNull(cache.lookup("app.log", remote(500, 42L, "other-md5")), "md5 changed");
         assertNull(cache.lookup("other.log", remote(500, 42L, "md5-value")), "path changed");
         assertNull(cache.lookup("app.log", null), "no remote metadata");
         assertNull(cache.lookup("app.log", remote(500, 42L, null)), "quick-hash md5 null");
+    }
+
+    @Test
+    void timestampChangeWithTheSameHashStillHits() throws IOException {
+        SignatureCache cache = new SignatureCache(cacheFile());
+        cache.store("app.log", remote(500, 42L, "md5-value"), signatures(randomBytes(500, 2)));
+
+        // The md5 proves the content: a newer timestamp with the same hash means the same bytes, so
+        // the signatures still describe them and the exchange can be skipped.
+        assertNotNull(
+                cache.lookup("app.log", remote(500, 43L, "md5-value")),
+                "the lastModified is not part of the identity");
+        assertNotNull(cache.lookup("app.log", remote(500, 42L, "md5-value")));
     }
 
     @Test
@@ -94,7 +106,7 @@ class SignatureCacheTest {
 
         SignatureCache second = new SignatureCache(cacheFile());
         assertNotNull(second.lookup("app.log", remote(500, 42L, "md5-value")));
-        assertNull(second.lookup("app.log", remote(500, 43L, "md5-value")));
+        assertNull(second.lookup("app.log", remote(500, 42L, "other-md5")));
     }
 
     @Test
@@ -154,7 +166,7 @@ class SignatureCacheTest {
         SignatureCache cache = new SignatureCache(cacheFile());
         cache.store("app.log", remote(500, 42L, "md5-value"), signatures(randomBytes(500, 9)));
 
-        cache.markRejected("app.log", 500, 42L, "md5-value");
+        cache.markRejected("app.log", 500, "md5-value");
 
         assertTrue(cache.isRejected("app.log", remote(500, 42L, "md5-value")));
         assertNull(
@@ -166,7 +178,7 @@ class SignatureCacheTest {
     void markRejectedCreatesEntryWithoutPriorStore() throws IOException {
         SignatureCache cache = new SignatureCache(cacheFile());
 
-        cache.markRejected("app.log", 500, 42L, "md5-value");
+        cache.markRejected("app.log", 500, "md5-value");
 
         assertTrue(cache.isRejected("app.log", remote(500, 42L, "md5-value")));
         assertNull(cache.lookup("app.log", remote(500, 42L, "md5-value")));
@@ -175,21 +187,23 @@ class SignatureCacheTest {
     @Test
     void isRejectedOnlyMatchesTheNamedReceiverState() throws IOException {
         SignatureCache cache = new SignatureCache(cacheFile());
-        cache.markRejected("app.log", 500, 42L, "md5-value");
+        cache.markRejected("app.log", 500, "md5-value");
 
         assertFalse(cache.isRejected("app.log", remote(501, 42L, "md5-value")), "size changed");
-        assertFalse(cache.isRejected("app.log", remote(500, 43L, "md5-value")), "mtime changed");
         assertFalse(cache.isRejected("app.log", remote(500, 42L, "other-md5")), "md5 changed");
         assertFalse(cache.isRejected("other.log", remote(500, 42L, "md5-value")), "path changed");
         assertFalse(cache.isRejected("app.log", null), "no remote metadata");
         assertFalse(cache.isRejected("app.log", remote(500, 42L, null)), "quick-hash md5 null");
         assertFalse(cache.isRejected("app.log", remote(500, 42L, "")), "empty md5");
+        assertTrue(
+                cache.isRejected("app.log", remote(500, 43L, "md5-value")),
+                "same bytes under a newer timestamp are the same rejected state");
     }
 
     @Test
     void rejectionPersistsAcrossInstances() throws IOException {
         SignatureCache first = new SignatureCache(cacheFile());
-        first.markRejected("app.log", 500, 42L, "md5-value");
+        first.markRejected("app.log", 500, "md5-value");
         first.flush();
 
         SignatureCache second = new SignatureCache(cacheFile());
@@ -200,7 +214,7 @@ class SignatureCacheTest {
     @Test
     void storeOverwritesRejectionForTheSamePath() throws IOException {
         SignatureCache cache = new SignatureCache(cacheFile());
-        cache.markRejected("app.log", 500, 42L, "md5-value");
+        cache.markRejected("app.log", 500, "md5-value");
 
         // A later successful signature exchange for the same state heals the entry.
         cache.store("app.log", remote(500, 42L, "md5-value"), signatures(randomBytes(500, 10)));
@@ -216,7 +230,7 @@ class SignatureCacheTest {
 
         // The receiver's file changed since the stored signatures; the memo follows the newest
         // state, and the stale payload is never validated against either identity.
-        cache.markRejected("app.log", 600, 43L, "md5-new");
+        cache.markRejected("app.log", 600, "md5-new");
 
         assertTrue(cache.isRejected("app.log", remote(600, 43L, "md5-new")));
         assertNull(cache.lookup("app.log", remote(500, 42L, "md5-old")));

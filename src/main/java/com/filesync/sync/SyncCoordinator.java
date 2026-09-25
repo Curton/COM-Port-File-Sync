@@ -1183,8 +1183,8 @@ public class SyncCoordinator {
      * delta/append because its current file is not the state this side diffed against — a change
      * the manifest cannot see (e.g. a lone-CR/LF swap with identical size, lastModified and
      * normalized md5). Record the receiver state named in the message as rejected so both fast
-     * paths skip it until the file visibly changes; without the memo the sender would repeat the
-     * same rejected transfer on every sync. Must not throw: it also runs from the listener thread's
+     * paths skip it until the file changes; without the memo the sender would repeat the same
+     * rejected transfer on every sync. Must not throw: it also runs from the listener thread's
      * dispatch and from the middle of {@code SyncProtocol#waitForCommand}.
      */
     public void handleIncomingBaseStale(SyncProtocol.Message msg) {
@@ -1194,7 +1194,6 @@ public class SyncCoordinator {
         }
         String path = msg.getParam(0);
         long size = msg.getParamAsLong(1);
-        long lastModified = msg.getParamAsLong(2);
         String md5 = msg.getParam(3);
         eventBus.post(
                 new SyncEvent.LogEvent(
@@ -1209,7 +1208,8 @@ public class SyncCoordinator {
             }
             cache = createSignatureCache(syncFolder);
         }
-        cache.markRejected(path, size, lastModified, md5);
+        // The message's lastModified is not part of the memo: the md5 already proves the content.
+        cache.markRejected(path, size, md5);
         cache.flush();
     }
 

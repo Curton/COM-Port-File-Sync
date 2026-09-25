@@ -21,7 +21,7 @@ import java.util.Set;
 
 /**
  * Sender-side persistent cache of block signatures received from the peer, keyed by the receiver
- * file state they describe (path + size + lastModified + md5 from the receiver's manifest).
+ * file state they describe (path + size + md5 from the receiver's manifest).
  *
  * <p>The signature exchange is the dominant serial-link cost of the rsync-style delta path
  * (incompressible hash bytes for every block). When the receiver's file is unchanged between two
@@ -35,7 +35,11 @@ import java.util.Set;
  * notification naming its current file state, which is recorded here as a rejection memo: lookups
  * treat the entry as a miss and the append gate skips the same state, so the next sync exchanges
  * fresh signatures instead of repeating the rejected transfer. The memo is dropped automatically
- * once the receiver's file visibly changes or a later signature exchange overwrites the entry.
+ * once the receiver's file changes or a later signature exchange overwrites the entry.
+ *
+ * <p>The receiver's lastModified is deliberately not part of the identity: the manifest md5 already
+ * proves the content, and a timestamp change with the same hash means the bytes are identical — the
+ * cached signatures still describe them.
  *
  * <p>Cache files live under the shared cache directory ({@link CacheLocations#cacheDir()}, outside
  * the sync folder so the manifest scan never sees them), one JSON file per sync folder.
@@ -57,7 +61,6 @@ public final class SignatureCache {
      */
     private static final class CacheEntry {
         long remoteSize;
-        long remoteLastModified;
         String remoteMd5;
         String signaturesBase64;
         boolean rejected;
@@ -97,7 +100,7 @@ public final class SignatureCache {
         if (entry == null || entry.signaturesBase64 == null || entry.rejected) {
             return null;
         }
-        if (!identityMatches(entry, remote.getSize(), remote.getLastModified(), remote.getMd5())) {
+        if (!identityMatches(entry, remote.getSize(), remote.getMd5())) {
             return null;
         }
         try {
@@ -116,7 +119,6 @@ public final class SignatureCache {
         }
         CacheEntry entry = new CacheEntry();
         entry.remoteSize = remote.getSize();
-        entry.remoteLastModified = remote.getLastModified();
         entry.remoteMd5 = remote.getMd5();
         entry.signaturesBase64 = Base64.getEncoder().encodeToString(signatures.toBytes());
         entries.put(path, entry);
@@ -133,18 +135,16 @@ public final class SignatureCache {
     /**
      * Record that the receiver rejected a delta/append against the named receiver state (its
      * current file is not what the sender diffed against). Lookups and the append gate treat the
-     * state as unusable until the receiver's file visibly changes or a later successful signature
-     * exchange overwrites the entry.
+     * state as unusable until the receiver's file changes or a later successful signature exchange
+     * overwrites the entry.
      */
-    public synchronized void markRejected(
-            String path, long remoteSize, long remoteLastModified, String remoteMd5) {
+    public synchronized void markRejected(String path, long remoteSize, String remoteMd5) {
         CacheEntry entry = entries.get(path);
         if (entry == null) {
             entry = new CacheEntry();
             entries.put(path, entry);
         }
         entry.remoteSize = remoteSize;
-        entry.remoteLastModified = remoteLastModified;
         entry.remoteMd5 = remoteMd5;
         entry.rejected = true;
         dirty = true;
@@ -161,7 +161,7 @@ public final class SignatureCache {
         if (entry == null || !entry.rejected) {
             return false;
         }
-        return identityMatches(entry, remote.getSize(), remote.getLastModified(), remote.getMd5());
+        return identityMatches(entry, remote.getSize(), remote.getMd5());
     }
 
     /** Persist to disk if anything changed since load. Best-effort: IO errors are ignored. */
@@ -229,14 +229,14 @@ public final class SignatureCache {
     }
 
     /**
-     * Null-safe identity comparison so a legacy entry without an md5 never validates. All three
-     * fields must match: the entry describes exactly one receiver file state.
+     * Null-safe identity comparison so a legacy entry without an md5 never validates. The size and
+     * the content hash both have to match: the entry describes exactly one receiver file state. The
+     * lastModified is not consulted — identical bytes with a newer timestamp are still the same
+     * state as far as block signatures are concerned.
      */
-    private static boolean identityMatches(
-            CacheEntry entry, long remoteSize, long remoteLastModified, String remoteMd5) {
+    private static boolean identityMatches(CacheEntry entry, long remoteSize, String remoteMd5) {
         return entry.remoteMd5 != null
                 && entry.remoteSize == remoteSize
-                && entry.remoteLastModified == remoteLastModified
                 && entry.remoteMd5.equals(remoteMd5);
     }
 }

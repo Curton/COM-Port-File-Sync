@@ -1110,7 +1110,7 @@ class DeltaSyncCoordinatorTest {
         // must skip it so the file goes through the signature exchange instead of repeating
         // the same rejected transfer on every sync.
         SignatureCache seed = new SignatureCache(new File(syncFolder, "sigcache-test.json"));
-        seed.markRejected("app.log", base.length, 0L, remoteMd5);
+        seed.markRejected("app.log", base.length, remoteMd5);
         seed.flush();
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
