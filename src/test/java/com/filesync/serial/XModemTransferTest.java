@@ -49,7 +49,7 @@ class XModemTransferTest {
 
     @Test
     void receiveIntoStreamsVerifiedBlocksAndCapsPaddingAtExpectedLength() throws IOException {
-        // Crosses block formats: one 4096-byte block plus a 104-byte tail inside a 1K block.
+        // Crosses block formats: one 4096-byte block plus a 104-byte tail inside a 128-byte block.
         byte[] payload = new byte[4200];
         for (int i = 0; i < payload.length; i++) {
             payload[i] = (byte) (i * 31);
@@ -205,6 +205,33 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
+    void sendSplitsShortTailInto128ByteBlocksInsteadOfOnePadded1KBlock() throws IOException {
+        // 4300 bytes = one 4K block + a 204-byte tail. The tail used to ride in a single 1K
+        // block padded with 820 CTRL-Z bytes; it must now walk out as two 128-byte blocks so
+        // the padding overhead on the line is capped at 127 bytes.
+        byte[] payload = new byte[4300];
+        // ACK budget: drainExtraHandshakeChars, then per block a stale-char drain + a block
+        // ACK (3 blocks), then the EOT ACK.
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(buildInput(XModemTransfer.C, 8));
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+
+        List<Byte> dataHeaders = new ArrayList<>();
+        for (byte[] write : serialPort.getWrites()) {
+            if (write.length > 4) { // data packet: header + blockNum + complement + data + CRC
+                dataHeaders.add(write[0]);
+            }
+        }
+        assertEquals(
+                List.of(XModemTransfer.STX4K, XModemTransfer.SOH, XModemTransfer.SOH),
+                dataHeaders,
+                "the 204-byte tail must split into two 128-byte blocks, not one padded 1K block");
+    }
+
+    @Test
+    @Timeout(20)
     void receiveToleratesSenderThatAnswersAfterSeveralResendCycles() throws IOException {
         // The receiver re-sends 'C' every 200ms; a sender that only answers after ~450ms —
         // past one resend cycle — must still connect, because the receive window spans
@@ -228,7 +255,7 @@ class XModemTransferTest {
     @Test
     @Timeout(20)
     void sendRunsBlockBoundaryHookAndDeliversFrameBetweenBlocks() throws IOException {
-        // 4200 bytes = one 4K block + one 1K block, so the hook runs at two boundaries.
+        // 4200 bytes = one 4K block + one 128-byte block, so the hook runs at two boundaries.
         // Scripted reads: 'C' handshake, ACK drained by drainExtraHandshakeChars, ACK drained
         // by block 1's stale-char drain, ACK for block 1, ACK for the interleave frame, ACK
         // drained by block 2's stale-char drain, ACK for block 2, ACK for the EOT.
@@ -470,7 +497,7 @@ class XModemTransferTest {
             if (remaining >= 4096) {
                 blockSize = 4096;
                 header = XModemTransfer.STX4K;
-            } else if (remaining >= 1024 || remaining > 128) {
+            } else if (remaining >= 1024) {
                 blockSize = 1024;
                 header = XModemTransfer.STX;
             } else {
@@ -610,7 +637,7 @@ class XModemTransferTest {
             if (remaining >= 4096) {
                 blockSize = 4096;
                 header = XModemTransfer.STX4K;
-            } else if (remaining >= 1024 || remaining > 128) {
+            } else if (remaining >= 1024) {
                 blockSize = 1024;
                 header = XModemTransfer.STX;
             } else {

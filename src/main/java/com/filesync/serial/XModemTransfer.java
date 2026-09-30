@@ -717,9 +717,8 @@ public class XModemTransfer {
         if (remainingBytes >= BLOCK_SIZE_1K) {
             return new BlockFormat(BLOCK_SIZE_1K, STX);
         }
-        if (remainingBytes > BLOCK_SIZE_128) {
-            return new BlockFormat(BLOCK_SIZE_1K, STX);
-        }
+        // Tails of 129..1023 bytes walk out as several 128-byte blocks: a single padded 1K
+        // block would push up to ~900 bytes of CTRL-Z padding across the line for nothing.
         return new BlockFormat(BLOCK_SIZE_128, SOH);
     }
 
