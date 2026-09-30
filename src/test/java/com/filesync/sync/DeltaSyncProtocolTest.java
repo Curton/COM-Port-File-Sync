@@ -277,6 +277,120 @@ class DeltaSyncProtocolTest {
     }
 
     @Test
+    void sendFileAppend_announcesFrameAndTransfers() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(XMODEM_SEND_HANDSHAKE);
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        byte[] tail = {1, 2, 3, 4, 5};
+        boolean compressed = protocol.sendFileAppend("a.bin", tail, 999L, 100L, 105L, "def", null);
+
+        // The frame must carry path, length, compressed-flag, timestamp, baseSize, finalSize,
+        // finalMd5 and the manifest md5 (empty here: no manifest at hand).
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("FILE_APPEND:a.bin")),
+                "must announce FILE_APPEND with the path");
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.endsWith(":999:100:105:def:]]")),
+                "frame must end with lastModified:baseSize:finalSize:finalMd5:manifestMd5");
+        assertFalse(protocol.isXmodemInProgress(), "xmodem flag must be reset after send");
+        // For this small tail, compressIfBeneficial leaves it uncompressed.
+        assertFalse(compressed);
+    }
+
+    @Test
+    void sendFileAppend_commandPhaseFailure_retriesThreeTimesWithoutCancel() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        // No ACK is fed, so every waitForCommand(CMD_ACK) times out -> command/ACK-phase failure,
+        // which is the safe-to-retry case. The receiver never entered xmodem.receive().
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.sendFileAppend(
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100L, 103L, "def", null));
+        assertTrue(thrown.getMessage().contains("Failed to send file append"));
+        assertEquals(
+                3,
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_APPEND:a.bin"))
+                        .count(),
+                "command-phase failure must retry the command: " + serial.getWrittenLines());
+        // No transfer cancel is needed because the receiver never entered xmodem.receive().
+        assertTrue(
+                serial.getWrittenLines().stream().noneMatch(l -> l.contains("CANCEL")),
+                "must not cancel on command-phase failure: " + serial.getWrittenLines());
+        assertTrue(thrown.getMessage().contains("after 3 attempt(s)"));
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendFileAppend_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt() throws IOException {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        serial.feedLine("[[SYNC:ACK]]"); // ACK for the first attempt's waitForCommand
+        // Peer rejects the block with CAN -> xmodem.send returns false (XMODEM-phase failure).
+        serial.feedBytes(
+                new byte[] {
+                    XModemTransfer.C, XModemTransfer.CAN, XModemTransfer.CAN, XModemTransfer.CAN
+                });
+        SyncProtocol protocol = new SyncProtocol(serial);
+        protocol.setTimeout(150);
+
+        IOException thrown =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                protocol.sendFileAppend(
+                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100L, 103L, "def", null));
+        assertTrue(
+                thrown instanceof TransferCancelledException,
+                "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("cancelled by receiver"));
+        // XMODEM-phase failure must not retry: exactly one FILE_APPEND frame was written.
+        assertEquals(
+                1,
+                serial.getWrittenLines().stream()
+                        .filter(l -> l.contains("FILE_APPEND:a.bin"))
+                        .count(),
+                "XMODEM-phase failure must not re-send the command");
+        // A transfer cancel (CMD_CANCEL) must be sent to release the receiver's blocked
+        // xmodem.receive().
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("CANCEL")),
+                "must send a transfer cancel on XMODEM-phase failure: " + serial.getWrittenLines());
+        assertFalse(protocol.isXmodemInProgress());
+    }
+
+    @Test
+    void sendFile_fromDisk_announcesFrameAndTransfers(@TempDir Path tempDir) throws IOException {
+        File file = Files.write(tempDir.resolve("a.bin"), new byte[] {1, 2, 3, 4, 5}).toFile();
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        serial.feedLine("[[SYNC:ACK]]");
+        serial.feedBytes(XMODEM_SEND_HANDSHAKE);
+        SyncProtocol protocol = new SyncProtocol(serial);
+
+        boolean compressed = protocol.sendFile(tempDir.toFile(), "a.bin", (String) null);
+
+        // The frame carries path, length, compressed-flag, the file's own lastModified and the
+        // manifest md5 (empty here: fast mode). The timestamp is not scripted, so only its
+        // position before the closing marker is asserted.
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.contains("FILE_DATA:a.bin")),
+                "must announce FILE_DATA with the path");
+        assertTrue(
+                serial.getWrittenLines().stream().anyMatch(l -> l.matches(".*:5:false:\\d+:\\]\\]")),
+                "frame must end with length:compressed:lastModified: "
+                        + serial.getWrittenLines());
+        assertFalse(protocol.isXmodemInProgress(), "xmodem flag must be reset after send");
+        // For this small payload, compressIfBeneficial leaves it uncompressed.
+        assertFalse(compressed);
+    }
+
+    @Test
     void sendFile_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt(@TempDir Path tempDir)
             throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();

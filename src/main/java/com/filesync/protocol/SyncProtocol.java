@@ -95,6 +95,8 @@ public class SyncProtocol {
     public static final String CMD_DELTA_SIG_DATA = "DELTA_SIG_DATA";
     public static final String CMD_FILE_DELTA = "FILE_DELTA";
     public static final String CMD_FILE_APPEND = "FILE_APPEND";
+    public static final String CMD_FILE_RENAME = "FILE_RENAME";
+    public static final String CMD_RENAME_REJECTED = "RENAME_REJECTED";
     public static final String CMD_BASE_STALE = "BASE_STALE";
     public static final String CMD_CONFLICT_ADOPTED = "CONFLICT_ADOPTED";
     public static final String CMD_WRITE_FAILURES = "WRITE_FAILURES";
@@ -506,67 +508,113 @@ public class SyncProtocol {
         }
     }
 
-    /**
-     * Sender side: send a delta-encoded file. The {@code delta} bytes are compressed if beneficial.
-     * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
-     * sourceSize} lets the receiver pre-size the output buffer. The {@code manifestMd5} is the
-     * sender's manifest hash of the full source — the reconstruction already proves byte equality
-     * against {@code sourceMd5}, so the receiver only records it as the path's confirmed state.
-     *
-     * <p>Recovery contract: the command/ACK handshake is retried up to {@code maxAttempts} times.
-     * Each retry first ejects the peer from any blocked {@code xmodem.receive()} ({@link
-     * #resyncForCommandRetry()}), because a handshake failure can also mean the receiver did accept
-     * the command and its ACK was lost on the way back. Once the XMODEM phase is entered, any
-     * failure ({@code xmodem.send} returning {@code false} or throwing) is terminal: a
-     * transfer-cancel is sent to release the receiver from its blocking {@code xmodem.receive()}
-     * and no further attempts are made. A re-sent command after a mid-transfer failure would
-     * otherwise be consumed as XMODEM data, desynchronizing the peers; the CAN abort plus the
-     * listener's frame resync is the intended recovery, and the file is re-evaluated on the next
-     * sync.
-     *
-     * @return true if the delta was compressed, false otherwise
-     */
-    public boolean sendFileDelta(
-            String relativePath,
-            byte[] delta,
-            long lastModified,
-            long sourceSize,
-            String sourceMd5,
-            String manifestMd5)
-            throws IOException {
-        CompressionUtil.CompressedData compressedData =
-                CompressionUtil.compressIfBeneficial(relativePath, delta);
-        boolean wasCompressed = compressedData.isCompressed();
-        long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
+    /** Retry budget for the command/ACK handshake that precedes every payload transfer. */
+    private static final int SEND_HANDSHAKE_ATTEMPTS = 3;
 
-        final int maxAttempts = 3;
+    /** Pause between handshake retries, giving the peer's listener time to drain the resync. */
+    private static final long SEND_HANDSHAKE_RETRY_PAUSE_MS = 200;
+
+    /** Announces one transfer attempt to the receiver: the command half of the handshake. */
+    @FunctionalInterface
+    private interface TransferAnnouncement {
+        void announce() throws IOException;
+    }
+
+    /** Summary of a handshake-retry loop that never completed its payload transfer. */
+    private record HandshakeFailure(int attemptsUsed, IOException lastFailure) {}
+
+    /**
+     * Shared skeleton of the payload senders ({@link #sendFileDelta}, {@link #sendFileAppend},
+     * {@link #sendBatch} and both {@link #sendFile} overloads): announce the transfer, wait for the
+     * receiver's ACK, then transfer {@code payload} via one XMODEM session — retrying the
+     * command/ACK handshake up to {@link #SEND_HANDSHAKE_ATTEMPTS} times.
+     *
+     * <p>Recovery contract: each retry first ejects the peer from any blocked {@code
+     * xmodem.receive()} ({@link #resyncForCommandRetry()}), because a handshake failure can also
+     * mean the receiver did accept the command and its ACK was lost on the way back. Once the
+     * XMODEM phase is entered, any failure ({@code xmodem.send} returning {@code false} or
+     * throwing) is terminal: a transfer-cancel is sent to release the receiver from its blocking
+     * {@code xmodem.receive()} and no further attempts are made. A re-sent command after a
+     * mid-transfer failure would otherwise be consumed as XMODEM data, desynchronizing the peers;
+     * the CAN abort plus the listener's frame resync is the intended recovery, and the file is
+     * re-evaluated on the next sync. A peer cancel ({@link TransferCancelledException}) is always
+     * terminal and propagates unchanged.
+     *
+     * @param announcement announces one attempt: sends the transfer's framed command
+     * @param payload the bytes transferred by the XMODEM session once the handshake completes
+     * @param failureLabel the noun phrase completing "Failed to send …", e.g. {@code "file delta
+     *     for "} — the variable part of the terminal failure message
+     * @param targetName the transfer's target path, quoted in the terminal failure message
+     * @param notifyMessage the best-effort CMD_ERROR text sent to the receiver on exhaustion
+     * @param cancelMessage the {@link TransferCancelledException} text used when the peer cancelled
+     * @throws IOException when every attempt failed, carrying the last failure as suppressed cause
+     */
+    private void sendWithHandshakeRetry(
+            TransferAnnouncement announcement,
+            byte[] payload,
+            String failureLabel,
+            String targetName,
+            String notifyMessage,
+            String cancelMessage)
+            throws IOException {
+        HandshakeFailure failure = runHandshakeRetry(announcement, payload);
+        if (failure == null) {
+            return;
+        }
+
+        String detail = xmodem.getLastErrorMessage();
+        if (detail == null || detail.isEmpty()) {
+            detail =
+                    failure.lastFailure() != null
+                            ? failure.lastFailure().getMessage()
+                            : "unknown XMODEM error";
+        }
+        IOException finalEx =
+                new IOException(
+                        "Failed to send "
+                                + failureLabel
+                                + targetName
+                                + " after "
+                                + failure.attemptsUsed()
+                                + " attempt(s) ("
+                                + detail
+                                + ")");
+        if (failure.lastFailure() != null) {
+            finalEx.addSuppressed(failure.lastFailure());
+        }
+        // Notify the receiver so it exits any XMODEM receive loop still pending from a
+        // command-phase failure (an XMODEM-phase failure already sent a cancel).
+        notifyPeerOfSendFailure(notifyMessage);
+        throw maybePeerCancelled(finalEx, cancelMessage);
+    }
+
+    /**
+     * Run the shared handshake-retry loop once: announce and wait ACK, then send the payload.
+     * Returns {@code null} when a payload transfer completed; otherwise the failure summary for the
+     * caller's terminal handling. Also used directly by {@link #sendBatch}, whose exhaustion is
+     * reported as a {@code false} return instead of an exception.
+     */
+    private HandshakeFailure runHandshakeRetry(TransferAnnouncement announcement, byte[] payload)
+            throws IOException {
         int attemptsUsed = 0;
         IOException lastFailure = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        for (int attempt = 1; attempt <= SEND_HANDSHAKE_ATTEMPTS; attempt++) {
             attemptsUsed = attempt;
             boolean xmodemPhase = false;
             try {
-                sendCommand(
-                        CMD_FILE_DELTA,
-                        relativePath,
-                        String.valueOf(compressedData.getData().length),
-                        String.valueOf(wasCompressed),
-                        String.valueOf(ts),
-                        String.valueOf(sourceSize),
-                        sourceMd5,
-                        manifestMd5);
+                announcement.announce();
                 waitForCommand(CMD_ACK);
 
                 xmodemInProgress.set(true);
                 xmodemPhase = true;
                 boolean success;
                 try {
-                    success = xmodem.send(compressedData.getData());
+                    success = xmodem.send(payload);
                 } finally {
                     xmodemInProgress.set(false);
                 }
                 if (success) {
-                    return wasCompressed;
+                    return null;
                 }
             } catch (IOException e) {
                 // A peer cancel is terminal for the session: never retry a refused transfer.
@@ -594,35 +642,60 @@ public class SyncProtocol {
             // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
             // from xmodem.receive() (its ACK may have been lost after it accepted the command).
             resyncForCommandRetry();
-            if (attempt < maxAttempts) {
+            if (attempt < SEND_HANDSHAKE_ATTEMPTS) {
                 try {
-                    Thread.sleep(200);
+                    Thread.sleep(SEND_HANDSHAKE_RETRY_PAUSE_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
         }
+        return new HandshakeFailure(attemptsUsed, lastFailure);
+    }
 
-        String detail = xmodem.getLastErrorMessage();
-        if (detail == null || detail.isEmpty()) {
-            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
-        }
-        IOException finalEx =
-                new IOException(
-                        "Failed to send file delta for "
-                                + relativePath
-                                + " after "
-                                + attemptsUsed
-                                + " attempt(s) ("
-                                + detail
-                                + ")");
-        if (lastFailure != null) {
-            finalEx.addSuppressed(lastFailure);
-        }
-        notifyPeerOfSendFailure("File delta send failed: " + relativePath);
-        throw maybePeerCancelled(
-                finalEx, "Delta transfer of " + relativePath + " cancelled by receiver");
+    /**
+     * Sender side: send a delta-encoded file. The {@code delta} bytes are compressed if beneficial.
+     * The {@code sourceMd5} is forwarded so the receiver can verify its reconstruction; {@code
+     * sourceSize} lets the receiver pre-size the output buffer. The {@code manifestMd5} is the
+     * sender's manifest hash of the full source — the reconstruction already proves byte equality
+     * against {@code sourceMd5}, so the receiver only records it as the path's confirmed state.
+     *
+     * <p>The handshake is retried per the shared recovery contract of {@link
+     * #sendWithHandshakeRetry}.
+     *
+     * @return true if the delta was compressed, false otherwise
+     */
+    public boolean sendFileDelta(
+            String relativePath,
+            byte[] delta,
+            long lastModified,
+            long sourceSize,
+            String sourceMd5,
+            String manifestMd5)
+            throws IOException {
+        CompressionUtil.CompressedData compressedData =
+                CompressionUtil.compressIfBeneficial(relativePath, delta);
+        boolean wasCompressed = compressedData.isCompressed();
+        long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
+
+        sendWithHandshakeRetry(
+                () ->
+                        sendCommand(
+                                CMD_FILE_DELTA,
+                                relativePath,
+                                String.valueOf(compressedData.getData().length),
+                                String.valueOf(wasCompressed),
+                                String.valueOf(ts),
+                                String.valueOf(sourceSize),
+                                sourceMd5,
+                                manifestMd5),
+                compressedData.getData(),
+                "file delta for ",
+                relativePath,
+                "File delta send failed: " + relativePath,
+                "Delta transfer of " + relativePath + " cancelled by receiver");
+        return wasCompressed;
     }
 
     /**
@@ -727,11 +800,7 @@ public class SyncProtocol {
      * raw-byte {@code finalMd5} describe the sender's full file and let the receiver verify the
      * reconstruction before writing.
      *
-     * <p>Retry contract: identical to {@link #sendFileDelta} — the command/ACK handshake is retried
-     * up to {@code maxAttempts} times, ejecting a possibly-stuck receiver from {@code
-     * xmodem.receive()} before each retry ({@link #resyncForCommandRetry()}); once the XMODEM phase
-     * is entered, any failure is terminal (transfer-cancel releases the receiver from its blocking
-     * {@code xmodem.receive()}).
+     * <p>Retry contract: the shared one of {@link #sendWithHandshakeRetry}.
      *
      * @param manifestMd5 the sender's manifest hash of the full file, recorded by the receiver as
      *     the confirmed state on success (the raw {@code finalMd5} verification already proves byte
@@ -752,91 +821,24 @@ public class SyncProtocol {
         boolean wasCompressed = compressedData.isCompressed();
         long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
 
-        final int maxAttempts = 3;
-        int attemptsUsed = 0;
-        IOException lastFailure = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            attemptsUsed = attempt;
-            boolean xmodemPhase = false;
-            try {
-                sendCommand(
-                        CMD_FILE_APPEND,
-                        relativePath,
-                        String.valueOf(compressedData.getData().length),
-                        String.valueOf(wasCompressed),
-                        String.valueOf(ts),
-                        String.valueOf(baseSize),
-                        String.valueOf(finalSize),
-                        finalMd5,
-                        manifestMd5);
-                waitForCommand(CMD_ACK);
-
-                xmodemInProgress.set(true);
-                xmodemPhase = true;
-                boolean success;
-                try {
-                    success = xmodem.send(compressedData.getData());
-                } finally {
-                    xmodemInProgress.set(false);
-                }
-                if (success) {
-                    return wasCompressed;
-                }
-            } catch (IOException e) {
-                // A peer cancel is terminal for the session: never retry a refused transfer.
-                if (e instanceof TransferCancelledException) {
-                    throw (TransferCancelledException) e;
-                }
-                lastFailure = e;
-            }
-
-            if (xmodemPhase) {
-                // XMODEM-phase failure: the receiver may still be blocked in xmodem.receive(),
-                // so a re-sent command would be swallowed as XMODEM data. Cancel the peer's
-                // receive and stop instead of retrying.
-                try {
-                    sendTransferCancel();
-                } catch (IOException ignored) {
-                }
-                try {
-                    serialPort.clearInputBuffer();
-                } catch (IOException ignored) {
-                }
-                break;
-            }
-
-            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
-            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
-            resyncForCommandRetry();
-            if (attempt < maxAttempts) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        }
-
-        String detail = xmodem.getLastErrorMessage();
-        if (detail == null || detail.isEmpty()) {
-            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
-        }
-        IOException finalEx =
-                new IOException(
-                        "Failed to send file append for "
-                                + relativePath
-                                + " after "
-                                + attemptsUsed
-                                + " attempt(s) ("
-                                + detail
-                                + ")");
-        if (lastFailure != null) {
-            finalEx.addSuppressed(lastFailure);
-        }
-        notifyPeerOfSendFailure("File append send failed: " + relativePath);
-        throw maybePeerCancelled(
-                finalEx, "Append transfer of " + relativePath + " cancelled by receiver");
+        sendWithHandshakeRetry(
+                () ->
+                        sendCommand(
+                                CMD_FILE_APPEND,
+                                relativePath,
+                                String.valueOf(compressedData.getData().length),
+                                String.valueOf(wasCompressed),
+                                String.valueOf(ts),
+                                String.valueOf(baseSize),
+                                String.valueOf(finalSize),
+                                finalMd5,
+                                manifestMd5),
+                compressedData.getData(),
+                "file append for ",
+                relativePath,
+                "File append send failed: " + relativePath,
+                "Append transfer of " + relativePath + " cancelled by receiver");
+        return wasCompressed;
     }
 
     /**
@@ -1201,70 +1203,19 @@ public class SyncProtocol {
 
         byte[] batch = BatchTransferSession.buildBatch(files, maxBatchSizeBytes);
 
-        // Retry only the command/ACK handshake. Once the XMODEM phase is entered, a failure is
-        // terminal: the receiver may be blocked in xmodem.receive() and a re-sent command would
-        // be consumed as XMODEM data, desynchronizing the peers. See sendFileDelta for the full
-        // rationale; the CAN abort plus the listener's frame resync is the intended recovery.
-        final int maxAttempts = 3;
-        int attemptsUsed = 0;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            attemptsUsed = attempt;
-            boolean xmodemPhase = false;
-            try {
-                sendCommand(CMD_BATCH_DATA, String.valueOf(batch.length));
-
-                waitForCommand(CMD_ACK);
-
-                xmodemInProgress.set(true);
-                xmodemPhase = true;
-                boolean success;
-                try {
-                    success = xmodem.send(batch);
-                } finally {
-                    xmodemInProgress.set(false);
-                }
-
-                if (success) {
-                    return true;
-                }
-            } catch (IOException e) {
-                // A peer cancel is terminal for the session and must propagate: returning false
-                // here would let the caller's per-file fallback re-send what the peer refused.
-                // For other failures, lastFailure tracking is unnecessary: sendBatch returns
-                // false rather than reporting a cause, and the detail is not surfaced.
-                if (e instanceof TransferCancelledException) {
-                    throw (TransferCancelledException) e;
-                }
-            }
-
-            if (xmodemPhase) {
-                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
-                try {
-                    sendTransferCancel();
-                } catch (IOException ignored) {
-                }
-                try {
-                    serialPort.clearInputBuffer();
-                } catch (IOException ignored) {
-                }
-                break;
-            }
-
-            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
-            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
-            resyncForCommandRetry();
-            if (attempt < maxAttempts) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
+        // Retry only the command/ACK handshake, per the shared contract of
+        // sendWithHandshakeRetry. Unlike the single-file senders, exhaustion is reported as a
+        // false return rather than an exception, so the loop is used directly here.
+        HandshakeFailure failure =
+                runHandshakeRetry(
+                        () -> sendCommand(CMD_BATCH_DATA, String.valueOf(batch.length)), batch);
+        if (failure == null) {
+            return true;
         }
         // All attempts failed. Notify the receiver so it exits any XMODEM receive loop still
         // pending from a command-phase failure (an XMODEM-phase failure already sent a cancel).
-        notifyPeerOfSendFailure("Batch transfer failed after " + attemptsUsed + " attempt(s)");
+        notifyPeerOfSendFailure(
+                "Batch transfer failed after " + failure.attemptsUsed() + " attempt(s)");
         return false;
     }
 
@@ -1383,99 +1334,22 @@ public class SyncProtocol {
         boolean wasCompressed = compressedData.isCompressed();
         long lastModified = file.lastModified();
 
-        // Retry only the command/ACK handshake; an XMODEM-phase failure is terminal because the
-        // receiver may be blocked in xmodem.receive() and a re-sent command would be consumed as
-        // XMODEM data. See sendFileDelta for the full rationale.
-        final int maxAttempts = 3;
-        int attemptsUsed = 0;
-        IOException lastFailure = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            attemptsUsed = attempt;
-            boolean xmodemPhase = false;
-            try {
-                // Send file header for this attempt
-                sendCommand(
-                        CMD_FILE_DATA,
-                        relativePath,
-                        String.valueOf(compressedData.getData().length),
-                        String.valueOf(wasCompressed),
-                        String.valueOf(lastModified),
-                        manifestMd5);
-
-                // Wait for receiver ACK to ensure proper synchronization
-                waitForCommand(CMD_ACK);
-
-                // Send file data via XMODEM
-                xmodemInProgress.set(true);
-                xmodemPhase = true;
-                boolean success;
-                try {
-                    success = xmodem.send(compressedData.getData());
-                } finally {
-                    xmodemInProgress.set(false);
-                }
-
-                if (success) {
-                    return wasCompressed;
-                }
-            } catch (IOException e) {
-                // A peer cancel is terminal for the session: never retry a refused transfer.
-                if (e instanceof TransferCancelledException) {
-                    throw (TransferCancelledException) e;
-                }
-                // Failed attempt - continue to cleanup and retry/cancel logic below
-                lastFailure = e;
-            }
-
-            if (xmodemPhase) {
-                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
-                try {
-                    sendTransferCancel();
-                } catch (IOException ignored) {
-                }
-                try {
-                    serialPort.clearInputBuffer();
-                } catch (IOException ignored) {
-                }
-                break;
-            }
-
-            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
-            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
-            resyncForCommandRetry();
-
-            if (attempt < maxAttempts) {
-                // Small backoff before retrying
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        }
-
-        String detail = xmodem.getLastErrorMessage();
-        if (detail == null || detail.isEmpty()) {
-            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
-        }
-        IOException finalEx =
-                new IOException(
-                        "Failed to send file "
-                                + relativePath
-                                + " after "
-                                + attemptsUsed
-                                + " attempt(s) ("
-                                + detail
-                                + ")");
-        if (lastFailure != null) {
-            finalEx.addSuppressed(lastFailure);
-        }
-        // Notify the receiver so it exits any XMODEM receive loop still pending from a
-        // command-phase failure (an XMODEM-phase failure already sent a cancel).
-        notifyPeerOfSendFailure("File send failed: " + relativePath);
-        throw maybePeerCancelled(
-                finalEx, "File transfer of " + relativePath + " cancelled by receiver");
+        // Retry only the command/ACK handshake; see sendWithHandshakeRetry for the contract.
+        sendWithHandshakeRetry(
+                () ->
+                        sendCommand(
+                                CMD_FILE_DATA,
+                                relativePath,
+                                String.valueOf(compressedData.getData().length),
+                                String.valueOf(wasCompressed),
+                                String.valueOf(lastModified),
+                                manifestMd5),
+                compressedData.getData(),
+                "file ",
+                relativePath,
+                "File send failed: " + relativePath,
+                "File transfer of " + relativePath + " cancelled by receiver");
+        return wasCompressed;
     }
 
     /**
@@ -1540,94 +1414,22 @@ public class SyncProtocol {
         boolean wasCompressed = compressedData.isCompressed();
         long ts = lastModified > 0 ? lastModified : System.currentTimeMillis();
 
-        // Retry only the command/ACK handshake; an XMODEM-phase failure is terminal because the
-        // receiver may be blocked in xmodem.receive() and a re-sent command would be consumed as
-        // XMODEM data. See sendFileDelta for the full rationale.
-        final int maxAttempts = 3;
-        int attemptsUsed = 0;
-        IOException lastFailure = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            attemptsUsed = attempt;
-            boolean xmodemPhase = false;
-            try {
-                sendCommand(
-                        CMD_FILE_DATA,
-                        relativePath,
-                        String.valueOf(compressedData.getData().length),
-                        String.valueOf(wasCompressed),
-                        String.valueOf(ts),
-                        manifestMd5);
-
-                waitForCommand(CMD_ACK);
-
-                xmodemInProgress.set(true);
-                xmodemPhase = true;
-                boolean success;
-                try {
-                    success = xmodem.send(compressedData.getData());
-                } finally {
-                    xmodemInProgress.set(false);
-                }
-
-                if (success) {
-                    return wasCompressed;
-                }
-            } catch (IOException e) {
-                // A peer cancel is terminal for the session: never retry a refused transfer.
-                if (e instanceof TransferCancelledException) {
-                    throw (TransferCancelledException) e;
-                }
-                lastFailure = e;
-            }
-
-            if (xmodemPhase) {
-                // XMODEM-phase failure: cancel the peer's blocked xmodem.receive() and stop.
-                try {
-                    sendTransferCancel();
-                } catch (IOException ignored) {
-                }
-                try {
-                    serialPort.clearInputBuffer();
-                } catch (IOException ignored) {
-                }
-                break;
-            }
-
-            // Command/ACK-phase failure: retry only after ejecting a possibly-stuck receiver
-            // from xmodem.receive() (its ACK may have been lost after it accepted the command).
-            resyncForCommandRetry();
-
-            if (attempt < maxAttempts) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        }
-
-        String detail = xmodem.getLastErrorMessage();
-        if (detail == null || detail.isEmpty()) {
-            detail = lastFailure != null ? lastFailure.getMessage() : "unknown XMODEM error";
-        }
-        IOException finalEx =
-                new IOException(
-                        "Failed to send merged file "
-                                + relativePath
-                                + " after "
-                                + attemptsUsed
-                                + " attempt(s) ("
-                                + detail
-                                + ")");
-        if (lastFailure != null) {
-            finalEx.addSuppressed(lastFailure);
-        }
-        // Notify the receiver so it exits any XMODEM receive loop still pending from a
-        // command-phase failure (an XMODEM-phase failure already sent a cancel).
-        notifyPeerOfSendFailure("File send failed: " + relativePath);
-        throw maybePeerCancelled(
-                finalEx, "File transfer of " + relativePath + " cancelled by receiver");
+        // Retry only the command/ACK handshake; see sendWithHandshakeRetry for the contract.
+        sendWithHandshakeRetry(
+                () ->
+                        sendCommand(
+                                CMD_FILE_DATA,
+                                relativePath,
+                                String.valueOf(compressedData.getData().length),
+                                String.valueOf(wasCompressed),
+                                String.valueOf(ts),
+                                manifestMd5),
+                compressedData.getData(),
+                "merged file ",
+                relativePath,
+                "File send failed: " + relativePath,
+                "File transfer of " + relativePath + " cancelled by receiver");
+        return wasCompressed;
     }
 
     /** Send a single dropped file to the peer. */
