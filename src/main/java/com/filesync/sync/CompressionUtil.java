@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.zip.Deflater;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -208,14 +209,19 @@ public class CompressionUtil {
         return ratio < MIN_COMPRESSION_RATIO;
     }
 
-    /** Compress data using GZIP */
+    /** Compress data using GZIP at level 9 (best compression). */
     public static byte[] compress(byte[] data) throws IOException {
         if (data == null || data.length == 0) {
             return data;
         }
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (GZIPOutputStream gzos = new GZIPOutputStream(baos)) {
+        try (GZIPOutputStream gzos =
+                new GZIPOutputStream(baos) {
+                    {
+                        def.setLevel(Deflater.BEST_COMPRESSION);
+                    }
+                }) {
             gzos.write(data);
         }
         return baos.toByteArray();
