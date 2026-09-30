@@ -18,6 +18,9 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private static final String START_SYNC_TEXT = "Start Sync";
     private static final String CANCEL_SYNC_TEXT = "Cancel";
 
+    /** How long a finished transfer's caption lingers before the bar reverts to Ready. */
+    private static final int PROGRESS_RESET_DELAY_MS = 15_000;
+
     private final JFrame owner;
     private final MainFrameComponents components;
     private final FileSyncManager syncManager;
@@ -28,6 +31,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private javax.swing.JDialog pendingWriteDialog;
     private javax.swing.JList<String> pendingWriteList;
     private Runnable onDisconnectedCallback;
+    private final javax.swing.Timer progressResetTimer;
 
     public SyncController(
             JFrame owner,
@@ -42,6 +46,16 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         this.state = state;
         this.settings = settings;
         this.logController = logController;
+        this.progressResetTimer =
+                new javax.swing.Timer(
+                        PROGRESS_RESET_DELAY_MS,
+                        event -> {
+                            javax.swing.JProgressBar bar = components.getProgressBar();
+                            bar.setIndeterminate(false);
+                            bar.setValue(0);
+                            bar.setString("Ready");
+                        });
+        this.progressResetTimer.setRepeats(false);
     }
 
     public void setPreviewRenderer(SyncPreviewRenderer previewRenderer) {
@@ -608,9 +622,20 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         logController.log("[DEBUG] runSyncPreview: initiateSync returned");
     }
 
+    /** Arms the one-shot timer that reverts the progress bar to Ready (EDT only). */
+    private void scheduleProgressBarReset() {
+        progressResetTimer.restart();
+    }
+
+    /** Disarms a pending Ready revert so it cannot stomp on newer progress (EDT only). */
+    private void cancelProgressBarReset() {
+        progressResetTimer.stop();
+    }
+
     public void onSyncStarted() {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
+                    cancelProgressBarReset();
                     components.getSyncButton().setText(CANCEL_SYNC_TEXT);
                     components.getSyncButton().setEnabled(true);
                     components.getPreviewSyncButton().setEnabled(false);
@@ -624,6 +649,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     public void onSyncCancelled() {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
+                    cancelProgressBarReset();
                     components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Sync cancelled");
                     updateSyncButtonState();
@@ -649,6 +675,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setValue(100);
                     components.getProgressBar().setString("Sync complete");
+                    scheduleProgressBarReset();
                     updateSyncButtonState();
                 });
     }
@@ -684,6 +711,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private int lastManifestPercent = 0;
 
     public void onManifestProgress(int processed, int total, String fileName) {
+        cancelProgressBarReset();
         javax.swing.JProgressBar bar = components.getProgressBar();
         if (processed < 0) {
             // Sender waiting for the remote manifest: nothing countable yet, show motion instead
@@ -723,6 +751,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     public void onFileProgress(int currentFile, int totalFiles, String fileName) {
+        cancelProgressBarReset();
         javax.swing.JProgressBar bar = components.getProgressBar();
         if (totalFiles <= 0) {
             // The receiver's unknown-total batch path reports 0; a percentage of zero is
@@ -738,6 +767,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     public void onTransferProgress(
             int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
+        cancelProgressBarReset();
         components.getProgressBar().setIndeterminate(false);
         String speedStr = UiFormatting.formatSpeed(speedBytesPerSec);
         if (totalBlocks > 0) {
@@ -757,6 +787,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                     components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Transfer complete");
                     components.getProgressBar().setValue(100);
+                    scheduleProgressBarReset();
                     updateSyncButtonState();
                 });
     }
@@ -800,6 +831,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
                     logController.log("ERROR: " + message);
+                    cancelProgressBarReset();
                     components.getProgressBar().setIndeterminate(false);
                     components.getProgressBar().setString("Error");
                     updateSyncButtonState();
