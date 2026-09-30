@@ -865,13 +865,13 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                 javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         pendingWriteList.setVisibleRowCount(8);
 
-        javax.swing.JButton retryButton = new javax.swing.JButton("重试");
+        javax.swing.JButton retryButton = new javax.swing.JButton("Retry");
         retryButton.addActionListener(
                 e -> syncManager.retryPendingWrites(getPendingWriteSelection()));
-        javax.swing.JButton skipButton = new javax.swing.JButton("跳过");
+        javax.swing.JButton skipButton = new javax.swing.JButton("Skip");
         skipButton.addActionListener(
                 e -> syncManager.skipPendingWrites(getPendingWriteSelection()));
-        javax.swing.JButton skipAllButton = new javax.swing.JButton("跳过全部");
+        javax.swing.JButton skipAllButton = new javax.swing.JButton("Skip All");
         skipAllButton.addActionListener(e -> syncManager.skipAllPendingWrites());
 
         javax.swing.JPanel buttons =
@@ -884,14 +884,17 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         content.setBorder(javax.swing.BorderFactory.createEmptyBorder(10, 10, 10, 10));
         content.add(
                 new javax.swing.JLabel(
-                        "<html>以下文件被其他程序占用，无法写入：<br>"
-                                + "关闭占用它们的程序后点击“重试”，或选择“跳过”"
-                                + "（被跳过的文件将在下次同步时重新获取）：</html>"),
+                        "<html>The following files are locked by another program and could not"
+                                + " be written:<br>"
+                                + "Close the programs using them, then click &quot;Retry&quot;, or"
+                                + " select files and click &quot;Skip&quot;"
+                                + " (skipped files will be picked up again on the next"
+                                + " sync):</html>"),
                 java.awt.BorderLayout.NORTH);
         content.add(new javax.swing.JScrollPane(pendingWriteList), java.awt.BorderLayout.CENTER);
         content.add(buttons, java.awt.BorderLayout.SOUTH);
 
-        pendingWriteDialog = new javax.swing.JDialog(owner, "文件被占用", false);
+        pendingWriteDialog = new javax.swing.JDialog(owner, "Files In Use", false);
         pendingWriteDialog.setContentPane(content);
         pendingWriteDialog.setSize(520, 320);
         pendingWriteDialog.setLocationRelativeTo(owner);
