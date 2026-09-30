@@ -5,6 +5,14 @@ import com.filesync.sync.ConflictInfo;
 final class SyncPreviewRow {
     private final SyncPreviewOperationType operationType;
     private final String path;
+
+    /**
+     * For a rename: the path the file is moving from. Null for every other operation. Only a
+     * display concern — selection, filtering and execution all key on {@link #path} (the rename's
+     * new path).
+     */
+    private final String altPath;
+
     private final String sizeText;
     private final long sizeBytes;
     private final ConflictInfo conflict;
@@ -29,8 +37,19 @@ final class SyncPreviewRow {
             String sizeText,
             long sizeBytes,
             ConflictInfo conflict) {
+        this(operationType, path, null, sizeText, sizeBytes, conflict);
+    }
+
+    SyncPreviewRow(
+            SyncPreviewOperationType operationType,
+            String path,
+            String altPath,
+            String sizeText,
+            long sizeBytes,
+            ConflictInfo conflict) {
         this.operationType = operationType;
         this.path = path;
+        this.altPath = altPath;
         this.sizeText = sizeText;
         this.sizeBytes = sizeBytes;
         this.conflict = conflict;
@@ -42,6 +61,19 @@ final class SyncPreviewRow {
 
     String getPath() {
         return path;
+    }
+
+    /** The path a rename moves away from, or null for every other operation. */
+    String getAltPath() {
+        return altPath;
+    }
+
+    /**
+     * What the Path column shows: the plain path, or "old → new" for a rename so the move reads at
+     * a glance without a second column.
+     */
+    String getDisplayPath() {
+        return altPath != null && !altPath.isEmpty() ? altPath + " → " + path : path;
     }
 
     String getSizeText() {
@@ -100,6 +132,7 @@ final class SyncPreviewRow {
             case CREATE_DIR -> "Create Dir";
             case DELETE_FILE -> "Delete File";
             case DELETE_DIR -> "Delete Dir";
+            case RENAME -> "Rename";
             default -> "Unknown";
         };
     }

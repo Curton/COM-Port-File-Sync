@@ -24,6 +24,7 @@ public final class SyncPreviewPlan {
     private final Set<String> existingRemotePaths;
     private final Map<String, FileChangeDetector.FileInfo> remoteFileInfos;
     private final Map<String, FileChangeDetector.FileInfo> localFileInfos;
+    private final List<FileChangeDetector.FileRename> renames;
 
     public SyncPreviewPlan(
             List<FileChangeDetector.FileInfo> filesToTransfer,
@@ -187,17 +188,58 @@ public final class SyncPreviewPlan {
             Set<String> existingRemotePaths,
             Map<String, FileChangeDetector.FileInfo> remoteFileInfos,
             Map<String, FileChangeDetector.FileInfo> localFileInfos) {
+        this(
+                filesToTransfer,
+                emptyDirectoriesToCreate,
+                filesToDelete,
+                emptyDirectoriesToDelete,
+                totalBytesToTransfer,
+                strictSyncMode,
+                conflicts,
+                deltaCandidatePaths,
+                appendResumablePaths,
+                existingRemotePaths,
+                remoteFileInfos,
+                localFileInfos,
+                Collections.emptyList());
+    }
+
+    /**
+     * Full constructor additionally carrying the renames the detector paired up (see {@link
+     * FileChangeDetector#findRenames}). A rename's new path is NOT part of {@code filesToTransfer}
+     * and its old path is NOT part of {@code filesToDelete}: the rename replaces both operations,
+     * so counting and filtering must account for it exactly once.
+     */
+    public SyncPreviewPlan(
+            List<FileChangeDetector.FileInfo> filesToTransfer,
+            List<String> emptyDirectoriesToCreate,
+            List<String> filesToDelete,
+            List<String> emptyDirectoriesToDelete,
+            long totalBytesToTransfer,
+            boolean strictSyncMode,
+            List<ConflictInfo> conflicts,
+            Set<String> deltaCandidatePaths,
+            Set<String> appendResumablePaths,
+            Set<String> existingRemotePaths,
+            Map<String, FileChangeDetector.FileInfo> remoteFileInfos,
+            Map<String, FileChangeDetector.FileInfo> localFileInfos,
+            List<FileChangeDetector.FileRename> renames) {
         this.filesToTransfer = copyFiles(filesToTransfer);
         this.emptyDirectoriesToCreate = copyPaths(emptyDirectoriesToCreate);
         this.filesToDelete = copyPaths(filesToDelete);
         this.emptyDirectoriesToDelete = copyPaths(emptyDirectoriesToDelete);
         this.totalBytesToTransfer = totalBytesToTransfer;
         this.strictSyncMode = strictSyncMode;
+        this.renames =
+                renames != null
+                        ? Collections.unmodifiableList(new ArrayList<>(renames))
+                        : Collections.emptyList();
         this.totalOperations =
                 this.filesToTransfer.size()
                         + this.emptyDirectoriesToCreate.size()
                         + this.filesToDelete.size()
-                        + this.emptyDirectoriesToDelete.size();
+                        + this.emptyDirectoriesToDelete.size()
+                        + this.renames.size();
         this.conflicts = conflicts != null ? List.copyOf(conflicts) : Collections.emptyList();
         this.deltaCandidatePaths =
                 deltaCandidatePaths != null
@@ -226,6 +268,28 @@ public final class SyncPreviewPlan {
             Set<String> selectedEmptyDirectoriesToCreate,
             Set<String> selectedFilesToDelete,
             Set<String> selectedEmptyDirectoriesToDelete) {
+        // No way to express a rename selection in this signature, so no rename survives: the
+        // unselected rename leaves the receiver's old copy in place and the sender keeps the new
+        // one, which the next sync pairs up again.
+        return createFilteredPlan(
+                selectedFilesToTransfer,
+                selectedEmptyDirectoriesToCreate,
+                selectedFilesToDelete,
+                selectedEmptyDirectoriesToDelete,
+                Collections.emptySet());
+    }
+
+    /**
+     * Derive the plan for the checked preview rows. A rename survives the filter when its new path
+     * is selected; the old path is not part of any selection set (it is not a delete row of this
+     * plan), so the pair is keyed on the new path alone.
+     */
+    public SyncPreviewPlan createFilteredPlan(
+            Set<String> selectedFilesToTransfer,
+            Set<String> selectedEmptyDirectoriesToCreate,
+            Set<String> selectedFilesToDelete,
+            Set<String> selectedEmptyDirectoriesToDelete,
+            Set<String> selectedRenames) {
         List<FileChangeDetector.FileInfo> filteredFilesToTransfer =
                 filterFilesBySelectionAndConflicts(
                         filesToTransfer, selectedFilesToTransfer, conflicts);
@@ -238,6 +302,9 @@ public final class SyncPreviewPlan {
 
         List<String> filteredEmptyDirectoriesToDelete =
                 filterPathsBySelection(emptyDirectoriesToDelete, selectedEmptyDirectoriesToDelete);
+
+        List<FileChangeDetector.FileRename> filteredRenames =
+                filterRenamesBySelection(renames, selectedRenames);
 
         long filteredTotalBytesToTransfer =
                 filteredFilesToTransfer.stream()
@@ -259,7 +326,26 @@ public final class SyncPreviewPlan {
                 filteredAppendResumable,
                 existingRemotePaths,
                 remoteFileInfos,
-                localFileInfos);
+                localFileInfos,
+                filteredRenames);
+    }
+
+    /** Renames that survived the selection filter, in the plan's deterministic order. */
+    private static List<FileChangeDetector.FileRename> filterRenamesBySelection(
+            List<FileChangeDetector.FileRename> source, Set<String> selectedToPaths) {
+        if (source == null || source.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (selectedToPaths == null) {
+            return new ArrayList<>(source);
+        }
+        List<FileChangeDetector.FileRename> result = new ArrayList<>();
+        for (FileChangeDetector.FileRename rename : source) {
+            if (selectedToPaths.contains(rename.getToPath())) {
+                result.add(rename);
+            }
+        }
+        return result;
     }
 
     /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
@@ -411,6 +497,15 @@ public final class SyncPreviewPlan {
      */
     public Map<String, FileChangeDetector.FileInfo> getLocalFileInfos() {
         return localFileInfos;
+    }
+
+    /**
+     * Renames to carry out instead of a transfer plus a delete (see {@link
+     * FileChangeDetector#findRenames}), ordered by the new path. A rename's new path never appears
+     * in {@link #getFilesToTransfer()} and its old path never in {@link #getFilesToDelete()}.
+     */
+    public List<FileChangeDetector.FileRename> getRenames() {
+        return renames;
     }
 
     public boolean hasConflict(String path) {

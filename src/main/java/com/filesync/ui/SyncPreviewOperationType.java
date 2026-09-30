@@ -8,5 +8,6 @@ public enum SyncPreviewOperationType {
     CONFLICT,
     CREATE_DIR,
     DELETE_FILE,
-    DELETE_DIR
+    DELETE_DIR,
+    RENAME
 }

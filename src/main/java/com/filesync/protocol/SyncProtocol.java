@@ -2169,6 +2169,87 @@ public class SyncProtocol {
         sendCommand(CMD_FILE_DELETE, relativePath);
     }
 
+    // ---- rename (same content at a new path) ----
+
+    /**
+     * Sender side: ask the receiver to rename a file it already holds, because the sender's new
+     * path carries the very same content (manifest md5) as the receiver's old path — the shape a
+     * local rename/move produces. Sending the two paths over the wire replaces a full retransfer of
+     * the file with an instant server-side move.
+     *
+     * <p>Unlike {@link #sendFileDelete} this is a confirmed exchange: the receiver answers {@link
+     * #CMD_ACK} only after it has verified the old path's content against {@code md5} and moved the
+     * file, and {@link #CMD_RENAME_REJECTED} when it cannot (old path missing, target occupied,
+     * content drifted). A rejection is a normal outcome, not a protocol failure: the caller falls
+     * back to transferring the new path and deleting the old one, exactly as it would without
+     * rename detection.
+     *
+     * @param fromPath receiver-side path of the existing file
+     * @param toPath receiver-side path the file should move to (the sender's new path)
+     * @param size sender's file size, recorded as the confirmed state on success
+     * @param lastModified sender timestamp the receiver stamps on the moved file
+     * @param md5 sender's manifest md5 of the content, verified against the old path before moving
+     * @return true when the receiver performed the rename, false when it rejected it
+     */
+    public boolean sendFileRename(
+            String fromPath, String toPath, long size, long lastModified, String md5)
+            throws IOException {
+        sendCommand(
+                CMD_FILE_RENAME,
+                fromPath,
+                toPath,
+                String.valueOf(size),
+                String.valueOf(lastModified > 0 ? lastModified : System.currentTimeMillis()),
+                md5 != null ? md5 : "");
+
+        long startTime = System.currentTimeMillis();
+        awaitingCommand.set(true);
+        try {
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                Message msg = receiveCommand();
+                if (msg == null) {
+                    continue;
+                }
+                String cmd = msg.getCommand();
+                if (CMD_ACK.equals(cmd)) {
+                    return true;
+                }
+                if (CMD_RENAME_REJECTED.equals(cmd)) {
+                    return false;
+                }
+                if (CMD_ERROR.equals(cmd)) {
+                    String errMsg = msg.getParams().length > 0 ? msg.getParam(0) : "unknown";
+                    throw new IOException("Remote error during rename: " + errMsg);
+                }
+                if (CMD_CANCEL.equals(cmd)) {
+                    // The peer cancelled the session: never retry against a peer that refused.
+                    throw new TransferCancelledException("Remote cancelled sync");
+                }
+                if (CMD_HEARTBEAT.equals(cmd)) {
+                    sendHeartbeatAck();
+                } else if (!CMD_HEARTBEAT_ACK.equals(cmd)) {
+                    // Anything else is unrelated to this exchange: stash it for the listener loop
+                    // instead of dropping it.
+                    stashAsyncMessage(msg);
+                }
+            }
+            throw new IOException(
+                    "Timeout waiting for rename acknowledgment: " + fromPath + " -> " + toPath);
+        } finally {
+            awaitingCommand.set(false);
+        }
+    }
+
+    /**
+     * Receiver side: refuse a rename the peer asked for, carrying the reason. The sender treats
+     * this as a fallback signal, so it must not be {@link #CMD_ERROR} (which aborts the whole
+     * session).
+     */
+    public void sendRenameRejected(String fromPath, String toPath, String reason)
+            throws IOException {
+        sendCommand(CMD_RENAME_REJECTED, fromPath, toPath, reason != null ? reason : "");
+    }
+
     /** Send mkdir command to create a directory on remote */
     public void sendMkdir(String relativePath) throws IOException {
         sendCommand(CMD_MKDIR, relativePath);

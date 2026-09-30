@@ -13,7 +13,9 @@ import com.filesync.protocol.TransferCancelledException;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -444,6 +446,28 @@ public class SyncCoordinator {
                                     + " deleted"));
         }
 
+        // Pair renames before anything downstream looks at the lists: a rename's new path is a
+        // transfer that becomes a server-side move, and its old path is a delete that the move
+        // already performs. Removing both here keeps the transfer, delta and delete phases from
+        // planning work the rename replaces.
+        List<FileChangeDetector.FileRename> renames =
+                FileChangeDetector.findRenames(localManifest, remoteManifest);
+        if (!renames.isEmpty()) {
+            Set<String> renamedToPaths = new HashSet<>();
+            Set<String> renamedFromPaths = new HashSet<>();
+            for (FileChangeDetector.FileRename rename : renames) {
+                renamedToPaths.add(rename.getToPath());
+                renamedFromPaths.add(rename.getFromPath());
+            }
+            filesToSync.removeIf(fi -> renamedToPaths.contains(fi.getPath()));
+            filesToDelete.removeIf(renamedFromPaths::contains);
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            renames.size()
+                                    + " file(s) renamed or moved (same content at a new path);"
+                                    + " the receiver will move them instead of retransferring"));
+        }
+
         long totalBytesToTransfer =
                 filesToSync.stream().mapToLong(FileChangeDetector.FileInfo::getSize).sum();
 
@@ -518,7 +542,8 @@ public class SyncCoordinator {
                 appendResumablePaths,
                 new HashSet<>(remoteManifest.getFiles().keySet()),
                 remoteManifest.getFiles(),
-                localManifest.getFiles());
+                localManifest.getFiles(),
+                renames);
     }
 
     /**
@@ -1370,6 +1395,8 @@ public class SyncCoordinator {
      *       transfer list only to be counted and dropped, so they record nothing — the divergence
      *       must resurface until it is actually resolved.
      *   <li>KEEP_REMOTE + BOTH: both sides hold the receiver's version (already announced).
+     *   <li>Renames: the receiver moved its copy onto the sender's content after verifying it, so
+     *       the new path is agreed-on on both sides (its old path is pruned below).
      *   <li>Converged files (local md5 == remote md5): nothing was transferred, but the base must
      *       keep tracking them or a later cache wipe would resurrect old conflicts.
      *   <li>Deselected / failed writes: nothing is recorded.
@@ -1410,6 +1437,15 @@ public class SyncCoordinator {
             } else {
                 confirmations.put(path, new SyncStateStore.Confirmed(fi.getMd5(), fi.getSize()));
             }
+        }
+
+        for (FileChangeDetector.FileRename rename : plan.getRenames()) {
+            // The receiver moved its copy onto the sender's content (md5-verified before the move),
+            // so both sides agree on the new path's state without a transfer. The old path is not
+            // in the local manifest anymore and is pruned below.
+            confirmations.put(
+                    rename.getToPath(),
+                    new SyncStateStore.Confirmed(rename.getMd5(), rename.getSize()));
         }
 
         for (Map.Entry<String, SyncStateStore.Confirmed> e :
@@ -1549,6 +1585,108 @@ public class SyncCoordinator {
                         new SyncEvent.ErrorEvent("Failed to delete directory: " + relativePath));
             }
         }
+    }
+
+    /**
+     * Receiver side: the sender asked to move a file we already hold to a new path, because the
+     * sender's file at the new path has the same manifest md5 as our copy — the shape a local
+     * rename/move produces. Accepting turns a whole-file retransfer into a local move.
+     *
+     * <p>The move is verified before it happens: the old path must exist as a file, the new path
+     * must be free, and hashing the old file must reproduce the announced md5 (guarding against a
+     * copy that changed between the sender's preview and this command). A rejection answers {@link
+     * SyncProtocol#sendRenameRejected}, which the sender turns into a plain transfer-plus-delete
+     * fallback — a benign outcome, not a session failure.
+     */
+    public void handleFileRename(SyncProtocol.Message msg) throws IOException {
+        if (msg.getParams().length < 5) {
+            protocol.sendRenameRejected("?", "?", "malformed rename command");
+            return;
+        }
+        String fromPath = msg.getParam(0);
+        String toPath = msg.getParam(1);
+        long size = msg.getParamAsLong(2);
+        long lastModified = msg.getParamAsLong(3);
+        String md5 = msg.getParam(4);
+
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null) {
+            protocol.sendRenameRejected(fromPath, toPath, "sync folder not configured");
+            return;
+        }
+
+        File fromFile;
+        File toFile;
+        try {
+            fromFile = resolveSafe(syncFolder, fromPath);
+            toFile = resolveSafe(syncFolder, toPath);
+        } catch (IOException e) {
+            protocol.sendRenameRejected(fromPath, toPath, "invalid path: " + e.getMessage());
+            return;
+        }
+
+        if (!fromFile.exists() || !fromFile.isFile()) {
+            protocol.sendRenameRejected(fromPath, toPath, "source file does not exist");
+            return;
+        }
+        if (toFile.exists()) {
+            protocol.sendRenameRejected(fromPath, toPath, "target path is occupied");
+            return;
+        }
+
+        // Content verification: the old file must still be what the sender compared against. A
+        // drift (edited on the receiver in the meantime) must not be papered over by a move —
+        // the fallback then transfers the sender's bytes properly.
+        if (md5 != null && !md5.isEmpty()) {
+            String actualMd5;
+            try {
+                actualMd5 = FileChangeDetector.calculateMD5(fromFile);
+            } catch (IOException e) {
+                protocol.sendRenameRejected(
+                        fromPath, toPath, "source file unreadable: " + e.getMessage());
+                return;
+            }
+            if (!md5.equals(actualMd5)) {
+                protocol.sendRenameRejected(fromPath, toPath, "content drifted on the receiver");
+                return;
+            }
+        }
+
+        File parent = toFile.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            protocol.sendRenameRejected(fromPath, toPath, "could not create target directory");
+            return;
+        }
+
+        eventBus.post(new SyncEvent.LogEvent("Renaming file: " + fromPath + " -> " + toPath));
+        try {
+            try {
+                Files.move(fromFile.toPath(), toFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Some filesystems (and some network shares) cannot move atomically.
+                Files.move(fromFile.toPath(), toFile.toPath());
+            }
+        } catch (IOException e) {
+            protocol.sendRenameRejected(fromPath, toPath, "move failed: " + e.getMessage());
+            return;
+        }
+        if (lastModified > 0) {
+            toFile.setLastModified(lastModified);
+        }
+
+        // The path moved, so its confirmed state moves with it: record the new path against the
+        // sender's announced state and drop the old one, exactly like a confirmed transfer plus a
+        // confirmed delete would.
+        SyncStateStore store = baseStateStore();
+        if (store != null) {
+            store.remove(fromPath);
+            store.confirm(toPath, md5, size);
+            store.flush();
+        }
+        cleanupEmptyDirectories(fromFile.getParentFile(), syncFolder);
+        eventBus.post(new SyncEvent.LogEvent("File renamed: " + fromPath + " -> " + toPath));
+        flushSharedTextBetweenOperations();
+        protocol.sendAck();
     }
 
     private void performSync(SyncPreviewPlan providedPlan, SyncSession session) {
@@ -2230,6 +2368,63 @@ public class SyncCoordinator {
             }
 
             exitSyncIfCancelled(session);
+
+            // Renames: one confirmed exchange per pair. A rejection means the receiver could not
+            // verify or perform the move (content drifted, old path gone, target occupied), so fall
+            // back to the plain transfer-plus-delete this rename replaced — the plan removed both
+            // from their phases, so they are replayed here in full.
+            List<FileChangeDetector.FileRename> renames = syncPlan.getRenames();
+            for (FileChangeDetector.FileRename rename : renames) {
+                exitSyncIfCancelled(session);
+                operationIndex++;
+                String fromPath = rename.getFromPath();
+                String toPath = rename.getToPath();
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Renaming ["
+                                        + operationIndex
+                                        + "/"
+                                        + totalOperationsRef[0]
+                                        + "]: "
+                                        + fromPath
+                                        + " -> "
+                                        + toPath));
+                eventBus.post(
+                        new SyncEvent.FileProgressEvent(
+                                operationIndex,
+                                totalOperationsRef[0],
+                                "[REN] " + fromPath + " -> " + toPath));
+                long renameStart = System.currentTimeMillis();
+                boolean renamed =
+                        protocol.sendFileRename(
+                                fromPath,
+                                toPath,
+                                rename.getSize(),
+                                rename.getLastModified(),
+                                rename.getMd5());
+                if (renamed) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Renamed "
+                                            + fromPath
+                                            + " -> "
+                                            + toPath
+                                            + " in "
+                                            + (System.currentTimeMillis() - renameStart)
+                                            + "ms"));
+                } else {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Receiver could not rename "
+                                            + fromPath
+                                            + "; transferring "
+                                            + toPath
+                                            + " instead"));
+                    protocol.sendFile(syncFolder, toPath, rename.getMd5());
+                    protocol.sendFileDelete(fromPath);
+                }
+                flushSharedTextBetweenOperations();
+            }
 
             for (String dirPath : syncPlan.getEmptyDirectoriesToCreate()) {
                 operationIndex++;

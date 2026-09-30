@@ -57,6 +57,20 @@ class SyncPreviewRendererTypeColorTest {
     }
 
     @Test
+    void renameHasItsOwnColourDistinctFromEveryOtherOperation() {
+        Color rename = SyncPreviewRenderer.typeColor(SyncPreviewOperationType.RENAME);
+        assertEquals(new Color(128, 0, 128), rename);
+        // Purple must not collide with the other assigned hues, least of all the reds it sits
+        // between in the preview (a rename is a move, not a conflict and not a deletion).
+        assertNotEquals(rename, SyncPreviewRenderer.typeColor(SyncPreviewOperationType.CONFLICT));
+        assertNotEquals(
+                rename, SyncPreviewRenderer.typeColor(SyncPreviewOperationType.DELETE_FILE));
+        assertNotEquals(rename, SyncPreviewRenderer.typeColor(SyncPreviewOperationType.MODIFIED));
+        assertNotEquals(rename, SyncPreviewRenderer.typeColor(SyncPreviewOperationType.APPEND));
+        assertNotEquals(rename, SyncPreviewRenderer.typeColor(SyncPreviewOperationType.NEW));
+    }
+
+    @Test
     void deleteFileRedDiffersFromConflictRed() {
         // Both read as red, but at different saturations so they are not mistaken for each other.
         assertNotEquals(

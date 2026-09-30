@@ -25,7 +25,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -762,6 +764,121 @@ public class FileChangeDetector {
         }
         Collections.sort(caseOnlyRenames);
         return caseOnlyRenames;
+    }
+
+    /**
+     * Pair files that a rename or move left behind: a path the sender added whose content (manifest
+     * md5) is identical to a path the sender no longer has but the target still does. Each pair
+     * becomes a {@link FileRename} — one {@code FILE_RENAME} command that moves the file on the
+     * receiver in milliseconds, instead of transferring the whole file and deleting the old path.
+     *
+     * <p>Matching is deliberately conservative, because a false positive would make the receiver
+     * drop content it should keep:
+     *
+     * <ul>
+     *   <li>Both sides must carry the same hash. Without hashes (fast mode leaves binaries
+     *       unhashed) there is nothing to match on and the file is transferred as usual.
+     *   <li>The old path must be gone on the sender (it is one the strict-mode pass would delete),
+     *       and the new path must be absent on the target (it would otherwise be a modification,
+     *       not a rename), with the target's filesystem deciding how paths are compared.
+     *   <li>Paths that differ only by letter case are never paired. On a case-insensitive target
+     *       they are the same file, so the "rename" would move a file onto itself; on a
+     *       case-sensitive one the pairing is skipped too, because the regular transfer plus delete
+     *       mirrors that rename faithfully.
+     *   <li>Matching is one-to-one in a deterministic order (by the new path, then the oldest
+     *       candidate old path), so two copies of identical content cannot both claim the same old
+     *       path and repeated syncs plan the same renames.
+     * </ul>
+     *
+     * <p>The returned renames carry the sender's size, timestamp and md5 of the new path, which the
+     * receiver verifies against the old file before moving it.
+     */
+    public static List<FileRename> findRenames(FileManifest source, FileManifest target) {
+        List<FileRename> renames = new ArrayList<>();
+        if (source == null || target == null) {
+            return renames;
+        }
+
+        Map<String, FileInfo> sourceFiles = source.getFiles();
+        Map<String, FileInfo> targetFiles = target.getFiles();
+
+        // Old-path candidates: the receiver's files the sender no longer has (the strict-mode
+        // deletes), indexed by hash. Build the deletion list with the target's case semantics so a
+        // case-insensitive receiver's "same file, different spelling" case is excluded here too.
+        Set<String> deletedPaths = new HashSet<>(getFilesToDelete(source, target));
+        Map<String, List<String>> deletableByMd5 = new HashMap<>();
+        for (String path : deletedPaths) {
+            FileInfo info = targetFiles.get(path);
+            String md5 = info != null ? info.getMd5() : null;
+            if (md5 != null && !md5.isEmpty()) {
+                deletableByMd5.computeIfAbsent(md5, key -> new ArrayList<>()).add(path);
+            }
+        }
+        for (List<String> candidates : deletableByMd5.values()) {
+            Collections.sort(candidates);
+        }
+
+        // New-path candidates: the sender's files the target does not have (the transfers), under
+        // the target's own case resolution.
+        Map<String, String> targetPathsByFold =
+                target.isCaseSensitive() ? null : caseFoldIndex(targetFiles.keySet());
+        Set<String> consumedOldPaths = new HashSet<>();
+
+        List<String> newPaths = new ArrayList<>();
+        for (String path : sourceFiles.keySet()) {
+            FileInfo info = sourceFiles.get(path);
+            if (info == null || info.getMd5() == null || info.getMd5().isEmpty()) {
+                continue;
+            }
+            if (targetFiles.containsKey(path)) {
+                continue;
+            }
+            if (targetPathsByFold != null && targetPathsByFold.containsKey(foldCase(path))) {
+                continue;
+            }
+            newPaths.add(path);
+        }
+        Collections.sort(newPaths);
+
+        for (String newPath : newPaths) {
+            String md5 = sourceFiles.get(newPath).getMd5();
+            List<String> candidates = deletableByMd5.get(md5);
+            if (candidates == null) {
+                continue;
+            }
+            String chosen = null;
+            for (String candidate : candidates) {
+                if (consumedOldPaths.contains(candidate)) {
+                    continue;
+                }
+                // A case-only rename is a self-move on a case-insensitive target; skip it and let
+                // the regular transfer handle the new spelling (see
+                // FileChangeDetector.findCaseOnlyRenamePaths).
+                if (foldCase(candidate).equals(foldCase(newPath))) {
+                    continue;
+                }
+                chosen = candidate;
+                break;
+            }
+            if (chosen == null) {
+                continue;
+            }
+            consumedOldPaths.add(chosen);
+            FileInfo newInfo = sourceFiles.get(newPath);
+            renames.add(
+                    new FileRename(
+                            chosen,
+                            newPath,
+                            newInfo.getSize(),
+                            newInfo.getLastModified(),
+                            newInfo.getMd5()));
+        }
+
+        // Matching ran in new-path order; keep that order in the result so the preview, the
+        // execution phase and the tests all see the same deterministic sequence.
+        renames.sort(
+                Comparator.comparing(FileRename::getToPath).thenComparing(FileRename::getFromPath));
+        return renames;
     }
 
     /**
@@ -1608,6 +1725,92 @@ public class FileChangeDetector {
             return "FileInfo{"
                     + "path='"
                     + path
+                    + '\''
+                    + ", size="
+                    + size
+                    + ", md5='"
+                    + md5
+                    + '\''
+                    + '}';
+        }
+    }
+
+    /**
+     * one rename/move detected between two manifests: {@code fromPath} exists only on the target,
+     * {@code toPath} only on the source, and both carry the same manifest md5 (see {@link
+     * #findRenames}). The size, timestamp and md5 describe the sender's file at {@code toPath} and
+     * let the receiver verify the move before performing it.
+     */
+    public static class FileRename {
+        private final String fromPath;
+        private final String toPath;
+        private final long size;
+        private final long lastModified;
+        private final String md5;
+
+        public FileRename(
+                String fromPath, String toPath, long size, long lastModified, String md5) {
+            this.fromPath = fromPath;
+            this.toPath = toPath;
+            this.size = size;
+            this.lastModified = lastModified;
+            this.md5 = md5;
+        }
+
+        public String getFromPath() {
+            return fromPath;
+        }
+
+        public String getToPath() {
+            return toPath;
+        }
+
+        public long getSize() {
+            return size;
+        }
+
+        public long getLastModified() {
+            return lastModified;
+        }
+
+        public String getMd5() {
+            return md5;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof FileRename)) {
+                return false;
+            }
+            FileRename other = (FileRename) o;
+            return size == other.size
+                    && lastModified == other.lastModified
+                    && fromPath.equals(other.fromPath)
+                    && toPath.equals(other.toPath)
+                    && md5.equals(other.md5);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = fromPath.hashCode();
+            result = 31 * result + toPath.hashCode();
+            result = 31 * result + Long.hashCode(size);
+            result = 31 * result + Long.hashCode(lastModified);
+            result = 31 * result + md5.hashCode();
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "FileRename{"
+                    + "from='"
+                    + fromPath
+                    + '\''
+                    + ", to='"
+                    + toPath
                     + '\''
                     + ", size="
                     + size

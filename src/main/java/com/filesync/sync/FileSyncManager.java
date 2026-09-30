@@ -1132,6 +1132,19 @@ public class FileSyncManager {
                 roleNegotiationService.handleRoleNegotiate(remotePriority, remoteTieBreaker);
             }
             case SyncProtocol.CMD_FILE_DELETE -> syncCoordinator.handleFileDelete(msg.getParam(0));
+            case SyncProtocol.CMD_FILE_RENAME -> syncCoordinator.handleFileRename(msg);
+            case SyncProtocol.CMD_RENAME_REJECTED ->
+                    // A rename answer is consumed by the blocking sendFileRename wait that asked
+                    // for it (the listener loop is paused during that exchange). A frame observed
+                    // here is a late answer with no waiting caller: log it and move on.
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Remote rejected a rename ("
+                                            + msg.getParam(0)
+                                            + " -> "
+                                            + msg.getParam(1)
+                                            + "): "
+                                            + msg.getParam(2)));
             case SyncProtocol.CMD_MKDIR -> syncCoordinator.handleMkdir(msg.getParam(0));
             case SyncProtocol.CMD_RMDIR -> syncCoordinator.handleRmdir(msg.getParam(0));
             case SyncProtocol.CMD_SHARED_TEXT -> {

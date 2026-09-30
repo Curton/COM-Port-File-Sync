@@ -591,7 +591,7 @@ public class SyncPreviewRenderer {
                         Boolean.FALSE,
                         row.getTypeLabel(),
                         row.getSizeBytes(),
-                        row.getPath(),
+                        row.getDisplayPath(),
                         previewButtonLabel()
                     });
         }
@@ -902,6 +902,7 @@ public class SyncPreviewRenderer {
             case NEW, CREATE_DIR -> new Color(0, 128, 0);
             case MODIFIED -> new Color(0, 0, 180);
             case APPEND -> new Color(0, 128, 128);
+            case RENAME -> new Color(128, 0, 128);
             default -> null;
         };
     }
@@ -1010,8 +1011,8 @@ public class SyncPreviewRenderer {
     /**
      * Open the change preview for a row: fetch the peer's version of the file if it is not already
      * cached (off the EDT, since the fetch runs a serial round-trip), then show the modal diff
-     * dialog. Directory and delete operations have no content to preview, so they are reported
-     * inline instead of opening an empty window.
+     * dialog. Directory operations have no content to preview, and a rename is verified identical
+     * by md5 before it is planned, so both are reported inline instead of opening an empty window.
      */
     void openChangePreview(SyncPreviewRow row) {
         if (row == null) {
@@ -1025,6 +1026,17 @@ public class SyncPreviewRenderer {
                             + row.getPath()
                             + "\" is a directory operation, so there is no file"
                             + " content to preview.");
+            return;
+        }
+        if (row.getOperationType() == SyncPreviewOperationType.RENAME) {
+            showPreviewMessage(
+                    "Rename",
+                    "\""
+                            + row.getAltPath()
+                            + "\" will be renamed to \""
+                            + row.getPath()
+                            + "\" on the other side. Both copies have the same content"
+                            + " (verified by checksum), so there is nothing to compare.");
             return;
         }
 
@@ -1241,6 +1253,19 @@ public class SyncPreviewRenderer {
             rows.add(new SyncPreviewRow(SyncPreviewOperationType.CREATE_DIR, path, "-", 0L));
         }
 
+        // Renames are planned as their own operation (same content at a new path), not as the
+        // transfer + delete pair they replace, so they get their own row type and colour.
+        for (FileChangeDetector.FileRename rename : syncPreview.getRenames()) {
+            rows.add(
+                    new SyncPreviewRow(
+                            SyncPreviewOperationType.RENAME,
+                            rename.getToPath(),
+                            rename.getFromPath(),
+                            UiFormatting.formatBytes(rename.getSize()),
+                            rename.getSize(),
+                            null));
+        }
+
         for (String path : syncPreview.getFilesToDelete()) {
             rows.add(new SyncPreviewRow(SyncPreviewOperationType.DELETE_FILE, path, "-", 0L));
         }
@@ -1292,6 +1317,7 @@ public class SyncPreviewRenderer {
         Set<String> selectedCreateDirs = new HashSet<>();
         Set<String> selectedDeleteFiles = new HashSet<>();
         Set<String> selectedDeleteDirs = new HashSet<>();
+        Set<String> selectedRenames = new HashSet<>();
 
         for (int i = 0; i < previewModel.getRowCount(); i++) {
             if (!Boolean.TRUE.equals(previewModel.getValueAt(i, 0))) {
@@ -1307,11 +1333,17 @@ public class SyncPreviewRenderer {
                 case CREATE_DIR -> selectedCreateDirs.add(row.getPath());
                 case DELETE_FILE -> selectedDeleteFiles.add(row.getPath());
                 case DELETE_DIR -> selectedDeleteDirs.add(row.getPath());
+                // A rename is keyed on its new path, the same key the row and the plan filter on.
+                case RENAME -> selectedRenames.add(row.getPath());
             }
         }
 
         return syncPreview.createFilteredPlan(
-                selectedTransferFiles, selectedCreateDirs, selectedDeleteFiles, selectedDeleteDirs);
+                selectedTransferFiles,
+                selectedCreateDirs,
+                selectedDeleteFiles,
+                selectedDeleteDirs,
+                selectedRenames);
     }
 
     /**
@@ -1559,8 +1591,11 @@ public class SyncPreviewRenderer {
         }
 
         private static boolean hasPreviewableContent(SyncPreviewRow row) {
+            // Directories have no file content, and a rename is md5-verified identical on both
+            // sides, so a diff for it would always be empty.
             return row.getOperationType() != SyncPreviewOperationType.CREATE_DIR
-                    && row.getOperationType() != SyncPreviewOperationType.DELETE_DIR;
+                    && row.getOperationType() != SyncPreviewOperationType.DELETE_DIR
+                    && row.getOperationType() != SyncPreviewOperationType.RENAME;
         }
     }
 
