@@ -1952,6 +1952,7 @@ public class SyncCoordinator {
             if (!batchFiles.isEmpty()) {
                 final int BATCH_BYTE_TARGET = 32 * 1024; // ~32 KB per batch; tune as needed
                 List<Object[]> batch = new ArrayList<>();
+                long batchBytes = 0; // running wire-size estimate; each entry is sampled once
 
                 for (FileChangeDetector.FileInfo fileInfo : batchFiles) {
                     File file = new File(syncFolder, fileInfo.getPath());
@@ -2014,9 +2015,12 @@ public class SyncCoordinator {
                         continue;
                     }
 
-                    batch.add(new Object[] {file, fileInfo.getPath(), fileInfo.getMd5()});
+                    String path = fileInfo.getPath();
+                    String md5 = fileInfo.getMd5();
+                    batch.add(new Object[] {file, path, md5});
+                    batchBytes += estimateEntryBytes(file, path, md5);
 
-                    if (batch.size() >= 256 || estimateBatchSize(batch) >= BATCH_BYTE_TARGET) {
+                    if (batch.size() >= 256 || batchBytes >= BATCH_BYTE_TARGET) {
                         // Each batch gets its own callback capturing the correct starting index.
                         // savedOpIndex tracks the highest operation index already confirmed
                         // (by batch callback or fallback per-file progress), so the next batch
@@ -2123,6 +2127,7 @@ public class SyncCoordinator {
                                                     + "ms"));
                         }
                         batch.clear();
+                        batchBytes = 0;
                         flushSharedTextBetweenOperations();
                     }
                 }
@@ -2219,6 +2224,7 @@ public class SyncCoordinator {
                                                 + "ms"));
                     }
                     batch.clear();
+                    batchBytes = 0;
                     flushSharedTextBetweenOperations();
                 }
             }
@@ -2478,24 +2484,21 @@ public class SyncCoordinator {
         }
     }
 
-    private int estimateBatchSize(List<Object[]> batch) {
-        long total = 0;
-        for (Object[] entry : batch) {
-            File f = (File) entry[0];
-            String path = (String) entry[1];
-            String md5 = entry.length > 2 ? (String) entry[2] : null;
-            long rawSize = f.length();
-            long estimatedContentSize = estimateCompressedSize(f, path, rawSize);
-            total +=
-                    2
-                            + path.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
-                            + 8
-                            + 1
-                            + (md5 != null && !md5.isEmpty() ? 16 : 0)
-                            + 4
-                            + estimatedContentSize;
-        }
-        return total > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) total;
+    /**
+     * Wire-size estimate for a single batch entry. The caller accumulates these per file as the
+     * batch grows, so each file is sampled exactly once; re-estimating the whole batch per append
+     * would redo every 4 KB sample read on every file added.
+     */
+    private long estimateEntryBytes(File f, String path, String md5) {
+        long rawSize = f.length();
+        long estimatedContentSize = estimateCompressedSize(f, path, rawSize);
+        return 2
+                + path.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                + 8
+                + 1
+                + (md5 != null && !md5.isEmpty() ? 16 : 0)
+                + 4
+                + estimatedContentSize;
     }
 
     /**
