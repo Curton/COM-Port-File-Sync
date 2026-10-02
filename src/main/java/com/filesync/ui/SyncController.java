@@ -8,6 +8,8 @@ import java.awt.Color;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
+import javax.swing.JCheckBox;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.SwingWorker;
@@ -82,43 +84,43 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         components.getSyncButton().addActionListener(event -> onSyncButtonClicked());
         components.getPreviewSyncButton().addActionListener(event -> previewSync());
 
-        components
-                .getRespectGitignoreCheckBox()
-                .addActionListener(
-                        event -> {
-                            boolean respectGitignore =
-                                    components.getRespectGitignoreCheckBox().isSelected();
-                            syncManager.setRespectGitignoreMode(respectGitignore);
-                            settings.setRespectGitignore(respectGitignore);
-                            settings.save();
-                            logController.log(
-                                    "Respect .gitignore: "
-                                            + (respectGitignore ? "enabled" : "disabled"));
-                        });
+        bindModeCheckBox(
+                components.getRespectGitignoreCheckBox(),
+                syncManager::setRespectGitignoreMode,
+                settings::setRespectGitignore,
+                "Respect .gitignore");
 
+        bindModeCheckBox(
+                components.getStrictSyncCheckBox(),
+                syncManager::setStrictSyncMode,
+                settings::setStrictSync,
+                "Strict sync mode");
+        // Mirror mode constrains the .gitignore option; re-evaluate it once the mode is applied.
         components
                 .getStrictSyncCheckBox()
-                .addActionListener(
-                        event -> {
-                            boolean strictMode = components.getStrictSyncCheckBox().isSelected();
-                            syncManager.setStrictSyncMode(strictMode);
-                            settings.setStrictSync(strictMode);
-                            settings.save();
-                            logController.log(
-                                    "Strict sync mode: " + (strictMode ? "enabled" : "disabled"));
-                            updateRespectGitignoreState();
-                        });
+                .addActionListener(event -> updateRespectGitignoreState());
 
-        components
-                .getFastModeCheckBox()
-                .addActionListener(
-                        event -> {
-                            boolean fastMode = components.getFastModeCheckBox().isSelected();
-                            syncManager.setFastMode(fastMode);
-                            settings.setFastMode(fastMode);
-                            settings.save();
-                            logController.log("Fast mode: " + (fastMode ? "enabled" : "disabled"));
-                        });
+        bindModeCheckBox(
+                components.getFastModeCheckBox(),
+                syncManager::setFastMode,
+                settings::setFastMode,
+                "Fast mode");
+    }
+
+    /** Wires a mode checkbox: apply to the manager, persist, and log the new state. */
+    private void bindModeCheckBox(
+            JCheckBox box,
+            Consumer<Boolean> applyToManager,
+            Consumer<Boolean> saveToSettings,
+            String label) {
+        box.addActionListener(
+                event -> {
+                    boolean enabled = box.isSelected();
+                    applyToManager.accept(enabled);
+                    saveToSettings.accept(enabled);
+                    settings.save();
+                    logController.log(label + ": " + (enabled ? "enabled" : "disabled"));
+                });
     }
 
     private void onSyncButtonClicked() {
@@ -267,6 +269,19 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     private static final int MAX_LISTED_PATHS = 10;
 
+    /** Shared "Continue/Cancel" warning dialog; returns the chosen JOptionPane option index. */
+    private int confirmContinue(String title, Object message) {
+        return JOptionPane.showOptionDialog(
+                owner,
+                message,
+                title,
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                new Object[] {"Continue", "Cancel"},
+                "Cancel");
+    }
+
     /**
      * Warning shown when a direct Start Sync would destroy receiver-side data the plain flow never
      * mentions: the receiver's version of conflicted files (an unresolved conflict defaults to
@@ -305,16 +320,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         }
         msg.append("Continue?");
 
-        int response =
-                JOptionPane.showOptionDialog(
-                        owner,
-                        msg.toString(),
-                        "Confirm Sync",
-                        JOptionPane.OK_CANCEL_OPTION,
-                        JOptionPane.WARNING_MESSAGE,
-                        null,
-                        new Object[] {"Continue", "Cancel"},
-                        "Cancel");
+        int response = confirmContinue("Confirm Sync", msg.toString());
         return response == 0;
     }
 
@@ -424,15 +430,8 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                                     "\n\nProceed? The new mapping will be remembered after successful sync.");
 
                             int response =
-                                    JOptionPane.showOptionDialog(
-                                            owner,
-                                            msg.toString(),
-                                            "Confirm Folder Mapping Change",
-                                            JOptionPane.OK_CANCEL_OPTION,
-                                            JOptionPane.WARNING_MESSAGE,
-                                            null,
-                                            new Object[] {"Continue", "Cancel"},
-                                            "Cancel");
+                                    confirmContinue(
+                                            "Confirm Folder Mapping Change", msg.toString());
                             if (response == 0) {
                                 state.setPendingMappingRemotePath(nRemote);
                                 onProceed.run();
@@ -632,6 +631,11 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         progressResetTimer.stop();
     }
 
+    /** Count-based progress percentage, capped at 100. */
+    private static int percent(int cur, int total) {
+        return (int) Math.min(100L, (long) cur * 100 / total);
+    }
+
     public void onSyncStarted() {
         javax.swing.SwingUtilities.invokeLater(
                 () -> {
@@ -729,10 +733,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
             lastManifestPercent = 0;
         }
         if (total > 0) {
-            int percent =
-                    Math.max(
-                            (int) Math.min(100L, (long) processed * 100 / total),
-                            lastManifestPercent);
+            int percent = Math.max(percent(processed, total), lastManifestPercent);
             lastManifestPercent = percent;
             bar.setValue(percent);
             bar.setString(
@@ -761,7 +762,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
             return;
         }
         bar.setIndeterminate(false);
-        bar.setValue((int) Math.min(100L, (long) currentFile * 100 / totalFiles));
+        bar.setValue(percent(currentFile, totalFiles));
         bar.setString("File " + currentFile + "/" + totalFiles + ": " + fileName);
     }
 
@@ -797,14 +798,11 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                 () -> {
                     state.setConnected(isAlive);
                     if (isAlive) {
-                        components.getStatusLabel().setText("Connected");
-                        components.getStatusLabel().setForeground(new java.awt.Color(0, 128, 0));
-                        components.getConnectButton().setText("Disconnect");
-                        components.getPortComboBox().setEnabled(false);
-                        components.getRefreshPortsButton().setEnabled(false);
-                        components.getSettingsButton().setEnabled(false);
-                        components.getDirectionButton().setEnabled(true);
+                        components.applyConnectedUi();
                     } else {
+                        // Kept local rather than the shared applyDisconnectedUi(Color): this
+                        // remote-loss path deliberately leaves the connect and direction buttons
+                        // untouched (the updateSyncButtonState() below owns the direction button).
                         components.getStatusLabel().setText("Disconnected");
                         components
                                 .getStatusLabel()

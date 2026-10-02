@@ -103,10 +103,7 @@ public final class CombinedLogMerger {
             }
             Matcher matcher = TIMESTAMP_PREFIX.matcher(line);
             if (matcher.matches()) {
-                int hours = Integer.parseInt(matcher.group(1));
-                int minutes = Integer.parseInt(matcher.group(2));
-                int seconds = Integer.parseInt(matcher.group(3));
-                entries.add(new Entry(source, line, hours * 3600 + minutes * 60 + seconds));
+                entries.add(new Entry(source, line, secondsOfDay(matcher)));
             } else if (!entries.isEmpty()) {
                 Entry last = entries.get(entries.size() - 1);
                 last.line = last.line + "\n" + line;
@@ -115,6 +112,13 @@ public final class CombinedLogMerger {
             }
         }
         return entries;
+    }
+
+    /** Parses the matcher's HH:mm:ss capture groups into seconds since midnight. */
+    private static int secondsOfDay(Matcher matcher) {
+        return Integer.parseInt(matcher.group(1)) * 3600
+                + Integer.parseInt(matcher.group(2)) * 60
+                + Integer.parseInt(matcher.group(3));
     }
 
     /** Finds the last time-sync marker in a log text (epoch ms + its time-of-day seconds). */
@@ -132,10 +136,7 @@ public final class CombinedLogMerger {
             if (epochMs == null) {
                 continue;
             }
-            int hours = Integer.parseInt(matcher.group(1));
-            int minutes = Integer.parseInt(matcher.group(2));
-            int seconds = Integer.parseInt(matcher.group(3));
-            lastMarker = new MarkerInfo(epochMs, hours * 3600 + minutes * 60 + seconds);
+            lastMarker = new MarkerInfo(epochMs, secondsOfDay(matcher));
         }
         return lastMarker;
     }

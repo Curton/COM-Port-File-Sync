@@ -7,6 +7,9 @@ import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncEventListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import javax.swing.JCheckBox;
 import javax.swing.JFrame;
 import javax.swing.JPanel;
 import javax.swing.WindowConstants;
@@ -139,12 +142,7 @@ public class MainFrame extends JFrame {
     private void loadSavedState() {
         String lastPort = settings.getLastPort();
         if (lastPort != null && !lastPort.isEmpty()) {
-            for (int i = 0; i < components.getPortComboBox().getItemCount(); i++) {
-                if (lastPort.equals(components.getPortComboBox().getItemAt(i))) {
-                    components.getPortComboBox().setSelectedIndex(i);
-                    break;
-                }
-            }
+            MainFrameComponents.selectPortByName(components, lastPort);
         }
 
         folderController.loadFolderHistory();
@@ -155,23 +153,30 @@ public class MainFrame extends JFrame {
             folderController.applyFolderSelection(settings.getLastFolder(), false);
         }
 
-        boolean strictSync = settings.isStrictSync();
-        components.getStrictSyncCheckBox().setSelected(strictSync);
-        syncManager.setStrictSyncMode(strictSync);
-
-        boolean respectGitignore = settings.isRespectGitignore();
-        components.getRespectGitignoreCheckBox().setSelected(respectGitignore);
-        syncManager.setRespectGitignoreMode(respectGitignore);
-
-        boolean fastMode = settings.isFastMode();
-        components.getFastModeCheckBox().setSelected(fastMode);
-        syncManager.setFastMode(fastMode);
+        loadModeCheckBox(
+                components.getStrictSyncCheckBox(),
+                settings::isStrictSync,
+                syncManager::setStrictSyncMode);
+        loadModeCheckBox(
+                components.getRespectGitignoreCheckBox(),
+                settings::isRespectGitignore,
+                syncManager::setRespectGitignoreMode);
+        loadModeCheckBox(
+                components.getFastModeCheckBox(), settings::isFastMode, syncManager::setFastMode);
 
         syncController.updateRespectGitignoreState();
         syncController.applyDirection(state.isSender());
         updateSettingsLabel();
         syncController.updateSyncButtonState();
         components.getProgressBar().setString("Ready");
+    }
+
+    /** Restores a mode checkbox from settings and applies the loaded value to the manager. */
+    private void loadModeCheckBox(
+            JCheckBox box, BooleanSupplier readSetting, Consumer<Boolean> applyToManager) {
+        boolean enabled = readSetting.getAsBoolean();
+        box.setSelected(enabled);
+        applyToManager.accept(enabled);
     }
 
     private void updateSettingsLabel() {

@@ -242,6 +242,48 @@ public class MainFrameComponents {
         }
     }
 
+    /**
+     * Applies the connected-state control migration shared by the connection and sync flows: green
+     * "Connected" status, "Disconnect" button, direction enabled, port controls disabled. The
+     * caller keeps ownership of the sync-button state ({@code updateSyncButtonState}).
+     */
+    public void applyConnectedUi() {
+        connectButton.setText("Disconnect");
+        statusLabel.setText("Connected");
+        statusLabel.setForeground(new Color(0, 128, 0));
+        directionButton.setEnabled(true);
+        portComboBox.setEnabled(false);
+        refreshPortsButton.setEnabled(false);
+        settingsButton.setEnabled(false);
+    }
+
+    /**
+     * Applies the disconnected-state control migration: "Disconnected" status in {@code
+     * statusColor}, "Connect" button enabled, port and direction controls enabled. The color
+     * differs by caller: red after a local port event, gray after a remote-side loss.
+     */
+    public void applyDisconnectedUi(Color statusColor) {
+        connectButton.setText("Connect");
+        connectButton.setEnabled(true);
+        statusLabel.setText("Disconnected");
+        statusLabel.setForeground(statusColor);
+        portComboBox.setEnabled(true);
+        refreshPortsButton.setEnabled(true);
+        settingsButton.setEnabled(true);
+        directionButton.setEnabled(true);
+    }
+
+    /** Selects the combo item equal to {@code portName}; returns whether a match was found. */
+    public static boolean selectPortByName(MainFrameComponents components, String portName) {
+        for (int i = 0; i < components.getPortComboBox().getItemCount(); i++) {
+            if (portName.equals(components.getPortComboBox().getItemAt(i))) {
+                components.getPortComboBox().setSelectedIndex(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void configureFrame(JFrame frame) {
         frame.setSize(WINDOW_WIDTH, WINDOW_HEIGHT);
         frame.setMinimumSize(new Dimension(650, 450));

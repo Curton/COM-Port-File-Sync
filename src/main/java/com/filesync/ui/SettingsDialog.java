@@ -33,61 +33,22 @@ public class SettingsDialog {
         gbc.insets = new Insets(5, 5, 5, 5);
         gbc.anchor = java.awt.GridBagConstraints.WEST;
 
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        formPanel.add(new JLabel("Baud Rate:"), gbc);
-
-        JComboBox<Integer> baudRateCombo = new JComboBox<>();
-        for (int rate : SettingsManager.BAUD_RATES) {
-            baudRateCombo.addItem(rate);
-        }
+        JComboBox<Integer> baudRateCombo =
+                addComboRow(formPanel, gbc, 0, "Baud Rate:", boxed(SettingsManager.BAUD_RATES));
         baudRateCombo.setSelectedItem(settings.getBaudRate());
-        gbc.gridx = 1;
-        gbc.fill = java.awt.GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        formPanel.add(baudRateCombo, gbc);
 
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.fill = java.awt.GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        formPanel.add(new JLabel("Data Bits:"), gbc);
-
-        JComboBox<Integer> dataBitsCombo = new JComboBox<>();
-        for (int bits : SettingsManager.DATA_BITS_OPTIONS) {
-            dataBitsCombo.addItem(bits);
-        }
+        JComboBox<Integer> dataBitsCombo =
+                addComboRow(
+                        formPanel, gbc, 1, "Data Bits:", boxed(SettingsManager.DATA_BITS_OPTIONS));
         dataBitsCombo.setSelectedItem(settings.getDataBits());
-        gbc.gridx = 1;
-        gbc.fill = java.awt.GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        formPanel.add(dataBitsCombo, gbc);
 
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.fill = java.awt.GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        formPanel.add(new JLabel("Stop Bits:"), gbc);
-
-        JComboBox<String> stopBitsCombo = new JComboBox<>(SettingsManager.STOP_BITS_NAMES);
+        JComboBox<String> stopBitsCombo =
+                addComboRow(formPanel, gbc, 2, "Stop Bits:", SettingsManager.STOP_BITS_NAMES);
         stopBitsCombo.setSelectedIndex(SettingsManager.getStopBitsIndex(settings.getStopBits()));
-        gbc.gridx = 1;
-        gbc.fill = java.awt.GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        formPanel.add(stopBitsCombo, gbc);
 
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.fill = java.awt.GridBagConstraints.NONE;
-        gbc.weightx = 0;
-        formPanel.add(new JLabel("Parity:"), gbc);
-
-        JComboBox<String> parityCombo = new JComboBox<>(SettingsManager.PARITY_NAMES);
+        JComboBox<String> parityCombo =
+                addComboRow(formPanel, gbc, 3, "Parity:", SettingsManager.PARITY_NAMES);
         parityCombo.setSelectedIndex(SettingsManager.getParityIndex(settings.getParity()));
-        gbc.gridx = 1;
-        gbc.fill = java.awt.GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
-        formPanel.add(parityCombo, gbc);
 
         JCheckBox debugCheckBox = new JCheckBox("Debug Mode");
         debugCheckBox.setSelected(settings.isDebugMode());
@@ -144,6 +105,35 @@ public class SettingsDialog {
         dialog.add(formPanel, BorderLayout.CENTER);
         dialog.add(buttonPanel, BorderLayout.SOUTH);
         dialog.setVisible(true);
+    }
+
+    /**
+     * Adds one labeled combo row to the form grid and returns the combo so the caller can wire its
+     * initial selection. {@code gbc} is advanced to the row's two cells (label west, combo filled).
+     */
+    private static <T> JComboBox<T> addComboRow(
+            JPanel formPanel,
+            java.awt.GridBagConstraints gbc,
+            int rowIndex,
+            String labelText,
+            T[] items) {
+        gbc.gridx = 0;
+        gbc.gridy = rowIndex;
+        gbc.fill = java.awt.GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        formPanel.add(new JLabel(labelText), gbc);
+
+        JComboBox<T> combo = new JComboBox<>(items);
+        gbc.gridx = 1;
+        gbc.fill = java.awt.GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        formPanel.add(combo, gbc);
+        return combo;
+    }
+
+    /** Boxes an int option array for a {@code JComboBox<Integer>}. */
+    private static Integer[] boxed(int[] values) {
+        return java.util.Arrays.stream(values).boxed().toArray(Integer[]::new);
     }
 
     public static String getSettingsString(SettingsManager settings) {

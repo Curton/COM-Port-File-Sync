@@ -56,10 +56,7 @@ public class FolderController {
                             if (selectedFolder != null && !selectedFolder.isBlank()) {
                                 applyFolderSelection(selectedFolder, true);
                                 logController.log("Selected folder: " + selectedFolder);
-                                // Notify remote if we're the sender and connected
-                                if (syncManager.isSender() && syncManager.isConnectionAlive()) {
-                                    syncManager.notifyFolderChange(selectedFolder);
-                                }
+                                notifyPeerIfSender(selectedFolder);
                             }
                         });
     }
@@ -79,11 +76,7 @@ public class FolderController {
                 components.getFolderComboBox().addItem(normalized);
             }
         }
-        while (components.getFolderComboBox().getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
-            components
-                    .getFolderComboBox()
-                    .removeItemAt(components.getFolderComboBox().getItemCount() - 1);
-        }
+        trimRecentFolders();
     }
 
     public void applyFolderSelection(String folderPath, boolean rememberFolder) {
@@ -108,29 +101,39 @@ public class FolderController {
         updateSyncButtonState.run();
 
         if (rememberFolder) {
-            try {
-                state.setSuppressFolderSelectionEvents(true);
-                removeComboItemByNormalizedPath(normalizedFolderPath);
-                components.getFolderComboBox().insertItemAt(normalizedFolderPath, 0);
-                while (components.getFolderComboBox().getItemCount()
-                        > SettingsManager.MAX_RECENT_FOLDERS) {
-                    components
-                            .getFolderComboBox()
-                            .removeItemAt(components.getFolderComboBox().getItemCount() - 1);
-                }
-                components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
-            } finally {
-                state.setSuppressFolderSelectionEvents(false);
-            }
+            withSuppressedFolderEvents(
+                    () -> {
+                        removeComboItemByNormalizedPath(normalizedFolderPath);
+                        components.getFolderComboBox().insertItemAt(normalizedFolderPath, 0);
+                        trimRecentFolders();
+                        components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
+                    });
             settings.addRecentFolder(normalizedFolderPath);
         } else if (components.getFolderComboBox().getItemCount() == 0) {
-            try {
-                state.setSuppressFolderSelectionEvents(true);
-                components.getFolderComboBox().addItem(normalizedFolderPath);
-                components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
-            } finally {
-                state.setSuppressFolderSelectionEvents(false);
-            }
+            withSuppressedFolderEvents(
+                    () -> {
+                        components.getFolderComboBox().addItem(normalizedFolderPath);
+                        components.getFolderComboBox().setSelectedItem(normalizedFolderPath);
+                    });
+        }
+    }
+
+    /** Caps the recent-folder combo at {@link SettingsManager#MAX_RECENT_FOLDERS} entries. */
+    private void trimRecentFolders() {
+        while (components.getFolderComboBox().getItemCount() > SettingsManager.MAX_RECENT_FOLDERS) {
+            components
+                    .getFolderComboBox()
+                    .removeItemAt(components.getFolderComboBox().getItemCount() - 1);
+        }
+    }
+
+    /** Runs the action with combo-box events suppressed, restoring the flag afterwards. */
+    private void withSuppressedFolderEvents(Runnable action) {
+        try {
+            state.setSuppressFolderSelectionEvents(true);
+            action.run();
+        } finally {
+            state.setSuppressFolderSelectionEvents(false);
         }
     }
 
@@ -152,13 +155,11 @@ public class FolderController {
         if (!folder.exists() || !folder.isDirectory()) {
             return;
         }
-        try {
-            state.setSuppressFolderSelectionEvents(true);
-            applyFolderSelection(folderPath, true);
-            logController.log("Remote folder changed to: " + folderPath);
-        } finally {
-            state.setSuppressFolderSelectionEvents(false);
-        }
+        withSuppressedFolderEvents(
+                () -> {
+                    applyFolderSelection(folderPath, true);
+                    logController.log("Remote folder changed to: " + folderPath);
+                });
     }
 
     public File getCurrentFolderFromSelection() {
@@ -198,10 +199,14 @@ public class FolderController {
                     SettingsManager.normalizeFolderPath(selectedFolder.getAbsolutePath());
             applyFolderSelection(folderPath, true);
             logController.log("Selected folder: " + folderPath);
-            // Notify remote if we're the sender and connected
-            if (syncManager.isSender() && syncManager.isConnectionAlive()) {
-                syncManager.notifyFolderChange(folderPath);
-            }
+            notifyPeerIfSender(folderPath);
+        }
+    }
+
+    /** Notifies the remote peer of a folder change when acting as the connected sender. */
+    private void notifyPeerIfSender(String folderPath) {
+        if (syncManager.isSender() && syncManager.isConnectionAlive()) {
+            syncManager.notifyFolderChange(folderPath);
         }
     }
 }

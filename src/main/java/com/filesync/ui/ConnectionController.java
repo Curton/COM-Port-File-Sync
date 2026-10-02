@@ -10,7 +10,6 @@ import javax.swing.SwingUtilities;
 
 /** Connection-related commands and button state transitions. */
 public class ConnectionController {
-    private static final String CONNECT_TEXT = "Connect";
     private static final String DISCONNECT_TEXT = "Disconnect";
     private static final String CONNECTING_TEXT = "Connecting...";
     private static final String DISCONNECTING_TEXT = "Disconnecting...";
@@ -100,17 +99,7 @@ public class ConnectionController {
             return;
         }
 
-        boolean portAvailable = false;
-        for (int i = 0; i < components.getPortComboBox().getItemCount(); i++) {
-            String portName = components.getPortComboBox().getItemAt(i);
-            if (lastPort.equals(portName)) {
-                portAvailable = true;
-                components.getPortComboBox().setSelectedIndex(i);
-                break;
-            }
-        }
-
-        if (!portAvailable) {
+        if (!MainFrameComponents.selectPortByName(components, lastPort)) {
             logController.log(
                     "Last used COM port " + lastPort + " not available, skipping auto-connect");
             return;
@@ -226,15 +215,7 @@ public class ConnectionController {
                             SwingUtilities.invokeLater(
                                     () -> {
                                         if (connected) {
-                                            components.getConnectButton().setText(DISCONNECT_TEXT);
-                                            components.getStatusLabel().setText("Connected");
-                                            components
-                                                    .getStatusLabel()
-                                                    .setForeground(new Color(0, 128, 0));
-                                            components.getDirectionButton().setEnabled(true);
-                                            components.getPortComboBox().setEnabled(false);
-                                            components.getRefreshPortsButton().setEnabled(false);
-                                            components.getSettingsButton().setEnabled(false);
+                                            components.applyConnectedUi();
                                             updateSyncButtonState.run();
                                             logController.log("Connected to " + selectedPort);
                                         } else {
@@ -248,14 +229,7 @@ public class ConnectionController {
                                             syncManager.stopListening();
                                             serialPort.close();
                                             state.setConnected(false);
-                                            components.getConnectButton().setText(CONNECT_TEXT);
-                                            components.getConnectButton().setEnabled(true);
-                                            components.getStatusLabel().setText("Disconnected");
-                                            components.getStatusLabel().setForeground(Color.RED);
-                                            components.getPortComboBox().setEnabled(true);
-                                            components.getRefreshPortsButton().setEnabled(true);
-                                            components.getSettingsButton().setEnabled(true);
-                                            components.getDirectionButton().setEnabled(true);
+                                            components.applyDisconnectedUi(Color.RED);
                                             updateSyncButtonState.run();
                                             if (!syncManager.wasManuallyDisconnected()) {
                                                 logController.log(
@@ -276,14 +250,7 @@ public class ConnectionController {
 
     private void onPortOpenFailed(String selectedPort) {
         state.setConnected(false);
-        components.getConnectButton().setText(CONNECT_TEXT);
-        components.getConnectButton().setEnabled(true);
-        components.getStatusLabel().setText("Disconnected");
-        components.getStatusLabel().setForeground(Color.RED);
-        components.getPortComboBox().setEnabled(true);
-        components.getRefreshPortsButton().setEnabled(true);
-        components.getSettingsButton().setEnabled(true);
-        components.getDirectionButton().setEnabled(true);
+        components.applyDisconnectedUi(Color.RED);
         // The sync controls follow connection state, so let the authoritative method decide
         // instead of enabling them here.
         updateSyncButtonState.run();
@@ -320,14 +287,7 @@ public class ConnectionController {
 
     private void applyDisconnectedState() {
         state.setPhase(MainFrameState.ConnectionPhase.IDLE);
-        components.getConnectButton().setText(CONNECT_TEXT);
-        components.getConnectButton().setEnabled(true);
-        components.getStatusLabel().setText("Disconnected");
-        components.getStatusLabel().setForeground(Color.RED);
-        components.getPortComboBox().setEnabled(true);
-        components.getRefreshPortsButton().setEnabled(true);
-        components.getSettingsButton().setEnabled(true);
-        components.getDirectionButton().setEnabled(true);
+        components.applyDisconnectedUi(Color.RED);
         updateSyncButtonState.run();
         logController.log("Disconnected");
     }

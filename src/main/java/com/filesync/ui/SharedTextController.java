@@ -6,6 +6,7 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
 import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.event.ActionEvent;
+import java.util.function.Consumer;
 import javax.swing.AbstractAction;
 import javax.swing.ActionMap;
 import javax.swing.InputMap;
@@ -64,12 +65,7 @@ public class SharedTextController {
                             @Override
                             public void mouseClicked(java.awt.event.MouseEvent e) {
                                 if (e.getClickCount() == 2) {
-                                    String text = components.getSharedTextArea().getText();
-                                    StringSelection selection = new StringSelection(text);
-                                    Toolkit.getDefaultToolkit()
-                                            .getSystemClipboard()
-                                            .setContents(selection, null);
-                                    logController.log("Shared text copied to clipboard");
+                                    copySharedTextToClipboard();
                                 }
                             }
                         });
@@ -86,67 +82,58 @@ public class SharedTextController {
         components
                 .getOverwriteFromClipboardButton()
                 .addActionListener(
-                        event -> {
-                            try {
-                                String clipboardText =
-                                        (String)
-                                                Toolkit.getDefaultToolkit()
-                                                        .getSystemClipboard()
-                                                        .getData(DataFlavor.stringFlavor);
-                                undoManager.runAsSingleEdit(
-                                        () ->
-                                                components
-                                                        .getSharedTextArea()
-                                                        .setText(clipboardText));
-                                logController.log("Text overwritten from clipboard");
-                            } catch (UnsupportedFlavorException ex) {
-                                logController.log("Clipboard does not contain text data");
-                            } catch (java.io.IOException ex) {
-                                logController.log(
-                                        "Failed to read from clipboard: " + ex.getMessage());
-                            }
-                        });
+                        event ->
+                                applyClipboardText(
+                                        "Text overwritten from clipboard",
+                                        text -> components.getSharedTextArea().setText(text)));
 
         components
                 .getAppendFromClipboardButton()
                 .addActionListener(
-                        event -> {
-                            try {
-                                String clipboardText =
-                                        (String)
-                                                Toolkit.getDefaultToolkit()
-                                                        .getSystemClipboard()
-                                                        .getData(DataFlavor.stringFlavor);
-                                undoManager.runAsSingleEdit(
-                                        () -> {
+                        event ->
+                                applyClipboardText(
+                                        "Text appended from clipboard",
+                                        text -> {
                                             if (!components
                                                     .getSharedTextArea()
                                                     .getText()
                                                     .isEmpty()) {
                                                 components.getSharedTextArea().append("\n");
                                             }
-                                            components.getSharedTextArea().append(clipboardText);
-                                        });
-                                logController.log("Text appended from clipboard");
-                            } catch (UnsupportedFlavorException ex) {
-                                logController.log("Clipboard does not contain text data");
-                            } catch (java.io.IOException ex) {
-                                logController.log(
-                                        "Failed to read from clipboard: " + ex.getMessage());
-                            }
-                        });
+                                            components.getSharedTextArea().append(text);
+                                        }));
 
         components
                 .getCopyFromClipboardButton()
-                .addActionListener(
-                        event -> {
-                            String text = components.getSharedTextArea().getText();
-                            StringSelection selection = new StringSelection(text);
+                .addActionListener(event -> copySharedTextToClipboard());
+    }
+
+    /** Copies the shared text area's content to the system clipboard and logs it. */
+    private void copySharedTextToClipboard() {
+        String text = components.getSharedTextArea().getText();
+        StringSelection selection = new StringSelection(text);
+        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+        logController.log("Shared text copied to clipboard");
+    }
+
+    /**
+     * Reads the clipboard as text and applies it to the shared text area as a single undoable edit,
+     * logging {@code logMessage} on success.
+     */
+    private void applyClipboardText(String logMessage, Consumer<String> edit) {
+        try {
+            String clipboardText =
+                    (String)
                             Toolkit.getDefaultToolkit()
                                     .getSystemClipboard()
-                                    .setContents(selection, null);
-                            logController.log("Shared text copied to clipboard");
-                        });
+                                    .getData(DataFlavor.stringFlavor);
+            undoManager.runAsSingleEdit(() -> edit.accept(clipboardText));
+            logController.log(logMessage);
+        } catch (UnsupportedFlavorException ex) {
+            logController.log("Clipboard does not contain text data");
+        } catch (java.io.IOException ex) {
+            logController.log("Failed to read from clipboard: " + ex.getMessage());
+        }
     }
 
     public void onSharedTextReceived(String text) {
