@@ -90,7 +90,7 @@ public class BinaryConflictPanel extends JPanel {
 
         JPanel infoGrid = new JPanel(new java.awt.GridLayout(3, 2, 8, 4));
         infoGrid.add(new JLabel("Size:"));
-        infoGrid.add(new JLabel(formatBytes(info.getSize())));
+        infoGrid.add(new JLabel(UiFormatting.formatBytes(info.getSize())));
 
         infoGrid.add(new JLabel("Modified:"));
         SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
@@ -109,18 +109,6 @@ public class BinaryConflictPanel extends JPanel {
 
         panel.add(infoGrid, BorderLayout.NORTH);
         return panel;
-    }
-
-    private String formatBytes(long bytes) {
-        if (bytes < 1024) {
-            return bytes + " B";
-        } else if (bytes < 1024 * 1024) {
-            return String.format("%.1f KB", bytes / 1024.0);
-        } else if (bytes < 1024 * 1024 * 1024) {
-            return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        } else {
-            return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
-        }
     }
 
     public Resolution getResolution() {
