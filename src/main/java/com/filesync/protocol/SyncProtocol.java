@@ -477,21 +477,10 @@ public class SyncProtocol {
         sendCommand(CMD_DELTA_SIG_DATA, String.valueOf(compressed.length));
         waitForCommand(CMD_ACK);
 
-        xmodemInProgress.set(true);
-        try {
-            boolean success = xmodem.send(compressed);
-            if (!success) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "unknown XMODEM error";
-                }
-                throw maybePeerCancelled(
-                        new IOException("Failed to send delta signatures (" + detail + ")"),
-                        "Delta signature transfer cancelled by receiver");
-            }
-        } finally {
-            xmodemInProgress.set(false);
-        }
+        sendXmodemPayload(
+                compressed,
+                "Delta signature transfer cancelled by receiver",
+                "Failed to send delta signatures");
     }
 
     /** Retry budget for the command/ACK handshake that precedes every payload transfer. */
@@ -1447,22 +1436,10 @@ public class SyncProtocol {
                 String.valueOf(compressedData.isCompressed()));
         waitForCommand(CMD_ACK);
 
-        xmodemInProgress.set(true);
-        try {
-            boolean success = xmodem.send(compressedData.getData());
-            if (!success) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "unknown XMODEM error";
-                }
-                throw maybePeerCancelled(
-                        new IOException(
-                                "Failed to send dropped file " + fileName + " (" + detail + ")"),
-                        "Dropped file transfer of " + fileName + " cancelled by receiver");
-            }
-        } finally {
-            xmodemInProgress.set(false);
-        }
+        sendXmodemPayload(
+                compressedData.getData(),
+                "Dropped file transfer of " + fileName + " cancelled by receiver",
+                "Failed to send dropped file " + fileName);
     }
 
     /**
@@ -1847,21 +1824,10 @@ public class SyncProtocol {
     public void sendFileContentViaXmodem(byte[] data, int fileSize) throws IOException {
         sendCommand(CMD_FILE_CONTENT_XFER, String.valueOf(fileSize));
         waitForCommand(CMD_ACK);
-        xmodemInProgress.set(true);
-        try {
-            boolean success = xmodem.send(data);
-            if (!success) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "unknown XMODEM error";
-                }
-                throw maybePeerCancelled(
-                        new IOException("Failed to send file content via XMODEM (" + detail + ")"),
-                        "File content transfer cancelled by receiver");
-            }
-        } finally {
-            xmodemInProgress.set(false);
-        }
+        sendXmodemPayload(
+                data,
+                "File content transfer cancelled by receiver",
+                "Failed to send file content via XMODEM");
     }
 
     /**
@@ -1903,21 +1869,8 @@ public class SyncProtocol {
     public void sendLogViaXmodem(byte[] data, int logSize) throws IOException {
         sendCommand(CMD_LOG_XFER, String.valueOf(logSize));
         waitForCommand(CMD_ACK);
-        xmodemInProgress.set(true);
-        try {
-            boolean success = xmodem.send(data);
-            if (!success) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "unknown XMODEM error";
-                }
-                throw maybePeerCancelled(
-                        new IOException("Failed to send log via XMODEM (" + detail + ")"),
-                        "Log transfer cancelled by receiver");
-            }
-        } finally {
-            xmodemInProgress.set(false);
-        }
+        sendXmodemPayload(
+                data, "Log transfer cancelled by receiver", "Failed to send log via XMODEM");
     }
 
     /** Send direction change notification */
@@ -1978,6 +1931,34 @@ public class SyncProtocol {
             throw xmodemReceiveFailure(cancelMessage, failureMessagePrefix + " (" + detail + ")");
         }
         return data;
+    }
+
+    /**
+     * Send one XMODEM payload under the shared in-progress guard, translating a failed transfer
+     * through {@link #maybePeerCancelled}: a peer cancel surfaces as a benign {@link
+     * TransferCancelledException}, anything else as a plain communication-failure IOException.
+     *
+     * @param payload the bytes to transfer
+     * @param cancelMessage message used when the peer cancelled the transfer
+     * @param failureMessagePrefix prefix of the communication-failure message; the XMODEM error
+     *     detail is appended in parentheses
+     */
+    private void sendXmodemPayload(
+            byte[] payload, String cancelMessage, String failureMessagePrefix) throws IOException {
+        xmodemInProgress.set(true);
+        try {
+            boolean success = xmodem.send(payload);
+            if (!success) {
+                String detail = xmodem.getLastErrorMessage();
+                if (detail == null || detail.isEmpty()) {
+                    detail = "unknown XMODEM error";
+                }
+                throw maybePeerCancelled(
+                        new IOException(failureMessagePrefix + " (" + detail + ")"), cancelMessage);
+            }
+        } finally {
+            xmodemInProgress.set(false);
+        }
     }
 
     /**
@@ -2348,16 +2329,10 @@ public class SyncProtocol {
                     String.valueOf(payload.isCompressed()),
                     String.valueOf(payload.getData().length));
             waitForCommand(CMD_ACK);
-            boolean success = xmodem.send(payload.getData());
-            if (!success) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "unknown XMODEM error";
-                }
-                throw maybePeerCancelled(
-                        new IOException("Failed to send shared text (" + detail + ")"),
-                        "Shared text transfer cancelled by receiver");
-            }
+            sendXmodemPayload(
+                    payload.getData(),
+                    "Shared text transfer cancelled by receiver",
+                    "Failed to send shared text");
         } finally {
             interleaveSuppressed.set(false);
             xmodemInProgress.set(false);
