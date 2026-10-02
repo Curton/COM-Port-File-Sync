@@ -310,6 +310,11 @@ public final class RemotePeer implements AutoCloseable {
         return receivedTexts;
     }
 
+    /** Log lines this side has emitted (log/error events and log markers), in order. */
+    public List<String> logLines() {
+        return logLines;
+    }
+
     /** Absolute paths of files saved by the drop-file receive path, in arrival order. */
     public List<String> receivedFiles() {
         return receivedFiles;

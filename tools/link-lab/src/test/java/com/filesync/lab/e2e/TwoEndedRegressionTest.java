@@ -13,6 +13,7 @@ import com.filesync.lab.link.TamperRule;
 import com.filesync.lab.link.WireModel;
 import com.filesync.lab.peer.RemotePeer;
 import com.filesync.lab.port.DuplexLink;
+import com.filesync.protocol.SyncProtocol;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncEventType;
 import com.filesync.sync.SyncPreviewPlan;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -477,6 +479,166 @@ class TwoEndedRegressionTest {
         assertNotNull(
                 SyncStateStore.forFolder(sender.workspace()).base("blocked.txt"),
                 "the successful retry records the base");
+    }
+
+    /**
+     * A large text file is synced once (full transfer), then edited in the middle. The second sync
+     * must ride the delta fast path end to end over the emulated wire: signature exchange, delta
+     * encode on the sender, GZIP-compressed CMD_FILE_DELTA, and the receiver's streaming
+     * reconstruction — the staging file is renamed over the target and nothing is left behind.
+     */
+    @Test
+    @Timeout(180)
+    void aMidFileEditSyncsThroughTheCompressedDeltaPath() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] first = numberedText(4_000);
+        writeFile(sender.workspace(), "report.txt", first);
+        sender.sync();
+        awaitFileContent(receiver.workspace(), "report.txt", first);
+        awaitSyncIdle();
+
+        byte[] second = withMiddleReplaced(first, 120_000, 8_000);
+        writeFile(sender.workspace(), "report.txt", second);
+        sender.sync();
+        awaitFileContent(receiver.workspace(), "report.txt", second);
+        awaitSyncIdle();
+
+        await(
+                "the sender logs the delta transfer",
+                () ->
+                        sender.logLines().stream()
+                                .anyMatch(
+                                        l ->
+                                                l.contains("Delta syncing")
+                                                        && l.contains("report.txt")
+                                                        && l.contains("(compressed)")),
+                AWAIT_MS);
+        assertFalse(
+                sender.logLines().stream()
+                        .anyMatch(l -> l.contains("too small") && l.contains("report.txt")),
+                "the middle edit must clear the delta savings threshold, not fall back to batch");
+        assertFalse(
+                new File(receiver.workspace(), ".report.txt" + SyncProtocol.DELTA_STAGE_SUFFIX)
+                        .exists(),
+                "a completed delta transfer must not leave a staging file behind");
+    }
+
+    /**
+     * The receiver's copy drifts between the signature exchange and the delta application in a way
+     * no manifest can see: lone-LF bytes swapped for lone-CR (same size, same lastModified, and the
+     * manifest hashes line endings normalized). The delta was encoded against the pre-tamper
+     * blocks, so the streamed reconstruction must fail verification: the receiver sends BASE_STALE,
+     * keeps its own bytes untouched (the staging file is dropped, never moved over the target), and
+     * the sync after that converges through a full transfer.
+     */
+    @Test
+    @Timeout(240)
+    void aStaleReceiverBaseIsRejectedWithoutTouchingTheTarget() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] first = numberedText(4_000);
+        writeFile(sender.workspace(), "report.txt", first);
+        sender.sync();
+        awaitFileContent(receiver.workspace(), "report.txt", first);
+        awaitSyncIdle();
+
+        File receiverFile = new File(receiver.workspace(), "report.txt");
+        byte[] tampered = readFile(receiver.workspace(), "report.txt");
+        List<Integer> flips = new ArrayList<>();
+        for (int i = 100_000; i < 200_000; i += 997) {
+            if (tampered[i] == '\n') {
+                tampered[i] = '\r';
+                flips.add(i);
+            }
+        }
+        assertFalse(flips.isEmpty(), "the tamper region must contain newlines to flip");
+
+        byte[] second = withMiddleReplaced(first, 120_000, 8_000);
+        writeFile(sender.workspace(), "report.txt", second);
+        sender().sync();
+
+        // The tamper must land after the receiver has signed its pre-tamper bytes (signatures
+        // are computed from the file, not the manifest) but before the reconstruction reads the
+        // file back. The log line below is posted only once every signature is computed, and the
+        // wire-paced signature reply plus the sender's encode leave hundreds of milliseconds;
+        // patching the few flipped bytes in place (not rewriting the file) costs single-digit
+        // milliseconds and does not even touch the lastModified.
+        await(
+                "the receiver has signed its copy",
+                () ->
+                        receiver.logLines().stream()
+                                .anyMatch(l -> l.contains("Sending block signatures")),
+                AWAIT_MS);
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(receiverFile, "rw")) {
+            for (int at : flips) {
+                raf.seek(at);
+                raf.write('\r');
+            }
+        }
+
+        // The rejection is the receiver's own verdict and is logged before the frame crosses;
+        // whether the BASE_STALE notification itself survives the connection teardown that
+        // follows is a separate (pre-existing) race, so the wait pins the deterministic side.
+        await(
+                "the receiver rejects the stale reconstruction",
+                () ->
+                        receiver.logLines().stream()
+                                .anyMatch(
+                                        l ->
+                                                l.contains(
+                                                        "Delta reconstruction verification failed")),
+                AWAIT_MS);
+        // The rejection surfaces on the receiver as a communication error and tears the
+        // connection down - the expected outcome of a rejected transfer, not a quiet idle.
+        assertArrayEquals(
+                tampered,
+                readFile(receiver.workspace(), "report.txt"),
+                "a rejected reconstruction must leave the receiver's file untouched");
+        assertFalse(
+                new File(receiver.workspace(), ".report.txt" + SyncProtocol.DELTA_STAGE_SUFFIX)
+                        .exists(),
+                "the rejected reconstruction's staging file must be dropped");
+
+        // The rejection is memoized, so after the link is back the retry avoids the rejected
+        // state; the rejection also rolled the sender's base back, so the retry surfaces as a
+        // conflict against the drifted copy. Whatever arbitration picks, the two sides must
+        // converge on identical bytes without any manual intervention.
+        rebuildSession();
+        awaitSessionAlive();
+        sender().sync();
+        await(
+                "both sides converge on the same bytes",
+                () -> {
+                    try {
+                        return Arrays.equals(
+                                readFile(sender.workspace(), "report.txt"),
+                                readFile(receiver.workspace(), "report.txt"));
+                    } catch (IOException e) {
+                        return false; // a file is mid-rewrite; poll again
+                    }
+                },
+                AWAIT_MS);
+        awaitSyncIdle();
+    }
+
+    /** A large compressible text body: numbered lines with a fixed repeating tail. */
+    private static byte[] numberedText(int lineCount) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lineCount; i++) {
+            sb.append(String.format("line %06d the quick brown fox jumps over the lazy dog\n", i));
+        }
+        return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** A copy of {@code original} with a contiguous middle region overwritten by repeating text. */
+    private static byte[] withMiddleReplaced(byte[] original, int start, int length) {
+        byte[] edited = original.clone();
+        byte[] filler = "REPLACED REGION ".getBytes(StandardCharsets.UTF_8);
+        for (int i = 0; i < length; i++) {
+            edited[start + i] = filler[i % filler.length];
+        }
+        return edited;
     }
 
     /**
