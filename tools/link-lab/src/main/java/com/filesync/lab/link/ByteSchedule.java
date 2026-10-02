@@ -11,8 +11,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * runs ahead of the configured rate: the queue keeps a wire clock and a byte offered now leaves at
  * {@code max(wireClock, now) + latency + byteIndex * nanosPerByte}, so bursts are smoothed and the
  * long-run rate equals {@link WireModel#bytesPerSecond()} exactly. When the queue holds more than
- * the configured high-water mark the offering thread blocks, which is how a real driver backpressures
- * the sender when the receiver cannot keep up.
+ * the configured high-water mark the offering thread blocks, which is how a real driver
+ * backpressures the sender when the receiver cannot keep up.
  */
 final class ByteSchedule {
 
@@ -38,9 +38,9 @@ final class ByteSchedule {
     }
 
     /**
-     * Schedules {@code len} bytes at the current wire rate, optionally held back by an extra
-     * delay. Blocks while the queue is full; returns the number of bytes actually scheduled
-     * (fewer than {@code len} only when the channel is closed).
+     * Schedules {@code len} bytes at the current wire rate, optionally held back by an extra delay.
+     * Blocks while the queue is full; returns the number of bytes actually scheduled (fewer than
+     * {@code len} only when the channel is closed).
      */
     int offer(byte[] src, int off, int len, long extraDelayNanos) {
         int written = 0;

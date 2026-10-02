@@ -2,7 +2,6 @@ package com.filesync.lab.bridge;
 
 import com.filesync.lab.Trace;
 import com.filesync.lab.link.TamperRule;
-import com.filesync.lab.link.WireChannel;
 import com.filesync.lab.link.WireModel;
 import com.filesync.lab.port.LinkSerialPortManager;
 import java.io.IOException;
@@ -12,8 +11,8 @@ import java.util.List;
 
 /**
  * Bridge mode: the tool becomes the cable. Two real COM ports are opened (the two ends of two
- * virtual-port pairs) and every byte is relayed through the emulated wire, so two real instances
- * of the application talk to each other over a link that behaves like a slow, lossy serial line.
+ * virtual-port pairs) and every byte is relayed through the emulated wire, so two real instances of
+ * the application talk to each other over a link that behaves like a slow, lossy serial line.
  *
  * <p>This is the closest setup to a genuine two-machine regression: no protocol code of the
  * application is replaced, only the wire. Peer mode remains the better choice when the goal is a
@@ -28,7 +27,8 @@ public final class BridgeMode implements AutoCloseable {
     private final Thread bToA;
     private volatile boolean closed;
 
-    private BridgeMode(Trace trace, WireModel model, String portA, String portB) throws IOException {
+    private BridgeMode(Trace trace, WireModel model, String portA, String portB)
+            throws IOException {
         this.trace = trace;
         List<TamperRule> noRules = List.of();
         this.sideA = new LinkSerialPortManager(trace, model, noRules, noRules, 0xB1A1);
@@ -42,10 +42,12 @@ public final class BridgeMode implements AutoCloseable {
         }
         this.aToB = relay(sideA, sideB, "bridge-A->B");
         this.bToA = relay(sideB, sideA, "bridge-B->A");
-        trace.log(Trace.Dir.WIRE, "bridge " + portA + " <-> " + portB + " (" + model.summary() + ")");
+        trace.log(
+                Trace.Dir.WIRE, "bridge " + portA + " <-> " + portB + " (" + model.summary() + ")");
     }
 
-    public static BridgeMode start(Trace trace, WireModel model, String portA, String portB) throws IOException {
+    public static BridgeMode start(Trace trace, WireModel model, String portA, String portB)
+            throws IOException {
         return new BridgeMode(trace, model, portA, portB);
     }
 
@@ -67,7 +69,9 @@ public final class BridgeMode implements AutoCloseable {
                                 }
                             } catch (Exception e) {
                                 if (!closed) {
-                                    trace.log(Trace.Dir.WIRE, name + " relay stopped: " + e.getMessage());
+                                    trace.log(
+                                            Trace.Dir.WIRE,
+                                            name + " relay stopped: " + e.getMessage());
                                 }
                             }
                         },
@@ -90,8 +94,10 @@ public final class BridgeMode implements AutoCloseable {
     }
 
     public String stats() {
-        return "A->B " + sideA.inboundChannel().stats().summary()
-                + "\nB->A " + sideB.inboundChannel().stats().summary();
+        return "A->B "
+                + sideA.inboundChannel().stats().summary()
+                + "\nB->A "
+                + sideB.inboundChannel().stats().summary();
     }
 
     /** Live wire knobs for the shared model. */

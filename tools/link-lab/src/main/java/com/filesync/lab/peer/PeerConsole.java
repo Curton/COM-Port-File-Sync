@@ -149,7 +149,9 @@ public final class PeerConsole {
 
     private void applyFault(String[] parts) {
         if (parts.length < 3) {
-            trace.log(Trace.Dir.PEER, "usage: fault <loss|corrupt|baud|latency|jitter|noise|clean> <value...>");
+            trace.log(
+                    Trace.Dir.PEER,
+                    "usage: fault <loss|corrupt|baud|latency|jitter|noise|clean> <value...>");
             return;
         }
         String what = parts[1].toLowerCase();
@@ -173,7 +175,12 @@ public final class PeerConsole {
                 peer.model().noise(Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
                 break;
             case "clean":
-                peer.model().lossPercent(0).corruptPercent(0).noise(0, 0).latencyMillis(2).jitterMillis(1);
+                peer.model()
+                        .lossPercent(0)
+                        .corruptPercent(0)
+                        .noise(0, 0)
+                        .latencyMillis(2)
+                        .jitterMillis(1);
                 break;
             default:
                 trace.log(Trace.Dir.PEER, "unknown fault: " + what);
@@ -183,7 +190,8 @@ public final class PeerConsole {
     }
 
     private void applyTamper(String[] parts) {
-        // tamper <to-app|to-peer> <drop|delay|inject-after|inject-before|corrupt> <command>[#n] [arg]
+        // tamper <to-app|to-peer> <drop|delay|inject-after|inject-before|corrupt> <command>[#n]
+        // [arg]
         if (parts.length < 4) {
             trace.log(
                     Trace.Dir.PEER,
@@ -202,7 +210,13 @@ public final class PeerConsole {
                 rule = new TamperRule(command, occurrence, TamperRule.Action.DROP, 0, null);
                 break;
             case "delay":
-                rule = new TamperRule(command, occurrence, TamperRule.Action.DELAY, Long.parseLong(arg), null);
+                rule =
+                        new TamperRule(
+                                command,
+                                occurrence,
+                                TamperRule.Action.DELAY,
+                                Long.parseLong(arg),
+                                null);
                 break;
             case "corrupt":
                 rule = new TamperRule(command, occurrence, TamperRule.Action.CORRUPT, 0, null);

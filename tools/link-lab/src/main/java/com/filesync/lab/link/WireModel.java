@@ -32,8 +32,8 @@ public final class WireModel {
     }
 
     /**
-     * Sets the frame format so the byte rate matches the serial timing on the wire:
-     * {@code bitsPerByte = 1 start + dataBits + (parity ? 1 : 0) + stopBits}.
+     * Sets the frame format so the byte rate matches the serial timing on the wire: {@code
+     * bitsPerByte = 1 start + dataBits + (parity ? 1 : 0) + stopBits}.
      */
     public WireModel framing(int dataBits, boolean parity, int stopBits) {
         this.bitsPerByte = 1 + dataBits + (parity ? 1 : 0) + stopBits;

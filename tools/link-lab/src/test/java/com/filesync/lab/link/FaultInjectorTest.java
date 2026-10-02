@@ -71,17 +71,19 @@ class FaultInjectorTest {
     void sameSeedReproducesTheSameBehaviour() {
         byte[] data = new byte[500];
         WireStats statsA = new WireStats();
-        FaultInjector a = new FaultInjector(new WireModel().lossPercent(20).corruptPercent(10), statsA, 99);
+        FaultInjector a =
+                new FaultInjector(new WireModel().lossPercent(20).corruptPercent(10), statsA, 99);
         int outA = a.apply(data, 0, data.length);
 
         WireStats statsB = new WireStats();
-        FaultInjector b = new FaultInjector(new WireModel().lossPercent(20).corruptPercent(10), statsB, 99);
+        FaultInjector b =
+                new FaultInjector(new WireModel().lossPercent(20).corruptPercent(10), statsB, 99);
         int outB = b.apply(data, 0, data.length);
 
         assertEquals(outA, outB);
         assertEquals(statsA.droppedBytes(), statsB.droppedBytes());
         assertEquals(statsA.corruptedBytes(), statsB.corruptedBytes());
-        assertTrue(Arrays.equals(
-                Arrays.copyOf(a.scratch(), outA), Arrays.copyOf(b.scratch(), outB)));
+        assertTrue(
+                Arrays.equals(Arrays.copyOf(a.scratch(), outA), Arrays.copyOf(b.scratch(), outB)));
     }
 }

@@ -22,11 +22,17 @@ public final class LinkSelfTest {
     /** Runs the measurement; returns a process exit code (0 = within tolerance). */
     public static int measure(WireModel model, Trace trace) {
         // Size the payload for roughly two seconds of wire time so slow links stay quick.
-        int payloadBytes = (int) Math.min(
-                MAX_PAYLOAD_BYTES,
-                Math.max(MIN_PAYLOAD_BYTES, model.bytesPerSecond() * TARGET_WIRE_SECONDS));
+        int payloadBytes =
+                (int)
+                        Math.min(
+                                MAX_PAYLOAD_BYTES,
+                                Math.max(
+                                        MIN_PAYLOAD_BYTES,
+                                        model.bytesPerSecond() * TARGET_WIRE_SECONDS));
         MemorySink sink = new MemorySink();
-        WireChannel channel = WireChannel.outbound(Trace.Dir.PEER_TO_APP, trace, model, java.util.List.of(), 1, sink);
+        WireChannel channel =
+                WireChannel.outbound(
+                        Trace.Dir.PEER_TO_APP, trace, model, java.util.List.of(), 1, sink);
 
         byte[] payload = new byte[payloadBytes];
         for (int i = 0; i < payload.length; i++) {
@@ -68,10 +74,13 @@ public final class LinkSelfTest {
         double expected = model.bytesPerSecond();
         double achieved = delivered * 1000.0 / Math.max(1, elapsedMs);
         double lossRatio = 1.0 - (double) delivered / payloadBytes;
-        boolean ok = delivered > 0
-                && achieved >= expected * 0.85
-                && achieved <= expected * 1.15
-                && (model.lossPercent() <= 0 ? delivered == payloadBytes : lossRatio <= model.lossPercent() / 100.0 + 0.02);
+        boolean ok =
+                delivered > 0
+                        && achieved >= expected * 0.85
+                        && achieved <= expected * 1.15
+                        && (model.lossPercent() <= 0
+                                ? delivered == payloadBytes
+                                : lossRatio <= model.lossPercent() / 100.0 + 0.02);
         trace.log(
                 Trace.Dir.WIRE,
                 String.format(

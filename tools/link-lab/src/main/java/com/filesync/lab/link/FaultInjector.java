@@ -23,8 +23,7 @@ final class FaultInjector {
     private boolean anyFaultActive() {
         return model.lossPercent() > 0
                 || model.corruptPercent() > 0
-                || model.noisePeriodBytes() > 0
-                        && model.noiseBurstBytes() > 0;
+                || model.noisePeriodBytes() > 0 && model.noiseBurstBytes() > 0;
     }
 
     /**

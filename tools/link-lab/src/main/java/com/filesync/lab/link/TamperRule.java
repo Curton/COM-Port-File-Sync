@@ -29,7 +29,8 @@ public final class TamperRule {
     private final byte[] injectFrame;
     private int seen;
 
-    public TamperRule(String command, int occurrence, Action action, long delayMillis, String injectFrame) {
+    public TamperRule(
+            String command, int occurrence, Action action, long delayMillis, String injectFrame) {
         this.command = command;
         this.occurrence = occurrence;
         this.action = action;
@@ -37,9 +38,8 @@ public final class TamperRule {
         this.injectFrame =
                 injectFrame == null || injectFrame.isEmpty()
                         ? null
-                        : (injectFrame.endsWith("\n")
-                                ? injectFrame
-                                : injectFrame + "\n").getBytes(StandardCharsets.ISO_8859_1);
+                        : (injectFrame.endsWith("\n") ? injectFrame : injectFrame + "\n")
+                                .getBytes(StandardCharsets.ISO_8859_1);
     }
 
     /**
@@ -92,7 +92,8 @@ public final class TamperRule {
                         occurrence <= 0 ? seen : occurrence,
                         new String(injectFrame, StandardCharsets.ISO_8859_1).trim());
             default:
-                return String.format("%s %s#%d", action, command, occurrence <= 0 ? seen : occurrence);
+                return String.format(
+                        "%s %s#%d", action, command, occurrence <= 0 ? seen : occurrence);
         }
     }
 }

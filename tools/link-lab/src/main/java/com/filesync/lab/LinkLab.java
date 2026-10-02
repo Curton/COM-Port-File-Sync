@@ -8,7 +8,6 @@ import com.filesync.lab.scenario.Scenario;
 import com.filesync.lab.scenario.ScenarioRunner;
 import com.filesync.lab.selftest.LinkSelfTest;
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -137,14 +136,15 @@ public final class LinkLab {
         String ports = parsed.require("ports");
         String[] ends = ports.split(",");
         if (ends.length != 2) {
-            throw new IllegalArgumentException("--ports expects exactly two port names, e.g. COM11,COM13");
+            throw new IllegalArgumentException(
+                    "--ports expects exactly two port names, e.g. COM11,COM13");
         }
         Trace trace = new Trace(parsed.has("frames"), parsed.fileOrNull("trace"));
-        BridgeMode bridge = BridgeMode.start(trace, parsed.wireModel(), ends[0].trim(), ends[1].trim());
+        BridgeMode bridge =
+                BridgeMode.start(trace, parsed.wireModel(), ends[0].trim(), ends[1].trim());
         AtomicBoolean stopping = new AtomicBoolean(false);
         Runtime.getRuntime()
-                .addShutdownHook(
-                        new Thread(() -> stopping.set(true), "link-lab-shutdown"));
+                .addShutdownHook(new Thread(() -> stopping.set(true), "link-lab-shutdown"));
         while (!stopping.get()) {
             try {
                 Thread.sleep(5_000);

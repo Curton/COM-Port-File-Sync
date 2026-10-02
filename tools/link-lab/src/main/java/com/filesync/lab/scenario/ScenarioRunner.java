@@ -40,7 +40,9 @@ public final class ScenarioRunner {
 
     /** Runs the scenario; returns true when every step passed. */
     public boolean run(Scenario scenario) {
-        trace.log(Trace.Dir.SCENARIO, "=== scenario: " + scenario.name + " (" + scenario.steps.size() + " steps) ===");
+        trace.log(
+                Trace.Dir.SCENARIO,
+                "=== scenario: " + scenario.name + " (" + scenario.steps.size() + " steps) ===");
         for (int i = 0; i < scenario.steps.size(); i++) {
             Scenario.Step step = scenario.steps.get(i);
             runStep(i + 1, step);
@@ -69,7 +71,11 @@ public final class ScenarioRunner {
                     pass(label + " pushed " + step.path);
                     break;
                 case "waitFile":
-                    wait(label, "file " + step.path + " to appear", step.timeoutMs, () -> peer.workspaceHas(step.path));
+                    wait(
+                            label,
+                            "file " + step.path + " to appear",
+                            step.timeoutMs,
+                            () -> peer.workspaceHas(step.path));
                     break;
                 case "sync":
                     peer.resetMeter();
@@ -86,7 +92,11 @@ public final class ScenarioRunner {
                     break;
                 case "expectText":
                     String expected = step.text != null ? step.text : step.message;
-                    wait(label, "shared text '" + expected + "'", step.timeoutMs, () -> peer.receivedTexts().contains(expected));
+                    wait(
+                            label,
+                            "shared text '" + expected + "'",
+                            step.timeoutMs,
+                            () -> peer.receivedTexts().contains(expected));
                     break;
                 case "inject":
                     if ("to-peer".equalsIgnoreCase(step.direction)) {
@@ -101,7 +111,13 @@ public final class ScenarioRunner {
                     pass(label + " wire=" + peer.model().summary());
                     break;
                 case "tamper":
-                    peer.addTamperRule(new TamperRule(step.command, step.occurrence, actionOf(step.action), step.latencyMs, step.frame),
+                    peer.addTamperRule(
+                            new TamperRule(
+                                    step.command,
+                                    step.occurrence,
+                                    actionOf(step.action),
+                                    step.latencyMs,
+                                    step.frame),
                             !"to-peer".equalsIgnoreCase(step.direction));
                     pass(label);
                     break;
@@ -109,17 +125,32 @@ public final class ScenarioRunner {
                     peer.resetMeter();
                     pass(label);
                     break;
-                case "expectThroughput": {
-                    double bps = stats(step.channel).measuredBytesPerSecond();
-                    boolean ok = bps >= step.minBps && (step.maxBps <= 0 || bps <= step.maxBps);
-                    report(label, ok, String.format("%s throughput %.0f B/s (want %.0f..%.0f)", step.channel, bps, step.minBps, step.maxBps));
-                    break;
-                }
-                case "expectStats": {
-                    long dropped = stats(step.channel).droppedBytes();
-                    report(label, dropped >= step.minDropped, step.channel + " dropped " + dropped + " bytes (want >= " + step.minDropped + ")");
-                    break;
-                }
+                case "expectThroughput":
+                    {
+                        double bps = stats(step.channel).measuredBytesPerSecond();
+                        boolean ok = bps >= step.minBps && (step.maxBps <= 0 || bps <= step.maxBps);
+                        report(
+                                label,
+                                ok,
+                                String.format(
+                                        "%s throughput %.0f B/s (want %.0f..%.0f)",
+                                        step.channel, bps, step.minBps, step.maxBps));
+                        break;
+                    }
+                case "expectStats":
+                    {
+                        long dropped = stats(step.channel).droppedBytes();
+                        report(
+                                label,
+                                dropped >= step.minDropped,
+                                step.channel
+                                        + " dropped "
+                                        + dropped
+                                        + " bytes (want >= "
+                                        + step.minDropped
+                                        + ")");
+                        break;
+                    }
                 case "waitState":
                     waitState(label, step);
                     break;
@@ -129,11 +160,20 @@ public final class ScenarioRunner {
                     break;
                 case "content":
                     byte[] content = peer.fetchContent(step.path);
-                    report(label, content != null, "fetched " + step.path + ": " + (content == null ? "null" : content.length + " bytes"));
+                    report(
+                            label,
+                            content != null,
+                            "fetched "
+                                    + step.path
+                                    + ": "
+                                    + (content == null ? "null" : content.length + " bytes"));
                     break;
                 case "applog":
                     String log = peer.fetchAppLog();
-                    report(label, log != null && !log.isEmpty(), "app log: " + (log == null ? "null" : log.length() + " chars"));
+                    report(
+                            label,
+                            log != null && !log.isEmpty(),
+                            "app log: " + (log == null ? "null" : log.length() + " chars"));
                     break;
                 case "linkCycle":
                     peer.disconnect();
@@ -188,21 +228,23 @@ public final class ScenarioRunner {
     }
 
     private void waitState(String label, Scenario.Step step) {
-        BooleanSupplier condition = () -> {
-            if (step.syncing != null && peer.isSyncing() != step.syncing) {
-                return false;
-            }
-            if (step.connected != null && peer.isConnected() != step.connected) {
-                return false;
-            }
-            if (step.sender != null && peer.isSender() != step.sender) {
-                return false;
-            }
-            if (step.roleNegotiated != null && peer.isRoleNegotiated() != step.roleNegotiated) {
-                return false;
-            }
-            return true;
-        };
+        BooleanSupplier condition =
+                () -> {
+                    if (step.syncing != null && peer.isSyncing() != step.syncing) {
+                        return false;
+                    }
+                    if (step.connected != null && peer.isConnected() != step.connected) {
+                        return false;
+                    }
+                    if (step.sender != null && peer.isSender() != step.sender) {
+                        return false;
+                    }
+                    if (step.roleNegotiated != null
+                            && peer.isRoleNegotiated() != step.roleNegotiated) {
+                        return false;
+                    }
+                    return true;
+                };
         wait(label, "state " + describeState(step), step.timeoutMs, condition);
     }
 
@@ -236,7 +278,10 @@ public final class ScenarioRunner {
             }
             sleep(50);
         }
-        report(label, condition.getAsBoolean(), "timed out after " + timeoutMs + " ms waiting for " + what);
+        report(
+                label,
+                condition.getAsBoolean(),
+                "timed out after " + timeoutMs + " ms waiting for " + what);
     }
 
     private static void sleep(long ms) {

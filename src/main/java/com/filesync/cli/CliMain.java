@@ -76,10 +76,8 @@ public final class CliMain {
                 "            if the peer hangs up before a session starts (e.g. after preview).");
         out.println(
                 "  preview   Sender-side dry run: fetch the peer's manifest and print what send");
-        out.println(
-                "            would transfer/delete/rename. Nothing is sent, so only this side");
-        out.println(
-                "            runs a command; the peer just answers the manifest request.");
+        out.println("            would transfer/delete/rename. Nothing is sent, so only this side");
+        out.println("            runs a command; the peer just answers the manifest request.");
         out.println();
         out.println("Options:");
         out.println("  --port <name>         Serial port to open, e.g. COM3 (required)");

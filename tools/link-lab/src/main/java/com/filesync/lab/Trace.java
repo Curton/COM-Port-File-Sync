@@ -1,7 +1,6 @@
 package com.filesync.lab;
 
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.time.LocalTime;
@@ -12,8 +11,8 @@ import java.time.format.DateTimeFormatter;
  * console and, when requested, to a file, so a regression run can be inspected afterwards the same
  * way a {@code combined_log} is inspected after a real two-machine session.
  *
- * <p>Line format: {@code [hh:mm:ss.SSS][CHANNEL] message}, with timestamps relative to the start
- * of the run.
+ * <p>Line format: {@code [hh:mm:ss.SSS][CHANNEL] message}, with timestamps relative to the start of
+ * the run.
  */
 public final class Trace {
 
@@ -54,11 +53,20 @@ public final class Trace {
     public Trace(boolean logFrames, File traceFile, java.util.function.Consumer<String> mirror) {
         this.logFrames = logFrames;
         this.mirror = mirror;
-        this.console = new PrintWriter(new java.io.OutputStreamWriter(System.out, java.nio.charset.StandardCharsets.UTF_8), true);
+        this.console =
+                new PrintWriter(
+                        new java.io.OutputStreamWriter(
+                                System.out, java.nio.charset.StandardCharsets.UTF_8),
+                        true);
         if (traceFile != null) {
             PrintWriter f = null;
             try {
-                f = new PrintWriter(new java.io.OutputStreamWriter(new java.io.FileOutputStream(traceFile), java.nio.charset.StandardCharsets.UTF_8), true);
+                f =
+                        new PrintWriter(
+                                new java.io.OutputStreamWriter(
+                                        new java.io.FileOutputStream(traceFile),
+                                        java.nio.charset.StandardCharsets.UTF_8),
+                                true);
             } catch (IOException e) {
                 System.err.println("Cannot open trace file " + traceFile + ": " + e.getMessage());
             }

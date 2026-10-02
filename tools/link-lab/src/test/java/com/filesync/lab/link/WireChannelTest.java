@@ -59,8 +59,8 @@ class WireChannelTest {
     void outboundBytesArePacedOntoTheDevice() throws Exception {
         WireModel model = new WireModel().baud(2_000_000).latencyMillis(0); // 200000 B/s
         Sink device = new Sink();
-        WireChannel channel = WireChannel.outbound(
-                Trace.Dir.PEER_TO_APP, trace(), model, List.of(), 1, device);
+        WireChannel channel =
+                WireChannel.outbound(Trace.Dir.PEER_TO_APP, trace(), model, List.of(), 1, device);
 
         byte[] payload = new byte[20_000];
         fillPattern(payload);
@@ -91,8 +91,14 @@ class WireChannelTest {
         byte[] payload = new byte[20_000];
         fillPattern(payload);
         device.write(payload);
-        WireChannel channel = WireChannel.inbound(
-                Trace.Dir.APP_TO_PEER, trace(), model, List.of(), 1, new SinkBackedInput(device));
+        WireChannel channel =
+                WireChannel.inbound(
+                        Trace.Dir.APP_TO_PEER,
+                        trace(),
+                        model,
+                        List.of(),
+                        1,
+                        new SinkBackedInput(device));
 
         InputStream in = channel.readStream();
         byte[] received = new byte[payload.length];
@@ -119,9 +125,16 @@ class WireChannelTest {
     void droppedFrameNeverReachesTheReader() throws Exception {
         WireModel model = new WireModel().baud(2_000_000).latencyMillis(0);
         Sink device = new Sink();
-        List<TamperRule> rules = List.of(new TamperRule("HEARTBEAT", 1, TamperRule.Action.DROP, 0, null));
-        WireChannel channel = WireChannel.inbound(
-                Trace.Dir.APP_TO_PEER, trace(), model, rules, 1, new SinkBackedInput(device));
+        List<TamperRule> rules =
+                List.of(new TamperRule("HEARTBEAT", 1, TamperRule.Action.DROP, 0, null));
+        WireChannel channel =
+                WireChannel.inbound(
+                        Trace.Dir.APP_TO_PEER,
+                        trace(),
+                        model,
+                        rules,
+                        1,
+                        new SinkBackedInput(device));
 
         device.write(latin1("[[SYNC:HEARTBEAT]]\n"));
         device.write(latin1("[[SYNC:HEARTBEAT_ACK]]\n"));
@@ -129,7 +142,8 @@ class WireChannelTest {
         InputStream in = channel.readStream();
         StringBuilder seen = new StringBuilder();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (seen.length() < "[[SYNC:HEARTBEAT_ACK]]\n".length() && System.nanoTime() < deadline) {
+        while (seen.length() < "[[SYNC:HEARTBEAT_ACK]]\n".length()
+                && System.nanoTime() < deadline) {
             int b = in.read();
             if (b >= 0) {
                 seen.append((char) b);
@@ -147,10 +161,16 @@ class WireChannelTest {
     void injectedFrameReachesTheWriter() throws Exception {
         WireModel model = new WireModel().baud(2_000_000).latencyMillis(0);
         Sink device = new Sink();
-        List<TamperRule> rules = List.of(
-                new TamperRule("HEARTBEAT_ACK", 1, TamperRule.Action.INJECT_AFTER, 0, "[[SYNC:DIRECTION_CHANGE:true]]"));
-        WireChannel channel = WireChannel.outbound(
-                Trace.Dir.PEER_TO_APP, trace(), model, rules, 1, device);
+        List<TamperRule> rules =
+                List.of(
+                        new TamperRule(
+                                "HEARTBEAT_ACK",
+                                1,
+                                TamperRule.Action.INJECT_AFTER,
+                                0,
+                                "[[SYNC:DIRECTION_CHANGE:true]]"));
+        WireChannel channel =
+                WireChannel.outbound(Trace.Dir.PEER_TO_APP, trace(), model, rules, 1, device);
 
         channel.writeStream().write(latin1("[[SYNC:HEARTBEAT_ACK]]\n"));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -169,9 +189,10 @@ class WireChannelTest {
     void delayedFrameArrivesLate() throws Exception {
         WireModel model = new WireModel().baud(2_000_000).latencyMillis(0);
         Sink device = new Sink();
-        List<TamperRule> rules = List.of(new TamperRule("FILE_DATA", 1, TamperRule.Action.DELAY, 300, null));
-        WireChannel channel = WireChannel.outbound(
-                Trace.Dir.PEER_TO_APP, trace(), model, rules, 1, device);
+        List<TamperRule> rules =
+                List.of(new TamperRule("FILE_DATA", 1, TamperRule.Action.DELAY, 300, null));
+        WireChannel channel =
+                WireChannel.outbound(Trace.Dir.PEER_TO_APP, trace(), model, rules, 1, device);
         byte[] frame = latin1("[[SYNC:FILE_DATA:a.txt:10:false:1]]\n");
         channel.writeStream().write(frame);
 
@@ -192,8 +213,8 @@ class WireChannelTest {
     void byteLossSurvivesTheChannel() throws Exception {
         WireModel model = new WireModel().lossPercent(50).baud(2_000_000).latencyMillis(0);
         Sink device = new Sink();
-        WireChannel channel = WireChannel.outbound(
-                Trace.Dir.PEER_TO_APP, trace(), model, List.of(), 5, device);
+        WireChannel channel =
+                WireChannel.outbound(Trace.Dir.PEER_TO_APP, trace(), model, List.of(), 5, device);
         byte[] payload = new byte[1000];
         fillPattern(payload);
         channel.writeStream().write(payload);
