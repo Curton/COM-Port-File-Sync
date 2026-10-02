@@ -38,6 +38,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 /**
@@ -285,6 +286,14 @@ public class FileChangeDetector {
         }
         final GitignoreParser parser = gitignoreParser;
 
+        // The sync app's own ignore file is always active, independent of the .gitignore toggle
+        // and of mirror mode: the right-click "ignore" action writes it, and its paths are exempt
+        // from strict-sync deletion (see the ignore guards in getFilesToDelete/findRenames).
+        GitignoreParser filesyncIgnoreParser =
+                new GitignoreParser(directory, GitignoreParser.FILESYNC_IGNORE_FILENAME);
+        filesyncIgnoreParser.loadRootFileOnly();
+        final GitignoreParser filesyncIgnore = filesyncIgnoreParser;
+
         // Probed up front, while the probe file is still the only thing the folder holds: the walk
         // below must never see it.
         boolean caseSensitive = isCaseSensitiveFileSystem(directory);
@@ -292,6 +301,11 @@ public class FileChangeDetector {
         Map<String, FileInfo> files = new ConcurrentHashMap<>();
         Set<String> directories = ConcurrentHashMap.newKeySet();
         Set<String> emptyDirectories = ConcurrentHashMap.newKeySet();
+        // Root paths the root .filesyncignore excluded from this manifest (a skipped directory is
+        // recorded itself, its subtree not walked). They travel with the manifest so the peer can
+        // skip transferring what this side ignores instead of re-sending it on every sync.
+        Set<String> ignoredFiles = ConcurrentHashMap.newKeySet();
+        Set<String> ignoredDirectories = ConcurrentHashMap.newKeySet();
         Map<String, Boolean> dirHasChildren = new ConcurrentHashMap<>();
         dirHasChildren.put("", false);
         Path basePath = directory.toPath();
@@ -353,9 +367,21 @@ public class FileChangeDetector {
                                             return false;
                                         }
 
+                                        // The root .filesyncignore never travels: it is per-side
+                                        // local config
+                                        if (relativePath.equals(
+                                                GitignoreParser.FILESYNC_IGNORE_FILENAME)) {
+                                            return false;
+                                        }
+
                                         // Check if file should be ignored based on .gitignore
-                                        return parser == null
-                                                || !parser.isIgnored(relativePath, false);
+                                        if (parser != null
+                                                && parser.isIgnored(relativePath, false)) {
+                                            return false;
+                                        }
+
+                                        // Check the root .filesyncignore (always active)
+                                        return !filesyncIgnore.isIgnored(relativePath, false);
                                     } catch (Exception e) {
                                         // Skip files that can't be accessed during counting
                                         return false;
@@ -393,6 +419,14 @@ public class FileChangeDetector {
 
                         // Skip .gitignore directories when respectGitignore is enabled
                         if (parser != null && parser.isIgnored(relativePath, true)) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+
+                        // Always honored, independent of the .gitignore toggle: the root
+                        // .filesyncignore. Recording the skipped root lets the peer stop
+                        // transferring into a tree this side deliberately ignores.
+                        if (filesyncIgnore.isIgnored(relativePath, true)) {
+                            ignoredDirectories.add(relativePath);
                             return FileVisitResult.SKIP_SUBTREE;
                         }
 
@@ -435,8 +469,20 @@ public class FileChangeDetector {
                             return FileVisitResult.CONTINUE;
                         }
 
+                        // The root .filesyncignore never travels: it is per-side local config
+                        if (relativePath.equals(GitignoreParser.FILESYNC_IGNORE_FILENAME)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+
                         // Check if file should be ignored based on .gitignore
                         if (parser != null && parser.isIgnored(relativePath, false)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        // Always honored, independent of the .gitignore toggle: the root
+                        // .filesyncignore
+                        if (filesyncIgnore.isIgnored(relativePath, false)) {
+                            ignoredFiles.add(relativePath);
                             return FileVisitResult.CONTINUE;
                         }
 
@@ -563,7 +609,9 @@ public class FileChangeDetector {
             }
         }
 
-        FileManifest manifest = new FileManifest(files, emptyDirectories, caseSensitive);
+        FileManifest manifest =
+                new FileManifest(
+                        files, emptyDirectories, caseSensitive, ignoredFiles, ignoredDirectories);
         if (resolvedOptions.isPersistResult()) {
             try {
                 persistManifest(resolvedOptions.getPersistedManifestFile(), manifest);
@@ -709,6 +757,11 @@ public class FileChangeDetector {
         return changedFiles;
     }
 
+    /** {@link #getFilesToDelete(FileManifest, FileManifest, Predicate)} with no ignore guard. */
+    public static List<String> getFilesToDelete(FileManifest source, FileManifest target) {
+        return getFilesToDelete(source, target, path -> false);
+    }
+
     /**
      * Compare two manifests and return files that need to be deleted from target Returns files that
      * exist in target but not in source (for strict sync mode)
@@ -719,8 +772,15 @@ public class FileChangeDetector {
      * before deletes — leaving the receiver without it while the sender keeps it, so the next sync
      * repeats the transfer and the delete for good. On a case-sensitive target the two spellings
      * are two entries and the rename is still mirrored as a transfer plus a delete.
+     *
+     * <p>{@code senderIgnored} exempts paths the sender's root .filesyncignore excludes: the sender
+     * deliberately does not manage them, so strict mode must not mirror their absence as a delete
+     * on the receiver. This guard is what lets .filesyncignore stay active under mirror mode, where
+     * the .gitignore filter is disabled precisely because its ignored files would otherwise be
+     * deleted.
      */
-    public static List<String> getFilesToDelete(FileManifest source, FileManifest target) {
+    public static List<String> getFilesToDelete(
+            FileManifest source, FileManifest target, Predicate<String> senderIgnored) {
         List<String> filesToDelete = new ArrayList<>();
         Map<String, String> sourcePathsByFold =
                 target.isCaseSensitive() ? null : caseFoldIndex(source.getFiles().keySet());
@@ -731,6 +791,11 @@ public class FileChangeDetector {
             }
             if (sourcePathsByFold != null && sourcePathsByFold.containsKey(foldCase(path))) {
                 // Differs from a path the source still has only by letter case - not obsolete
+                continue;
+            }
+            if (senderIgnored.test(path)) {
+                // The sender's ignore list owns this path; its absence from the sender is not an
+                // instruction to delete it on the receiver
                 continue;
             }
             // File exists in target but not in source - should be deleted
@@ -792,8 +857,21 @@ public class FileChangeDetector {
      *
      * <p>The returned renames carry the sender's size, timestamp and md5 of the new path, which the
      * receiver verifies against the old file before moving it.
+     *
+     * <p>{@code senderIgnored} and {@code receiverIgnored} keep .filesyncignore-managed paths out
+     * of the pairing: an old path the sender ignores must stay untouched on the receiver instead of
+     * being moved, and a new path the receiver ignores would land in a tree its own ignore list
+     * then hides from every later sync.
      */
     public static List<FileRename> findRenames(FileManifest source, FileManifest target) {
+        return findRenames(source, target, path -> false, path -> false);
+    }
+
+    public static List<FileRename> findRenames(
+            FileManifest source,
+            FileManifest target,
+            Predicate<String> senderIgnored,
+            Predicate<String> receiverIgnored) {
         List<FileRename> renames = new ArrayList<>();
         if (source == null || target == null) {
             return renames;
@@ -805,7 +883,7 @@ public class FileChangeDetector {
         // Old-path candidates: the receiver's files the sender no longer has (the strict-mode
         // deletes), indexed by hash. Build the deletion list with the target's case semantics so a
         // case-insensitive receiver's "same file, different spelling" case is excluded here too.
-        Set<String> deletedPaths = new HashSet<>(getFilesToDelete(source, target));
+        Set<String> deletedPaths = new HashSet<>(getFilesToDelete(source, target, senderIgnored));
         Map<String, List<String>> deletableByMd5 = new HashMap<>();
         for (String path : deletedPaths) {
             FileInfo info = targetFiles.get(path);
@@ -834,6 +912,9 @@ public class FileChangeDetector {
                 continue;
             }
             if (targetPathsByFold != null && targetPathsByFold.containsKey(foldCase(path))) {
+                continue;
+            }
+            if (receiverIgnored.test(path)) {
                 continue;
             }
             newPaths.add(path);
@@ -910,6 +991,20 @@ public class FileChangeDetector {
      */
     public static List<String> getEmptyDirectoriesToDelete(
             FileManifest source, FileManifest target) {
+        return getEmptyDirectoriesToDelete(source, target, dir -> false);
+    }
+
+    /**
+     * Compare two manifests and return empty directories that need to be deleted Returns
+     * directories that exist in target but not in source (for strict sync mode)
+     *
+     * <p>{@code senderIgnored} exempts directories the sender's root .filesyncignore excludes, the
+     * same guard {@link #getFilesToDelete(FileManifest, FileManifest, Predicate)} applies to files:
+     * a directory the sender deliberately does not manage must not be mirrored away on the
+     * receiver.
+     */
+    public static List<String> getEmptyDirectoriesToDelete(
+            FileManifest source, FileManifest target, Predicate<String> senderIgnored) {
         List<String> dirsToDelete = new ArrayList<>();
         boolean caseInsensitive = !target.isCaseSensitive();
 
@@ -924,6 +1019,10 @@ public class FileChangeDetector {
             // this check the difference between the rename and a recursive delete of the files
             // the sender is putting there.
             if (!directoryExistsInManifest(dir, source, caseInsensitive)) {
+                if (senderIgnored.test(dir)) {
+                    // The sender's ignore list owns this directory; keep the receiver's copy
+                    continue;
+                }
                 // Directory exists in target but not in source - should be deleted
                 dirsToDelete.add(dir);
             }
@@ -1630,6 +1729,20 @@ public class FileChangeDetector {
         private final int schemaVersion;
 
         /**
+         * Root paths the root .filesyncignore excluded from this manifest: files verbatim, and a
+         * skipped directory as the directory itself (its subtree was never walked). They ride along
+         * so the peer can leave what this side ignores alone — chiefly, stop transferring into it —
+         * instead of re-sending it on every sync.
+         *
+         * <p>Additive like {@code caseSensitive}: the persisted cache reads back only the file
+         * entries, so no schema bump is needed, and a manifest deserialized without the fields
+         * reports empty sets.
+         */
+        private final java.util.Set<String> ignoredFiles;
+
+        private final java.util.Set<String> ignoredDirectories;
+
+        /**
          * Whether the filesystem this manifest was generated on tells paths apart by letter case.
          *
          * <p>It travels with the manifest because the peer needs it to interpret this side's paths:
@@ -1661,11 +1774,23 @@ public class FileChangeDetector {
                 Map<String, FileInfo> files,
                 java.util.Set<String> emptyDirectories,
                 boolean caseSensitive) {
+            this(files, emptyDirectories, caseSensitive, null, null);
+        }
+
+        public FileManifest(
+                Map<String, FileInfo> files,
+                java.util.Set<String> emptyDirectories,
+                boolean caseSensitive,
+                java.util.Set<String> ignoredFiles,
+                java.util.Set<String> ignoredDirectories) {
             this.files = files;
             this.emptyDirectories =
                     emptyDirectories != null ? emptyDirectories : new java.util.HashSet<>();
             this.schemaVersion = CURRENT_VERSION;
             this.caseSensitive = caseSensitive;
+            this.ignoredFiles = ignoredFiles != null ? ignoredFiles : new java.util.HashSet<>();
+            this.ignoredDirectories =
+                    ignoredDirectories != null ? ignoredDirectories : new java.util.HashSet<>();
         }
 
         public int getSchemaVersion() {
@@ -1682,6 +1807,21 @@ public class FileChangeDetector {
 
         public java.util.Set<String> getEmptyDirectories() {
             return emptyDirectories;
+        }
+
+        /**
+         * Paths this side's root .filesyncignore excludes. Null-guarded because Gson instantiates
+         * without running a constructor, so a payload predating the fields leaves them null.
+         */
+        public java.util.Set<String> getIgnoredFiles() {
+            return ignoredFiles != null ? ignoredFiles : java.util.Set.of();
+        }
+
+        /**
+         * Directory roots this side's root .filesyncignore skips whole; see {@link #ignoredFiles}.
+         */
+        public java.util.Set<String> getIgnoredDirectories() {
+            return ignoredDirectories != null ? ignoredDirectories : java.util.Set.of();
         }
 
         public int getFileCount() {

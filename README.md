@@ -22,7 +22,7 @@ COM Port File Sync enables reliable file transfer between two machines connected
 
 ### Sync Modes
 - **Standard Sync** - Transfers new and modified files from sender to receiver
-- **Mirror Mode** - Additionally deletes files on the receiver that don't exist on the sender, and removes empty directories. Toggling it on disables the `.gitignore` filter, since ignoring files while deleting everything else is rarely what you want
+- **Mirror Mode** - Additionally deletes files on the receiver that don't exist on the sender, and removes empty directories. Toggling it on disables the `.gitignore` filter, since ignoring files while deleting everything else is rarely what you want. `.filesyncignore` stays active in Mirror Mode: ignored paths are exempt from the mirror deletion instead (see below)
 - **Fast Mode** - Skips full content comparison when building the manifest, which speeds up preparation on large folders, at the cost of possibly missing a change. It is **enabled by default**. It does not change transfer speed in any way - see [Troubleshooting](#troubleshooting)
 
 ### Conflict Resolution
@@ -53,6 +53,7 @@ Review the plan before anything is written:
 
 ### File Filtering
 - **`.gitignore` Support** - Respects `.gitignore` patterns, including nested files, negation, directory-only and anchored patterns, to exclude files from synchronization. Cannot be combined with Mirror Mode
+- **`.filesyncignore`** - The app's own ignore list, as a `.filesyncignore` file in the sync folder's root. It uses the same pattern syntax as `.gitignore` and is always active, regardless of the `.gitignore` toggle and of Mirror Mode. Unlike `.gitignore` it is per side: the file itself is never synced, each machine honors only its own copy, and a nested `.filesyncignore` is just an ordinary file. Paths one side ignores are neither transferred to it nor deleted on it, so an ignored file simply stops being managed by sync and each side keeps its own copy. Add entries by right-clicking a row in the sync preview and choosing **Ignore (add to .filesyncignore)** - this writes an anchored pattern (a trailing slash for directory rows, both ends for a rename) and removes the row from the current plan
 - **Remembered Folder Mapping** - Remote folder mapping is remembered per port and offered for confirmation when it changes
 
 ### User Experience

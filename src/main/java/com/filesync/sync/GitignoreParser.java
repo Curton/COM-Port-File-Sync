@@ -17,24 +17,49 @@ public class GitignoreParser {
 
     private static final String GITIGNORE_FILENAME = ".gitignore";
 
+    /**
+     * The sync app's own per-folder ignore file. Unlike .gitignore it is never synced: each side
+     * honors only the copy in its own sync folder root, and the scanner skips it from the manifest
+     * the way it skips .gitignore.
+     */
+    public static final String FILESYNC_IGNORE_FILENAME = ".filesyncignore";
+
     private final File baseDirectory;
-    // Maps directory path to list of patterns from .gitignore in that directory
+    private final String ignoreFilename;
+    // Maps directory path to list of patterns from the ignore file in that directory
     private final Map<String, List<GitignorePattern>> patternsByDir;
 
     public GitignoreParser(File baseDirectory) {
+        this(baseDirectory, GITIGNORE_FILENAME);
+    }
+
+    public GitignoreParser(File baseDirectory, String ignoreFilename) {
         this.baseDirectory = baseDirectory;
+        this.ignoreFilename = ignoreFilename;
         this.patternsByDir = new HashMap<>();
     }
 
-    /** Scan for all .gitignore files and load patterns */
+    /** Scan for all ignore files and load patterns */
     public void loadGitignoreFiles() throws IOException {
         patternsByDir.clear();
         scanForGitignoreFiles(baseDirectory, "");
     }
 
-    /** Recursively scan for .gitignore files */
+    /**
+     * Load patterns from the base directory's ignore file only, ignoring any copies deeper in the
+     * tree. The {@link #FILESYNC_IGNORE_FILENAME} model: one file at the sync folder root.
+     */
+    public void loadRootFileOnly() throws IOException {
+        patternsByDir.clear();
+        File rootIgnoreFile = new File(baseDirectory, ignoreFilename);
+        if (rootIgnoreFile.exists() && rootIgnoreFile.isFile()) {
+            patternsByDir.put("", parseGitignoreFile(rootIgnoreFile));
+        }
+    }
+
+    /** Recursively scan for ignore files */
     private void scanForGitignoreFiles(File directory, String relativePath) throws IOException {
-        File gitignoreFile = new File(directory, GITIGNORE_FILENAME);
+        File gitignoreFile = new File(directory, ignoreFilename);
         if (gitignoreFile.exists() && gitignoreFile.isFile()) {
             List<GitignorePattern> patterns = parseGitignoreFile(gitignoreFile);
             patternsByDir.put(relativePath, patterns);
@@ -214,6 +239,30 @@ public class GitignoreParser {
         }
 
         return ignored;
+    }
+
+    /**
+     * Whether a path is ignored when the walk that would have checked its ancestors is not
+     * available: the path itself matches, or an ancestor directory does (a walk skips a matched
+     * subtree wholesale, so everything under an ignored directory is ignored).
+     *
+     * <p>This is the deletion-exemption view the sender applies to receiver-only paths: a
+     * directory-only pattern like {@code /build/} never matches {@code build/x.txt} directly, yet
+     * the file must count as ignored or strict sync would delete it on the receiver.
+     */
+    public boolean isIgnoredWithAncestors(String relativePath, boolean isDirectory) {
+        relativePath = relativePath.replace('\\', '/');
+        if (isIgnored(relativePath, isDirectory)) {
+            return true;
+        }
+        int slash = relativePath.lastIndexOf('/');
+        while (slash >= 0) {
+            if (isIgnored(relativePath.substring(0, slash), true)) {
+                return true;
+            }
+            slash = relativePath.lastIndexOf('/', slash - 1);
+        }
+        return false;
     }
 
     /** Represents a single gitignore pattern */

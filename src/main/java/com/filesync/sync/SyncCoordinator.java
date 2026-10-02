@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /** Coordinates sync operations, manifest exchange, and file transfers. */
@@ -416,17 +417,48 @@ public class SyncCoordinator {
                 FileChangeDetector.getEmptyDirectoriesToCreate(localManifest, remoteManifest);
         emptyDirsToCreate.sort(Comparator.naturalOrder());
 
+        // Paths the receiver's own root .filesyncignore hides from its manifest. Sending them
+        // anyway would land content its ignore list then hides from every later diff — and repeat
+        // on every sync — so they are skipped here instead of re-transferred forever.
+        int filesToSyncBeforeIgnore = filesToSync.size();
+        int dirsToCreateBeforeIgnore = emptyDirsToCreate.size();
+        filesToSync.removeIf(info -> isReceiverIgnored(info.getPath(), remoteManifest));
+        emptyDirsToCreate.removeIf(dir -> isReceiverIgnored(dir, remoteManifest));
+        int receiverIgnoredCount =
+                filesToSyncBeforeIgnore
+                        - filesToSync.size()
+                        + (dirsToCreateBeforeIgnore - emptyDirsToCreate.size());
+        if (receiverIgnoredCount > 0) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            receiverIgnoredCount
+                                    + " path(s) are ignored on the receiver (.filesyncignore):"
+                                    + " not transferred"));
+        }
+
+        // The sender's own root .filesyncignore rules, applied to the deletion side: a path this
+        // side deliberately does not manage must not be mirrored away on the receiver. This guard
+        // is what keeps .filesyncignore meaningful under mirror mode (see getFilesToDelete).
+        GitignoreParser senderIgnoreRules =
+                new GitignoreParser(syncFolder, GitignoreParser.FILESYNC_IGNORE_FILENAME);
+        senderIgnoreRules.loadRootFileOnly();
+        Predicate<String> senderIgnoredFile =
+                path -> senderIgnoreRules.isIgnoredWithAncestors(path, false);
+        Predicate<String> senderIgnoredDir =
+                path -> senderIgnoreRules.isIgnoredWithAncestors(path, true);
+
         boolean strictMode = strictSyncModeSupplier.getAsBoolean();
         List<String> filesToDelete =
                 strictMode
-                        ? FileChangeDetector.getFilesToDelete(localManifest, remoteManifest)
+                        ? FileChangeDetector.getFilesToDelete(
+                                localManifest, remoteManifest, senderIgnoredFile)
                         : new ArrayList<>();
         filesToDelete.sort(Comparator.naturalOrder());
 
         List<String> emptyDirsToDelete =
                 strictMode
                         ? FileChangeDetector.getEmptyDirectoriesToDelete(
-                                localManifest, remoteManifest)
+                                localManifest, remoteManifest, senderIgnoredDir)
                         : new ArrayList<>();
 
         // A receiver whose filesystem cannot tell two spellings of a name apart holds one file, not
@@ -454,7 +486,11 @@ public class SyncCoordinator {
         // already performs. Removing both here keeps the transfer, delta and delete phases from
         // planning work the rename replaces.
         List<FileChangeDetector.FileRename> renames =
-                FileChangeDetector.findRenames(localManifest, remoteManifest);
+                FileChangeDetector.findRenames(
+                        localManifest,
+                        remoteManifest,
+                        senderIgnoredFile,
+                        path -> isReceiverIgnored(path, remoteManifest));
         if (!renames.isEmpty()) {
             Set<String> renamedToPaths = new HashSet<>();
             Set<String> renamedFromPaths = new HashSet<>();
@@ -547,6 +583,24 @@ public class SyncCoordinator {
                 remoteManifest.getFiles(),
                 localManifest.getFiles(),
                 renames);
+    }
+
+    /**
+     * Whether the receiver deliberately ignores {@code path}: its manifest reports the root paths
+     * its own .filesyncignore excluded — exact file paths, and skipped directory roots matched as
+     * the directory itself or any path beneath it. Package-private for unit testing.
+     */
+    static boolean isReceiverIgnored(
+            String path, FileChangeDetector.FileManifest receiverManifest) {
+        if (receiverManifest.getIgnoredFiles().contains(path)) {
+            return true;
+        }
+        for (String ignoredDir : receiverManifest.getIgnoredDirectories()) {
+            if (path.equals(ignoredDir) || path.startsWith(ignoredDir + "/")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

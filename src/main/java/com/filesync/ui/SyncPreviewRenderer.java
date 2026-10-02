@@ -3,6 +3,7 @@ package com.filesync.ui;
 import com.filesync.sync.ConflictInfo;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.GitStatusUtil;
+import com.filesync.sync.GitignoreParser;
 import com.filesync.sync.SyncPreviewPlan;
 import java.awt.Color;
 import java.awt.Component;
@@ -11,6 +12,10 @@ import java.awt.FlowLayout;
 import java.awt.FontMetrics;
 import java.awt.event.MouseEvent;
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -18,8 +23,10 @@ import java.util.List;
 import java.util.Set;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
@@ -305,6 +312,16 @@ public class SyncPreviewRenderer {
         previewTable.addMouseListener(
                 new MouseInputAdapter() {
                     @Override
+                    public void mousePressed(MouseEvent e) {
+                        maybeShowIgnorePopup(e, previewTable, previewModel, rows);
+                    }
+
+                    @Override
+                    public void mouseReleased(MouseEvent e) {
+                        maybeShowIgnorePopup(e, previewTable, previewModel, rows);
+                    }
+
+                    @Override
                     public void mouseClicked(MouseEvent e) {
                         if (e.getClickCount() != 2) {
                             return;
@@ -331,6 +348,168 @@ public class SyncPreviewRenderer {
                     }
                 });
         return previewTable;
+    }
+
+    /**
+     * Right-click popup on a preview row: "Ignore" writes the row's path into the sync folder's
+     * root .filesyncignore (this side only) and drops every row the pattern covers from the open
+     * dialog. Removing the row exempts it from this session — Start Sync executes only checked rows
+     * — while the ignore entry excludes it from every later manifest and, via the delete guard,
+     * from mirror-mode deletion.
+     */
+    private void maybeShowIgnorePopup(
+            MouseEvent e, JTable table, DefaultTableModel model, List<SyncPreviewRow> rows) {
+        if (!e.isPopupTrigger()) {
+            return;
+        }
+        int viewRow = table.rowAtPoint(e.getPoint());
+        if (viewRow < 0) {
+            return;
+        }
+        // Sorting may permute the view, so resolve the model row before using it.
+        int row = table.convertRowIndexToModel(viewRow);
+        table.getSelectionModel().setSelectionInterval(viewRow, viewRow);
+        buildIgnorePopup(rows.get(row), model, rows).show(table, e.getX(), e.getY());
+    }
+
+    /**
+     * The row's right-click menu. Package-private for tests: the popup is built headlessly, only
+     * {@code show()} needs a display (and tests must not open one).
+     */
+    JPopupMenu buildIgnorePopup(
+            SyncPreviewRow target, DefaultTableModel model, List<SyncPreviewRow> rows) {
+        JPopupMenu popup = new JPopupMenu();
+        JMenuItem ignoreItem = new JMenuItem("Ignore (add to .filesyncignore)");
+        ignoreItem.addActionListener(event -> ignoreRow(target, model, rows));
+        popup.add(ignoreItem);
+        return popup;
+    }
+
+    private void ignoreRow(
+            SyncPreviewRow target, DefaultTableModel model, List<SyncPreviewRow> rows) {
+        File syncFolder = previewSyncFolder;
+        if (syncFolder == null) {
+            logSink.accept("Ignore failed: no sync folder is set for this preview");
+            return;
+        }
+        List<String> patterns = ignorePatternsFor(target);
+        try {
+            appendFileSyncIgnoreEntries(syncFolder, patterns);
+        } catch (IOException e) {
+            logSink.accept("Failed to write .filesyncignore: " + e.getMessage());
+            JOptionPane.showMessageDialog(
+                    owner,
+                    "Could not update .filesyncignore in the sync folder:\n" + e.getMessage(),
+                    "Ignore failed",
+                    JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        removeRowsCoveredByIgnorePatterns(model, rows, patterns);
+        logSink.accept("Added to .filesyncignore (this side only): " + String.join(", ", patterns));
+    }
+
+    /**
+     * Anchored ignore patterns for a row: the exact path for a file, a trailing-slash pattern for a
+     * directory row (covers everything beneath it), and both ends of a rename so the receiver's old
+     * copy is protected by the ignore guard as well.
+     */
+    static List<String> ignorePatternsFor(SyncPreviewRow row) {
+        boolean directory =
+                row.getOperationType() == SyncPreviewOperationType.CREATE_DIR
+                        || row.getOperationType() == SyncPreviewOperationType.DELETE_DIR;
+        List<String> patterns = new ArrayList<>();
+        if (row.getAltPath() != null && !row.getAltPath().isEmpty()) {
+            patterns.add("/" + row.getAltPath());
+        }
+        patterns.add(directory ? "/" + row.getPath() + "/" : "/" + row.getPath());
+        return patterns;
+    }
+
+    /** Header written when the ignore file is first created, so an empty file is not a mystery. */
+    private static final String FILESYNC_IGNORE_HEADER =
+            "# Paths listed here are excluded from sync on this side only (gitignore syntax).";
+
+    /**
+     * Append {@code patterns} to the sync folder's root .filesyncignore, creating the file with a
+     * one-line header when absent. Exact duplicates are skipped so repeated right-clicks do not
+     * pile up identical lines.
+     */
+    static void appendFileSyncIgnoreEntries(File syncFolder, List<String> patterns)
+            throws IOException {
+        File ignoreFile = new File(syncFolder, GitignoreParser.FILESYNC_IGNORE_FILENAME);
+        Set<String> existing = new HashSet<>();
+        boolean exists = ignoreFile.exists();
+        boolean endsWithNewline = true;
+        if (exists) {
+            existing.addAll(
+                    Files.readAllLines(ignoreFile.toPath(), StandardCharsets.UTF_8).stream()
+                            .map(String::trim)
+                            .toList());
+            byte[] raw = Files.readAllBytes(ignoreFile.toPath());
+            endsWithNewline = raw.length == 0 || raw[raw.length - 1] == '\n';
+        }
+        StringBuilder addition = new StringBuilder();
+        if (!exists) {
+            addition.append(FILESYNC_IGNORE_HEADER).append('\n');
+        } else if (!endsWithNewline) {
+            addition.append('\n');
+        }
+        for (String pattern : patterns) {
+            if (!existing.contains(pattern)) {
+                addition.append(pattern).append('\n');
+            }
+        }
+        if (addition.length() == 0) {
+            return;
+        }
+        Files.write(
+                ignoreFile.toPath(),
+                addition.toString().getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.APPEND);
+    }
+
+    /**
+     * Drop every row the freshly written patterns cover from the open dialog: the clicked row
+     * itself, plus any other row at or beneath an ignored directory (a directory pattern removes
+     * the rows of the files inside it too). Model and row list share indices, so both are trimmed
+     * together, deepest-first, keeping every remaining index aligned.
+     */
+    static void removeRowsCoveredByIgnorePatterns(
+            DefaultTableModel model, List<SyncPreviewRow> rows, List<String> patterns) {
+        List<String> filePaths = new ArrayList<>();
+        List<String> dirPaths = new ArrayList<>();
+        for (String pattern : patterns) {
+            boolean dir = pattern.endsWith("/");
+            String path = dir ? pattern.substring(1, pattern.length() - 1) : pattern.substring(1);
+            if (dir) {
+                dirPaths.add(path);
+            } else {
+                filePaths.add(path);
+            }
+        }
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            SyncPreviewRow row = rows.get(i);
+            if (pathCoveredByIgnore(row.getPath(), filePaths, dirPaths)
+                    || (row.getAltPath() != null
+                            && pathCoveredByIgnore(row.getAltPath(), filePaths, dirPaths))) {
+                model.removeRow(i);
+                rows.remove(i);
+            }
+        }
+    }
+
+    private static boolean pathCoveredByIgnore(
+            String path, List<String> filePaths, List<String> dirPaths) {
+        if (filePaths.contains(path)) {
+            return true;
+        }
+        for (String dir : dirPaths) {
+            if (path.equals(dir) || path.startsWith(dir + "/")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
