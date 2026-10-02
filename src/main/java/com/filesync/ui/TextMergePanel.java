@@ -26,20 +26,12 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextPane;
 import javax.swing.text.BadLocationException;
-import javax.swing.text.SimpleAttributeSet;
-import javax.swing.text.StyleConstants;
 
 /**
  * Panel for resolving text file conflicts with merge option. Shows only the changed regions (diff
  * hunks) instead of the entire file, making it easier to spot and resolve conflicts.
  */
-public class TextMergePanel extends JPanel {
-
-    // Colors for diff highlighting
-    private static final Color ADDED_COLOR = new Color(200, 255, 200); // Light green
-    private static final Color REMOVED_COLOR = new Color(255, 200, 200); // Light red
-    private static final Color CONTEXT_COLOR = new Color(245, 245, 245); // Light gray
-    private static final Color HEADER_BG_COLOR = new Color(230, 230, 230);
+public class TextMergePanel extends JPanel implements ConflictChoicePanel {
 
     public enum Resolution {
         KEEP_LOCAL,
@@ -70,6 +62,7 @@ public class TextMergePanel extends JPanel {
      * re-evaluate the controls that depend on the current choice (e.g. "use this for all
      * remaining").
      */
+    @Override
     public void addSelectionChangeListener(Runnable listener) {
         selectionChangeListeners.add(listener);
     }
@@ -133,23 +126,19 @@ public class TextMergePanel extends JPanel {
         gbc.weightx = 0.5;
         gbc.weighty = 1.0;
 
-        localDiffPane = new JTextPane();
-        localDiffPane.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        localDiffPane.setEditable(false);
+        localDiffPane = DiffPaneSupport.monospacedPane();
         JScrollPane localScroll = new JScrollPane(localDiffPane);
 
-        remoteDiffPane = new JTextPane();
-        remoteDiffPane.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        remoteDiffPane.setEditable(false);
+        remoteDiffPane = DiffPaneSupport.monospacedPane();
         JScrollPane remoteScroll = new JScrollPane(remoteDiffPane);
 
         gbc.gridx = 0;
         gbc.gridy = 0;
-        diffPanel.add(createLabeledComponent("LOCAL VERSION", localScroll), gbc);
+        diffPanel.add(DiffPaneSupport.labeledPane("LOCAL VERSION", localScroll, false), gbc);
 
         gbc.gridx = 1;
         gbc.gridy = 0;
-        diffPanel.add(createLabeledComponent("REMOTE VERSION", remoteScroll), gbc);
+        diffPanel.add(DiffPaneSupport.labeledPane("REMOTE VERSION", remoteScroll, false), gbc);
 
         // Display the first hunk (or all if no hunks)
         displayCurrentHunk(conflict);
@@ -302,44 +291,26 @@ public class TextMergePanel extends JPanel {
 
         try {
             // Build local pane with colors
-            SimpleAttributeSet removedAttr = new SimpleAttributeSet();
-            StyleConstants.setBackground(removedAttr, REMOVED_COLOR);
-            SimpleAttributeSet contextAttr = new SimpleAttributeSet();
-            StyleConstants.setBackground(contextAttr, CONTEXT_COLOR);
-
-            for (DiffLine line : hunk.getLines()) {
-                if (line.getType() == DiffLineType.UNCHANGED
-                        || line.getType() == DiffLineType.REMOVED) {
-                    String prefix = line.getType() == DiffLineType.REMOVED ? "- " : "  ";
-                    String displayLine = prefix + line.getContent() + "\n";
-                    localDiffPane
-                            .getDocument()
-                            .insertString(
-                                    localDiffPane.getDocument().getLength(),
-                                    displayLine,
-                                    line.getType() == DiffLineType.REMOVED
-                                            ? removedAttr
-                                            : contextAttr);
-                }
-            }
+            DiffPaneSupport.renderDiffLines(
+                    localDiffPane,
+                    hunk.getLines(),
+                    type -> type == DiffLineType.UNCHANGED || type == DiffLineType.REMOVED,
+                    type ->
+                            type == DiffLineType.REMOVED
+                                    ? DiffPaneSupport.REMOVED_COLOR
+                                    : DiffPaneSupport.CONTEXT_COLOR,
+                    type -> type == DiffLineType.REMOVED ? "- " : "  ");
 
             // Build remote pane with colors
-            SimpleAttributeSet addedAttr = new SimpleAttributeSet();
-            StyleConstants.setBackground(addedAttr, ADDED_COLOR);
-
-            for (DiffLine line : hunk.getLines()) {
-                if (line.getType() == DiffLineType.UNCHANGED
-                        || line.getType() == DiffLineType.ADDED) {
-                    String prefix = line.getType() == DiffLineType.ADDED ? "+ " : "  ";
-                    String displayLine = prefix + line.getContent() + "\n";
-                    remoteDiffPane
-                            .getDocument()
-                            .insertString(
-                                    remoteDiffPane.getDocument().getLength(),
-                                    displayLine,
-                                    line.getType() == DiffLineType.ADDED ? addedAttr : contextAttr);
-                }
-            }
+            DiffPaneSupport.renderDiffLines(
+                    remoteDiffPane,
+                    hunk.getLines(),
+                    type -> type == DiffLineType.UNCHANGED || type == DiffLineType.ADDED,
+                    type ->
+                            type == DiffLineType.ADDED
+                                    ? DiffPaneSupport.ADDED_COLOR
+                                    : DiffPaneSupport.CONTEXT_COLOR,
+                    type -> type == DiffLineType.ADDED ? "+ " : "  ");
         } catch (BadLocationException e) {
             // Fallback to plain text
             localDiffPane.setText(localText);
@@ -454,17 +425,6 @@ public class TextMergePanel extends JPanel {
         return sb.toString();
     }
 
-    private JPanel createLabeledComponent(String title, JScrollPane scrollPane) {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        JLabel label = new JLabel(title);
-        label.setFont(label.getFont().deriveFont(Font.BOLD));
-        label.setBackground(HEADER_BG_COLOR);
-        label.setOpaque(true);
-        panel.add(label, BorderLayout.NORTH);
-        panel.add(scrollPane, BorderLayout.CENTER);
-        return panel;
-    }
-
     public Resolution getResolution() {
         if (keepLocalRadio.isSelected()) {
             return Resolution.KEEP_LOCAL;
@@ -474,6 +434,15 @@ public class TextMergePanel extends JPanel {
             return Resolution.MERGE;
         }
         return Resolution.KEEP_LOCAL;
+    }
+
+    @Override
+    public ConflictInfo.Resolution getConflictResolution() {
+        return switch (getResolution()) {
+            case KEEP_LOCAL -> ConflictInfo.Resolution.KEEP_LOCAL;
+            case KEEP_REMOTE -> ConflictInfo.Resolution.KEEP_REMOTE;
+            case MERGE -> ConflictInfo.Resolution.MERGE;
+        };
     }
 
     public String getMergedContent() {
@@ -508,17 +477,5 @@ public class TextMergePanel extends JPanel {
     /** Whether the manual merge option is offered for this conflict. */
     public boolean isMergeAvailable() {
         return mergeAvailable;
-    }
-
-    /**
-     * Apply target fixed by resolution: keep local -> apply to remote; keep remote -> apply to
-     * local; merge -> apply to both
-     */
-    public ConflictInfo.ApplyTarget getApplyTarget() {
-        Resolution r = getResolution();
-        if (r == Resolution.KEEP_LOCAL) {
-            return ConflictInfo.ApplyTarget.REMOTE_ONLY;
-        }
-        return ConflictInfo.ApplyTarget.BOTH;
     }
 }

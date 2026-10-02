@@ -277,10 +277,8 @@ public class ConflictResolutionDialog extends JDialog {
             cardPanel.remove(card.panel);
         }
         card.panel = panel;
-        if (panel instanceof BinaryConflictPanel) {
-            ((BinaryConflictPanel) panel).addSelectionChangeListener(this::updateButtonStates);
-        } else if (panel instanceof TextMergePanel) {
-            ((TextMergePanel) panel).addSelectionChangeListener(this::updateButtonStates);
+        if (panel instanceof ConflictChoicePanel choicePanel) {
+            choicePanel.addSelectionChangeListener(this::updateButtonStates);
         }
         cardPanel.add(panel, card.layoutName);
         cardPanel.revalidate();
@@ -324,20 +322,16 @@ public class ConflictResolutionDialog extends JDialog {
             return false;
         }
         Card card = cards.get(currentIndex);
-        return card.panel instanceof BinaryConflictPanel || card.panel instanceof TextMergePanel
-                ? currentResolution() != ConflictInfo.Resolution.MERGE
+        return card.panel instanceof ConflictChoicePanel choicePanel
+                ? choicePanel.getConflictResolution() != ConflictInfo.Resolution.MERGE
                 : false;
     }
 
     private ConflictInfo.Resolution currentResolution() {
         JPanel panel = cards.get(currentIndex).panel;
-        if (panel instanceof BinaryConflictPanel) {
-            return toConflictInfoResolution(((BinaryConflictPanel) panel).getResolution());
-        }
-        if (panel instanceof TextMergePanel) {
-            return toConflictInfoResolution(((TextMergePanel) panel).getResolution());
-        }
-        return ConflictInfo.Resolution.UNRESOLVED;
+        return panel instanceof ConflictChoicePanel choicePanel
+                ? choicePanel.getConflictResolution()
+                : ConflictInfo.Resolution.UNRESOLVED;
     }
 
     // ========== resolution bookkeeping ==========
@@ -349,17 +343,15 @@ public class ConflictResolutionDialog extends JDialog {
         Card card = cards.get(currentIndex);
         JPanel panel = card.panel;
 
-        if (panel instanceof BinaryConflictPanel) {
-            BinaryConflictPanel bp = (BinaryConflictPanel) panel;
-            card.conflict.setResolution(toConflictInfoResolution(bp.getResolution()));
-            card.conflict.setApplyTarget(bp.getApplyTarget());
-        } else if (panel instanceof TextMergePanel) {
-            TextMergePanel tp = (TextMergePanel) panel;
-            TextMergePanel.Resolution r = tp.getResolution();
-            card.conflict.setResolution(toConflictInfoResolution(r));
-            card.conflict.setApplyTarget(tp.getApplyTarget());
-            if (r == TextMergePanel.Resolution.MERGE) {
-                String merged = tp.getMergedContent();
+        if (panel instanceof ConflictChoicePanel choicePanel) {
+            ConflictInfo.Resolution resolution = choicePanel.getConflictResolution();
+            card.conflict.setResolution(resolution);
+            card.conflict.setApplyTarget(choicePanel.getApplyTarget());
+            // A merge is built per file from the panel's edit area; every other choice is
+            // content-free and fully described by resolution and apply target.
+            if (panel instanceof TextMergePanel textPanel
+                    && resolution == ConflictInfo.Resolution.MERGE) {
+                String merged = textPanel.getMergedContent();
                 if (merged != null) {
                     card.conflict.setMergedContent(merged);
                 }
@@ -388,22 +380,6 @@ public class ConflictResolutionDialog extends JDialog {
         }
         result = Result.COMPLETED;
         dispose();
-    }
-
-    private ConflictInfo.Resolution toConflictInfoResolution(BinaryConflictPanel.Resolution r) {
-        return switch (r) {
-            case KEEP_LOCAL -> ConflictInfo.Resolution.KEEP_LOCAL;
-            case KEEP_REMOTE -> ConflictInfo.Resolution.KEEP_REMOTE;
-            case SKIP -> ConflictInfo.Resolution.SKIP;
-        };
-    }
-
-    private ConflictInfo.Resolution toConflictInfoResolution(TextMergePanel.Resolution r) {
-        return switch (r) {
-            case KEEP_LOCAL -> ConflictInfo.Resolution.KEEP_LOCAL;
-            case KEEP_REMOTE -> ConflictInfo.Resolution.KEEP_REMOTE;
-            case MERGE -> ConflictInfo.Resolution.MERGE;
-        };
     }
 
     private void goPrevious() {

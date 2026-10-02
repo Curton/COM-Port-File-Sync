@@ -647,11 +647,7 @@ public class SyncPreviewRenderer {
                             logGitSelectionOutcome(
                                     changed, matches, rows, GitStatusUtil.lastUsedExecutable());
                         } catch (Exception e) {
-                            Throwable cause = e.getCause() != null ? e.getCause() : e;
-                            String msg = cause.getMessage();
-                            if (msg == null) {
-                                msg = cause.getClass().getSimpleName();
-                            }
+                            String msg = describeCause(e);
                             summaryLabel.setText("git: " + msg);
                             logSink.accept("git: selection failed - " + msg);
                         }
@@ -699,6 +695,16 @@ public class SyncPreviewRenderer {
         int limit = 5;
         String joined = String.join(", ", paths.subList(0, Math.min(limit, paths.size())));
         return paths.size() > limit ? joined + ", ... (" + paths.size() + " total)" : joined;
+    }
+
+    /**
+     * Human-readable message for a worker failure: the cause's message, or the cause's class name
+     * when it has none. The cause is preferred over the {@code ExecutionException} wrapper.
+     */
+    private static String describeCause(Throwable e) {
+        Throwable cause = e.getCause() != null ? e.getCause() : e;
+        String msg = cause.getMessage();
+        return msg != null ? msg : cause.getClass().getSimpleName();
     }
 
     /**
@@ -1043,6 +1049,12 @@ public class SyncPreviewRenderer {
         }
     }
 
+    /** The preview row behind a view row, or null when the view row has no model backing. */
+    private static SyncPreviewRow rowAt(List<SyncPreviewRow> rows, JTable table, int viewRow) {
+        int modelRow = table.convertRowIndexToModel(viewRow);
+        return modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+    }
+
     private TableCellRenderer createTypeCellRenderer(List<SyncPreviewRow> rows) {
         return new DefaultTableCellRenderer() {
             @Override
@@ -1055,9 +1067,7 @@ public class SyncPreviewRenderer {
                     int column) {
                 super.getTableCellRendererComponent(
                         table, value, isSelected, hasFocus, row, column);
-                int modelRow = table.convertRowIndexToModel(row);
-                SyncPreviewRow previewRow =
-                        modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+                SyncPreviewRow previewRow = rowAt(rows, table, row);
                 if (previewRow != null && !isSelected) {
                     Color color = typeColor(previewRow.getOperationType());
                     // One renderer instance paints the whole column, and DefaultTableCellRenderer
@@ -1099,9 +1109,7 @@ public class SyncPreviewRenderer {
                 // The model stores raw byte counts (Long) so the column sorts numerically; the
                 // display text comes from the row, keeping the "-" placeholder for directory
                 // and delete operations.
-                int modelRow = table.convertRowIndexToModel(row);
-                SyncPreviewRow previewRow =
-                        modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+                SyncPreviewRow previewRow = rowAt(rows, table, row);
                 String text = previewRow != null ? previewRow.getSizeText() : "";
                 super.getTableCellRendererComponent(table, text, isSelected, hasFocus, row, column);
                 return this;
@@ -1160,10 +1168,7 @@ public class SyncPreviewRenderer {
 
     /** Escape text for the small HTML fragment emitted by the highlight renderer. */
     private static String escapeHtml(String text) {
-        return text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace(" ", "&#32;");
+        return UiFormatting.escapeHtml(text, " ", "&#32;");
     }
 
     /**
@@ -1244,11 +1249,7 @@ public class SyncPreviewRenderer {
                         try {
                             base = get();
                         } catch (Exception e) {
-                            Throwable cause = e.getCause() != null ? e.getCause() : e;
-                            failure =
-                                    cause.getMessage() != null
-                                            ? cause.getMessage()
-                                            : cause.getClass().getSimpleName();
+                            failure = describeCause(e);
                         }
                         // Only a successful fetch is cached; a failure stays unfetched so the user
                         // can retry after reconnecting instead of being stuck with "unavailable".
@@ -1612,12 +1613,7 @@ public class SyncPreviewRenderer {
                             finishConflictResolution(
                                     toResolve, previewModel, rows, effectiveResolver, onComplete);
                         } catch (Exception e) {
-                            Throwable cause = e.getCause() != null ? e.getCause() : e;
-                            logSink.accept(
-                                    "Conflict resolution failed - "
-                                            + (cause.getMessage() != null
-                                                    ? cause.getMessage()
-                                                    : cause.getClass().getSimpleName()));
+                            logSink.accept("Conflict resolution failed - " + describeCause(e));
                             onComplete.accept(false);
                         }
                     }
@@ -1751,9 +1747,7 @@ public class SyncPreviewRenderer {
                 boolean hasFocus,
                 int row,
                 int column) {
-            int modelRow = table.convertRowIndexToModel(row);
-            SyncPreviewRow previewRow =
-                    modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+            SyncPreviewRow previewRow = rowAt(rows, table, row);
             if (previewRow != null && !hasPreviewableContent(previewRow)) {
                 fallbackLabel.setText("\u2014");
                 fallbackLabel.setHorizontalAlignment(SwingConstants.CENTER);
@@ -1812,9 +1806,7 @@ public class SyncPreviewRenderer {
         @Override
         public Component getTableCellEditorComponent(
                 JTable table, Object value, boolean isSelected, int row, int column) {
-            int modelRow = table.convertRowIndexToModel(row);
-            SyncPreviewRow previewRow =
-                    modelRow >= 0 && modelRow < rows.size() ? rows.get(modelRow) : null;
+            SyncPreviewRow previewRow = rowAt(rows, table, row);
             button.setToolTipText(
                     previewRow != null
                             ? "Preview the changes to " + previewRow.getPath()

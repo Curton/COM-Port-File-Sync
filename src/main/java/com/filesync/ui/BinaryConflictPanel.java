@@ -16,7 +16,7 @@ import javax.swing.JRadioButton;
  * Panel for resolving binary file conflicts. Extracted from BinaryConflictDialog for use in unified
  * ConflictResolutionDialog.
  */
-public class BinaryConflictPanel extends JPanel {
+public class BinaryConflictPanel extends JPanel implements ConflictChoicePanel {
 
     public enum Resolution {
         KEEP_LOCAL,
@@ -34,6 +34,7 @@ public class BinaryConflictPanel extends JPanel {
      * re-evaluate the controls that depend on the current choice (e.g. "use this for all
      * remaining").
      */
+    @Override
     public void addSelectionChangeListener(Runnable listener) {
         selectionChangeListeners.add(listener);
     }
@@ -122,6 +123,15 @@ public class BinaryConflictPanel extends JPanel {
         return Resolution.KEEP_LOCAL;
     }
 
+    @Override
+    public ConflictInfo.Resolution getConflictResolution() {
+        return switch (getResolution()) {
+            case KEEP_LOCAL -> ConflictInfo.Resolution.KEEP_LOCAL;
+            case KEEP_REMOTE -> ConflictInfo.Resolution.KEEP_REMOTE;
+            case SKIP -> ConflictInfo.Resolution.SKIP;
+        };
+    }
+
     // Package-private accessors for the choice radios: the dialog drives them in tests to check
     // how a selection maps onto a resolution and an apply target.
     javax.swing.JRadioButton getKeepLocalRadio() {
@@ -134,17 +144,5 @@ public class BinaryConflictPanel extends JPanel {
 
     javax.swing.JRadioButton getSkipRadio() {
         return skipRadio;
-    }
-
-    /**
-     * Apply target fixed by resolution: use local -> apply to remote; use remote -> apply to local;
-     * skip -> BOTH
-     */
-    public ConflictInfo.ApplyTarget getApplyTarget() {
-        Resolution r = getResolution();
-        if (r == Resolution.KEEP_LOCAL) {
-            return ConflictInfo.ApplyTarget.REMOTE_ONLY;
-        }
-        return ConflictInfo.ApplyTarget.BOTH;
     }
 }

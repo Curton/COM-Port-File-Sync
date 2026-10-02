@@ -24,8 +24,6 @@ import javax.swing.JTextPane;
 import javax.swing.SwingConstants;
 import javax.swing.WindowConstants;
 import javax.swing.text.BadLocationException;
-import javax.swing.text.SimpleAttributeSet;
-import javax.swing.text.StyleConstants;
 
 /**
  * Read-only preview of what a single file's change actually looks like, opened from the sync
@@ -38,11 +36,6 @@ import javax.swing.text.StyleConstants;
  * rather than an empty pane, so a missing base version is never mistaken for an empty file.
  */
 public class FileDiffPreviewPanel extends JPanel {
-
-    private static final Color ADDED_COLOR = new Color(200, 255, 200);
-    private static final Color REMOVED_COLOR = new Color(255, 200, 200);
-    private static final Color CONTEXT_COLOR = new Color(245, 245, 245);
-    private static final Color HEADER_BG_COLOR = new Color(230, 230, 230);
 
     /** Shown when a hunk set is empty because the files are identical or unavailable. */
     private static final List<DiffHunk> NO_HUNKS = Collections.emptyList();
@@ -71,8 +64,8 @@ public class FileDiffPreviewPanel extends JPanel {
 
         add(createHeaderPanel(), BorderLayout.NORTH);
 
-        basePane = createContentPane();
-        sourcePane = createContentPane();
+        basePane = DiffPaneSupport.monospacedPane();
+        sourcePane = DiffPaneSupport.monospacedPane();
 
         if (!model.isText()) {
             add(createBinaryPlaceholder(), BorderLayout.CENTER);
@@ -99,13 +92,6 @@ public class FileDiffPreviewPanel extends JPanel {
                                 + "</span></html>");
         header.add(summary, BorderLayout.SOUTH);
         return header;
-    }
-
-    private JTextPane createContentPane() {
-        JTextPane pane = new JTextPane();
-        pane.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        pane.setEditable(false);
-        return pane;
     }
 
     /** Center area for text files: change navigation above, the two diff panes below. */
@@ -173,11 +159,17 @@ public class FileDiffPreviewPanel extends JPanel {
 
         gbc.gridx = 0;
         gbc.gridy = 0;
-        diffPanel.add(labeledPane("PREVIOUS VERSION (peer)", basePane), gbc);
+        diffPanel.add(
+                DiffPaneSupport.labeledPane(
+                        "PREVIOUS VERSION (peer)", new JScrollPane(basePane), true),
+                gbc);
 
         gbc.gridx = 1;
         gbc.gridy = 0;
-        diffPanel.add(labeledPane("NEW VERSION (to send)", sourcePane), gbc);
+        diffPanel.add(
+                DiffPaneSupport.labeledPane(
+                        "NEW VERSION (to send)", new JScrollPane(sourcePane), true),
+                gbc);
         return diffPanel;
     }
 
@@ -264,18 +256,6 @@ public class FileDiffPreviewPanel extends JPanel {
                 .append(reason);
     }
 
-    private JPanel labeledPane(String title, JTextPane pane) {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        JLabel label = new JLabel(title);
-        label.setFont(label.getFont().deriveFont(Font.BOLD));
-        label.setBackground(HEADER_BG_COLOR);
-        label.setOpaque(true);
-        label.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
-        panel.add(label, BorderLayout.NORTH);
-        panel.add(new JScrollPane(pane), BorderLayout.CENTER);
-        return panel;
-    }
-
     private void navigateHunk(int direction) {
         if (hunks.isEmpty()) {
             return;
@@ -311,10 +291,6 @@ public class FileDiffPreviewPanel extends JPanel {
         basePane.setText("");
         sourcePane.setText("");
 
-        SimpleAttributeSet contextAttr = attributeWithBackground(CONTEXT_COLOR);
-        SimpleAttributeSet removedAttr = attributeWithBackground(REMOVED_COLOR);
-        SimpleAttributeSet addedAttr = attributeWithBackground(ADDED_COLOR);
-
         // A pane is only filled when the model actually holds that side's bytes. A new file has a
         // renderable (indeed expected-to-be-empty) previous version but no base content at all, and
         // showing a blank pane there would hide the fact that there is simply nothing to compare.
@@ -323,31 +299,26 @@ public class FileDiffPreviewPanel extends JPanel {
 
         try {
             if (baseRenderable) {
-                for (DiffLine line : hunk.getLines()) {
-                    if (line.getType() == DiffLineType.ADDED) {
-                        continue;
-                    }
-                    boolean removed = line.getType() == DiffLineType.REMOVED;
-                    basePane.getDocument()
-                            .insertString(
-                                    basePane.getDocument().getLength(),
-                                    (removed ? "- " : "  ") + line.getContent() + "\n",
-                                    removed ? removedAttr : contextAttr);
-                }
+                DiffPaneSupport.renderDiffLines(
+                        basePane,
+                        hunk.getLines(),
+                        type -> type != DiffLineType.ADDED,
+                        type ->
+                                type == DiffLineType.REMOVED
+                                        ? DiffPaneSupport.REMOVED_COLOR
+                                        : DiffPaneSupport.CONTEXT_COLOR,
+                        type -> type == DiffLineType.REMOVED ? "- " : "  ");
             }
             if (sourceRenderable) {
-                for (DiffLine line : hunk.getLines()) {
-                    if (line.getType() == DiffLineType.REMOVED) {
-                        continue;
-                    }
-                    boolean added = line.getType() == DiffLineType.ADDED;
-                    sourcePane
-                            .getDocument()
-                            .insertString(
-                                    sourcePane.getDocument().getLength(),
-                                    (added ? "+ " : "  ") + line.getContent() + "\n",
-                                    added ? addedAttr : contextAttr);
-                }
+                DiffPaneSupport.renderDiffLines(
+                        sourcePane,
+                        hunk.getLines(),
+                        type -> type != DiffLineType.REMOVED,
+                        type ->
+                                type == DiffLineType.ADDED
+                                        ? DiffPaneSupport.ADDED_COLOR
+                                        : DiffPaneSupport.CONTEXT_COLOR,
+                        type -> type == DiffLineType.ADDED ? "+ " : "  ");
             }
         } catch (BadLocationException e) {
             // Fall back to plain text so a rendering hiccup still shows something useful. Only the
@@ -425,20 +396,8 @@ public class FileDiffPreviewPanel extends JPanel {
         return sb.toString();
     }
 
-    private static SimpleAttributeSet attributeWithBackground(Color color) {
-        SimpleAttributeSet attr = new SimpleAttributeSet();
-        StyleConstants.setBackground(attr, color);
-        return attr;
-    }
-
     private static String escapeHtml(String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\n", "<br/>");
+        return UiFormatting.escapeHtml(text, "\n", "<br/>");
     }
 
     /** The model this panel renders; exposed for tests. */

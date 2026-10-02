@@ -3,6 +3,21 @@ package com.filesync.ui;
 final class UiFormatting {
     private UiFormatting() {}
 
+    /**
+     * Escape text for an HTML label, then apply one extra replacement ({@code extraFrom} to {@code
+     * extraTo}) on the escaped form — e.g. spaces made explicit so they survive in a highlight
+     * span, or newlines turned into line breaks for multi-line notes.
+     */
+    static String escapeHtml(String text, String extraFrom, String extraTo) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace(extraFrom, extraTo);
+    }
+
     static String formatBytes(long bytes) {
         if (bytes < 1024) {
             return bytes + " B";
