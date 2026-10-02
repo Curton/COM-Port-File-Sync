@@ -3,7 +3,10 @@ package com.filesync.sync;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -225,6 +228,80 @@ public class CompressionUtil {
             gzos.write(data);
         }
         return baos.toByteArray();
+    }
+
+    /**
+     * Streaming twin of {@link #compressIfBeneficial(String, byte[])} for files: returns the exact
+     * wire size the content would occupy — the level-9 GZIP size when compression is beneficial
+     * (matching {@link #compress(byte[])}), the raw length otherwise — without ever holding the
+     * content or its compressed form in memory. The benefit decision samples the file's first
+     * {@value #SAMPLE_SIZE} bytes, which is exactly what the byte-array path inspects, so both
+     * paths decide identically for the same content.
+     */
+    public static long compressedSizeIfBeneficial(String fileName, File file) throws IOException {
+        long rawLength = file.length();
+        if (rawLength == 0) {
+            return 0;
+        }
+        // The sample stands in for the full array inside the decision: for files up to
+        // SAMPLE_SIZE it IS the full content, and above that every internal check only ever
+        // inspects the first SAMPLE_SIZE bytes (including the small-payload threshold, since a
+        // larger file passes it a fortiori).
+        byte[] sample = readPrefix(file, (int) Math.min(SAMPLE_SIZE, rawLength));
+        if (!hasHighCompressionPotential(fileName, sample)) {
+            return rawLength;
+        }
+        CountingOutputStream counter = new CountingOutputStream();
+        try (FileInputStream in = new FileInputStream(file);
+                GZIPOutputStream gzos =
+                        new GZIPOutputStream(counter) {
+                            {
+                                def.setLevel(Deflater.BEST_COMPRESSION);
+                            }
+                        }) {
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = in.read(buf)) != -1) {
+                gzos.write(buf, 0, read);
+            }
+        }
+        // Same contract as compressIfBeneficial: only claim compression when it actually shrinks.
+        return Math.min(counter.count(), rawLength);
+    }
+
+    /** Read exactly the first {@code len} bytes of {@code file}; fails if it ends early. */
+    private static byte[] readPrefix(File file, int len) throws IOException {
+        byte[] buf = new byte[len];
+        try (FileInputStream in = new FileInputStream(file)) {
+            int done = 0;
+            while (done < len) {
+                int read = in.read(buf, done, len - done);
+                if (read < 0) {
+                    throw new IOException("File shrank while sampling: " + file);
+                }
+                done += read;
+            }
+        }
+        return buf;
+    }
+
+    /** Output stream that only counts the bytes written to it. */
+    private static final class CountingOutputStream extends OutputStream {
+        private long count;
+
+        @Override
+        public void write(int b) {
+            count++;
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            count += len;
+        }
+
+        long count() {
+            return count;
+        }
     }
 
     /** Decompress GZIP data. Rejects output exceeding 100 MB to prevent OOM. */

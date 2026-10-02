@@ -1,6 +1,9 @@
 package com.filesync.delta;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,26 +26,55 @@ import java.util.Map;
  * decoder accepts any COPY length that stays within the existing file), so a file whose prefix is
  * unchanged — e.g. an append-only log — costs one 9-byte token for the entire prefix instead of one
  * per block.
+ *
+ * <p>The source is consumed as a stream: the scan window lives in a ring buffer of {@code
+ * blockSize} bytes and literal runs are emitted as length-prefixed LITERAL tokens in bounded
+ * chunks, so no full-size source array is ever held. The decoder accepts any sequence of LITERAL
+ * tokens, so chunking is transparent to the wire format.
  */
 public final class DeltaEncoder {
+
+    /** Literal bytes are tokenized in chunks of this size to bound the encoder's memory. */
+    private static final int LITERAL_CHUNK_SIZE = 64 * 1024;
 
     private DeltaEncoder() {}
 
     /**
      * Encode the delta from the receiver's existing file (described by {@code sigs}) to the
      * sender's {@code source} bytes.
+     *
+     * @throws IOException if the streamed read of {@code source} fails; a plain {@code byte[]}
+     *     source cannot actually fail, but the streaming core {@link #encode(InputStream, long,
+     *     FileSignatures)} is shared
      */
-    public static byte[] encode(byte[] source, FileSignatures sigs) {
+    public static byte[] encode(byte[] source, FileSignatures sigs) throws IOException {
+        return encode(new ByteArrayInputStream(source), source.length, sigs);
+    }
+
+    /**
+     * Encode the delta from a streamed source. The stream must deliver exactly {@code sourceSize}
+     * bytes — the sender's file length, which is written into the delta header — otherwise an
+     * {@code IOException} is thrown. The stream is read once, sequentially; the caller must buffer
+     * nothing beyond what this method returns.
+     *
+     * @param source the sender's file content, consumed sequentially
+     * @param sourceSize the exact number of bytes {@code source} will deliver
+     * @param sigs signatures of the receiver's existing file
+     * @return the delta stream
+     * @throws IOException if reading {@code source} fails or it delivers a different byte count
+     */
+    public static byte[] encode(InputStream source, long sourceSize, FileSignatures sigs)
+            throws IOException {
         int blockSize = sigs.getBlockSize();
         int blockCount = sigs.getBlockCount();
         ByteArrayOutputStream delta = new ByteArrayOutputStream();
-        DeltaCodec.writeHeader(delta, blockSize, source.length);
+        DeltaCodec.writeHeader(delta, blockSize, sourceSize);
 
-        if (blockSize <= 0 || blockCount == 0 || source.length < blockSize) {
-            // No matchable blocks: emit the whole source as one literal.
-            if (source.length > 0) {
-                DeltaCodec.writeLiteral(delta, source, 0, source.length);
-            }
+        if (blockSize <= 0 || blockCount == 0 || sourceSize < blockSize) {
+            // No matchable blocks: emit the whole source as literals.
+            LiteralSink literals = new LiteralSink(delta);
+            pumpLiterals(source, literals, sourceSize);
+            literals.closeRun();
             return delta.toByteArray();
         }
 
@@ -52,14 +84,20 @@ public final class DeltaEncoder {
         }
 
         MessageDigest md5 = Md5.newDigest();
+        // md5.digest() allocates its 16-byte result per weak-hash hit — negligible next to the
+        // eliminated block-sized window copy; only the first STRONG_HASH_LENGTH bytes compare.
+        byte[] digestScratch = new byte[md5.getDigestLength()];
 
         RollingHash rh = new RollingHash(blockSize);
-        int n = source.length;
-        int i = 0;
+        // Ring buffer holding the current window source[i..i+blockSize): ring[ringPos] is the
+        // window's leading byte. Sequential access only, so no full source buffer is needed.
+        byte[] ring = new byte[blockSize];
+        int ringPos = 0;
 
-        // Pending literal run: buffered until a COPY or end of input flushes it.
-        int literalStart = 0;
-        boolean hasLiteral = false;
+        LiteralSink literals = new LiteralSink(delta);
+
+        long n = sourceSize;
+        long i = 0;
 
         // Deferred COPY run: consecutive block matches extend one token instead of emitting one
         // token per block. pendingCopyBlockIndex == -1 means no run is open.
@@ -67,9 +105,10 @@ public final class DeltaEncoder {
         int pendingCopyLength = 0;
 
         // Initialise the rolling window over [0, blockSize).
+        readFully(source, ring, 0, blockSize);
         rh.reset();
         for (int k = 0; k < blockSize; k++) {
-            rh.update(source[k]);
+            rh.update(ring[k]);
         }
 
         while (i < n) {
@@ -79,18 +118,22 @@ public final class DeltaEncoder {
                 List<BlockSignature> cands = table.get(weak);
                 if (cands != null) {
                     md5.reset();
-                    byte[] digest =
-                            Arrays.copyOf(
-                                    md5.digest(Arrays.copyOfRange(source, i, i + blockSize)),
-                                    BlockSignature.STRONG_HASH_LENGTH);
+                    // Hash the ring window in its (at most two) contiguous spans: no copy.
+                    md5.update(ring, ringPos, blockSize - ringPos);
+                    if (ringPos > 0) {
+                        md5.update(ring, 0, ringPos);
+                    }
+                    byte[] digest = md5.digest();
                     for (BlockSignature bs : cands) {
-                        if (Arrays.equals(bs.strongHashInternal(), digest)) {
+                        if (Arrays.equals(
+                                bs.strongHashInternal(),
+                                0,
+                                BlockSignature.STRONG_HASH_LENGTH,
+                                digest,
+                                0,
+                                BlockSignature.STRONG_HASH_LENGTH)) {
                             // Flush buffered literals first.
-                            if (hasLiteral) {
-                                DeltaCodec.writeLiteral(
-                                        delta, source, literalStart, i - literalStart);
-                                hasLiteral = false;
-                            }
+                            literals.closeRun();
                             if (bs.getBlockIndex()
                                     == pendingCopyBlockIndex + pendingCopyLength / blockSize) {
                                 pendingCopyLength += blockSize;
@@ -101,6 +144,23 @@ public final class DeltaEncoder {
                             }
                             i += blockSize;
                             matched = true;
+                            // After a full-block match, re-initialise the rolling window at the
+                            // new position. Once no full window fits ahead, the unread tail is all
+                            // literal: drain it straight from the stream.
+                            if (i + blockSize <= n) {
+                                readFully(source, ring, 0, blockSize);
+                                ringPos = 0;
+                                rh.reset();
+                                for (int k = 0; k < blockSize; k++) {
+                                    rh.update(ring[k]);
+                                }
+                            } else {
+                                writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
+                                pendingCopyBlockIndex = -1;
+                                pendingCopyLength = 0;
+                                pumpLiterals(source, literals, n - i);
+                                i = n;
+                            }
                             break;
                         }
                     }
@@ -108,35 +168,110 @@ public final class DeltaEncoder {
             }
 
             if (!matched) {
-                if (!hasLiteral) {
-                    // A literal cannot join a pending COPY run: flush it so stream order is kept.
+                // A literal token must never precede an open COPY run on the wire: close the run
+                // before the run's first literal byte is emitted (mirrors the buffered encoder's
+                // flush-on-literal-start). A match always closes the literal run first, so a run
+                // is open here only while no COPY is pending.
+                if (pendingCopyBlockIndex >= 0) {
                     writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
                     pendingCopyBlockIndex = -1;
                     pendingCopyLength = 0;
-                    literalStart = i;
-                    hasLiteral = true;
+                }
+                // Slide the window one byte forward: the leading byte joins the literal run, and
+                // — while a full window still fits ahead — the next stream byte takes its slot.
+                literals.write(ring[ringPos]);
+                if (i + blockSize < n) {
+                    int b = source.read();
+                    if (b < 0) {
+                        throw new IOException(
+                                "Source ended early while delta-encoding: expected "
+                                        + n
+                                        + " bytes");
+                    }
+                    rh.roll(ring[ringPos], (byte) b);
+                    ring[ringPos] = (byte) b;
+                    ringPos = (ringPos + 1) % blockSize;
+                } else {
+                    // No new byte fits ahead: the emitted slot is spent, so advance the window
+                    // marker even though nothing was read into it.
+                    ringPos = (ringPos + 1) % blockSize;
                 }
                 i++;
-                // Roll the window forward by one if a full window still fits ahead.
-                if (i + blockSize <= n) {
-                    rh.roll(source[i - 1], source[i + blockSize - 1]);
-                }
-            } else {
-                // After a full-block match, re-initialise the rolling window at the new position.
-                rh.reset();
-                if (i + blockSize <= n) {
-                    for (int k = 0; k < blockSize; k++) {
-                        rh.update(source[i + k]);
-                    }
-                }
             }
         }
 
-        if (hasLiteral) {
-            DeltaCodec.writeLiteral(delta, source, literalStart, n - literalStart);
-        }
+        literals.closeRun();
         writeCopyRun(delta, pendingCopyBlockIndex, pendingCopyLength);
         return delta.toByteArray();
+    }
+
+    /** Read exactly {@code len} bytes into {@code buf[off..off+len)} or fail. */
+    private static void readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
+        int done = 0;
+        while (done < len) {
+            int read = in.read(buf, off + done, len - done);
+            if (read < 0) {
+                throw new IOException("Source ended early while delta-encoding");
+            }
+            done += read;
+        }
+    }
+
+    /** Pump exactly {@code count} remaining source bytes into the literal sink. */
+    private static void pumpLiterals(InputStream source, LiteralSink sink, long count)
+            throws IOException {
+        byte[] buf = new byte[8192];
+        long remaining = count;
+        while (remaining > 0) {
+            int want = (int) Math.min(buf.length, remaining);
+            readFully(source, buf, 0, want);
+            sink.write(buf, 0, want);
+            remaining -= want;
+        }
+    }
+
+    /**
+     * Accumulates literal bytes and emits them as LITERAL tokens: eagerly in bounded chunks while a
+     * run is open, and as one final token (possibly empty) when the run closes.
+     */
+    private static final class LiteralSink {
+        private final ByteArrayOutputStream delta;
+        private final ByteArrayOutputStream chunk = new ByteArrayOutputStream(LITERAL_CHUNK_SIZE);
+        private boolean runOpen;
+
+        LiteralSink(ByteArrayOutputStream delta) {
+            this.delta = delta;
+        }
+
+        void write(int b) throws IOException {
+            runOpen = true;
+            chunk.write(b);
+            if (chunk.size() >= LITERAL_CHUNK_SIZE) {
+                flushChunk();
+            }
+        }
+
+        void write(byte[] buf, int off, int len) throws IOException {
+            runOpen = true;
+            chunk.write(buf, off, len);
+            if (chunk.size() >= LITERAL_CHUNK_SIZE) {
+                flushChunk();
+            }
+        }
+
+        /** Close the current literal run, emitting any bytes held back below the chunk size. */
+        void closeRun() throws IOException {
+            if (runOpen) {
+                flushChunk();
+                runOpen = false;
+            }
+        }
+
+        private void flushChunk() throws IOException {
+            byte[] bytes = chunk.toByteArray();
+            chunk.reset();
+            DeltaCodec.writeLiteral(delta, bytes, 0, bytes.length);
+        }
     }
 
     /** Write the deferred COPY run, if one is open. */

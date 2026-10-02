@@ -24,7 +24,11 @@ final class Md5 {
 
     /** Compute the lowercase hex MD5 of the given bytes. */
     static String hex(byte[] data) {
-        byte[] digest = newDigest().digest(data);
+        return toHex(newDigest().digest(data));
+    }
+
+    /** Format an already-computed digest as lowercase hex. */
+    static String toHex(byte[] digest) {
         StringBuilder sb = new StringBuilder(digest.length * 2);
         for (byte b : digest) {
             sb.append(String.format("%02x", b));

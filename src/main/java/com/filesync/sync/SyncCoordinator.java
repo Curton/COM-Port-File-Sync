@@ -10,8 +10,11 @@ import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.ManifestMismatchException;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.protocol.TransferCancelledException;
+import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -2006,9 +2009,13 @@ public class SyncCoordinator {
                             continue;
                         }
                         File file = new File(syncFolder, path);
-                        byte[] source;
-                        try {
-                            source = Files.readAllBytes(file.toPath());
+                        long fileLen = file.length();
+                        // Encode straight from disk: the file content is never held in memory,
+                        // only the (typically small) delta stream is.
+                        byte[] delta;
+                        try (InputStream sourceIn =
+                                new BufferedInputStream(new FileInputStream(file))) {
+                            delta = DeltaEncoder.encode(sourceIn, fileLen, sigs);
                         } catch (IOException e) {
                             eventBus.post(
                                     new SyncEvent.ErrorEvent(
@@ -2019,14 +2026,12 @@ public class SyncCoordinator {
                             deltaFallback.add(fi);
                             continue;
                         }
-                        byte[] delta = DeltaEncoder.encode(source, sigs);
                         CompressionUtil.CompressedData deltaCompressed =
                                 CompressionUtil.compressIfBeneficial(path, delta);
-                        CompressionUtil.CompressedData fullCompressed =
-                                CompressionUtil.compressIfBeneficial(path, source);
-                        long savedBytes =
-                                (long) fullCompressed.getData().length
-                                        - deltaCompressed.getData().length;
+                        // The batch-path alternative would compress the whole file: count its wire
+                        // size streaming from disk instead of building the compressed copy.
+                        long fullWireSize = CompressionUtil.compressedSizeIfBeneficial(path, file);
+                        long savedBytes = fullWireSize - deltaCompressed.getData().length;
                         if (savedBytes < MIN_DELTA_SAVINGS_BYTES) {
                             // Absolute savings decide: the benchmarked per-session fixed cost
                             // (com.filesync.bench.DeltaThresholdBenchmark) is a few KB of wire
@@ -2044,24 +2049,15 @@ public class SyncCoordinator {
                                                     + " bytes); using batch transfer"));
                             continue;
                         }
-                        String sourceMd5 = HashUtil.md5Hex(source);
+                        String sourceMd5 = HashUtil.md5Hex(file);
                         operationIndex++;
                         long lastModified = file.lastModified();
                         long sendStart = System.currentTimeMillis();
                         boolean wasCompressed =
                                 protocol.sendFileDelta(
-                                        path,
-                                        delta,
-                                        lastModified,
-                                        source.length,
-                                        sourceMd5,
-                                        fi.getMd5());
+                                        path, delta, lastModified, fileLen, sourceMd5, fi.getMd5());
                         long sendMs = System.currentTimeMillis() - sendStart;
-                        int pct =
-                                (int)
-                                        (100
-                                                * savedBytes
-                                                / Math.max(1, fullCompressed.getData().length));
+                        int pct = (int) (100 * savedBytes / Math.max(1, fullWireSize));
                         String msg =
                                 "Delta syncing ["
                                         + operationIndex

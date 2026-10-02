@@ -8,13 +8,19 @@ import com.filesync.serial.XModemTransfer;
 import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.FileChangeDetector;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -702,11 +708,18 @@ public class SyncProtocol {
      * Receiver side: receive a delta-encoded file, reconstruct the source bytes from the existing
      * local file, verify the MD5 against the sender's {@code sourceMd5}, and write the result.
      *
+     * <p>The reconstruction streams: COPY ranges are pulled from the existing file via random
+     * access and the output goes straight into a staging file wrapped in a digest, so neither the
+     * old nor the new file content is ever held in memory. The stage is renamed over the target
+     * only after the MD5 verifies, so a mismatch or decode error leaves the existing file
+     * untouched.
+     *
      * <p>A write failure (e.g. the target is locked) throws {@link FileWriteException} carrying the
-     * reconstructed bytes so the caller can queue a deferred retry. An MD5 mismatch or decode error
-     * throws a plain {@link IOException} so the caller can request a full retransfer; the MD5
-     * mismatch first sends a {@link #CMD_BASE_STALE} notification so the sender does not repeat the
-     * rejected transfer against the same stale receiver state on every sync.
+     * reconstructed bytes (read back from the stage on that rare path) so the caller can queue a
+     * deferred retry. An MD5 mismatch or decode error throws a plain {@link IOException} so the
+     * caller can request a full retransfer; the MD5 mismatch first sends a {@link #CMD_BASE_STALE}
+     * notification so the sender does not repeat the rejected transfer against the same stale
+     * receiver state on every sync.
      *
      * @param baseDir base directory containing the existing file
      * @param relativePath relative path of the file
@@ -750,6 +763,8 @@ public class SyncProtocol {
         }
         validateReceivedSize("file delta", relativePath, expectedSize, payload);
 
+        // The delta itself stays in memory (it is the wire payload, bounded by expectedSize); the
+        // memory hogs it replaces are the full existing-file and reconstructed-file arrays.
         byte[] deltaBytes = compressed ? CompressionUtil.decompress(payload) : payload;
 
         File existing = new File(baseDir, relativePath);
@@ -757,13 +772,32 @@ public class SyncProtocol {
             throw new IOException(
                     "Cannot apply delta: existing file missing on receiver: " + relativePath);
         }
-        byte[] existingBytes = Files.readAllBytes(existing.toPath());
-        byte[] reconstructed = DeltaDecoder.decode(existingBytes, deltaBytes);
+        // The existing-file check above guarantees the stage's parent already exists
+        // (existing and stage share the same directory), so no mkdir is needed here.
+        File stageFile =
+                new File(existing.getParentFile(), "." + existing.getName() + DELTA_STAGE_SUFFIX);
+        MessageDigest digest = HashUtil.newDigest();
+        long reconstructedBytes;
+        try (RandomAccessFile baseFile = new RandomAccessFile(existing, "r");
+                DataInputStream deltaIn =
+                        new DataInputStream(new ByteArrayInputStream(deltaBytes));
+                OutputStream out =
+                        new DigestOutputStream(
+                                new BufferedOutputStream(new FileOutputStream(stageFile)),
+                                digest)) {
+            reconstructedBytes = DeltaDecoder.decodeInto(baseFile, deltaIn, out);
+        } catch (IOException e) {
+            // A malformed delta (decode error) or an unreadable base: nothing was written to the
+            // target, so dropping the stage and rethrowing is enough.
+            deleteStageQuietly(stageFile);
+            throw e;
+        }
 
         // Verify reconstruction against the sender's MD5 to guard against a stale signature
         // (the receiver's file changed between signature generation and delta application).
-        String actualMd5 = HashUtil.md5Hex(reconstructed);
+        String actualMd5 = HashUtil.toHex(digest.digest());
         if (sourceMd5 != null && !sourceMd5.isEmpty() && !sourceMd5.equals(actualMd5)) {
+            deleteStageQuietly(stageFile);
             sendBaseStale(relativePath, existing);
             throw new IOException(
                     "Delta reconstruction verification failed for "
@@ -775,20 +809,29 @@ public class SyncProtocol {
                             + ")");
         }
 
-        File targetFile = new File(baseDir, relativePath);
-        // The existing-file check above guarantees the target's parent already exists
-        // (existing and target share the same path), so no mkdir is needed here.
-        try (FileOutputStream fos = new FileOutputStream(targetFile)) {
-            fos.write(reconstructed);
+        // Stamp before the move so the timestamp survives the rename into the target's place.
+        if (lastModified > 0) {
+            stageFile.setLastModified(lastModified);
+        }
+        try {
+            Files.move(stageFile.toPath(), existing.toPath(), StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             fireWriteFailed(relativePath);
+            // Rare path (e.g. the target is locked): the reconstructed bytes must still travel
+            // with the exception for the deferred retry, so they are read back from the stage.
+            byte[] reconstructed = Files.readAllBytes(stageFile.toPath());
+            deleteStageQuietly(stageFile);
             throw new FileWriteException(
                     relativePath, reconstructed, lastModified, e.getMessage(), e);
         }
-        if (lastModified > 0) {
-            targetFile.setLastModified(lastModified);
+        fireTransferConfirmed(relativePath, manifestMd5, reconstructedBytes);
+    }
+
+    /** Drop a delta staging file, scheduling an exit-time fallback delete if it is locked. */
+    private static void deleteStageQuietly(File stageFile) {
+        if (stageFile.exists() && !stageFile.delete()) {
+            stageFile.deleteOnExit();
         }
-        fireTransferConfirmed(relativePath, manifestMd5, reconstructed.length);
     }
 
     // ---- append-only tail transfer ----
@@ -1484,6 +1527,13 @@ public class SyncProtocol {
      * crash is never synced as user content.
      */
     public static final String PARTIAL_SUFFIX = ".filesync-part";
+
+    /**
+     * Suffix of the receive-side staging file holding a delta reconstruction in progress. Same
+     * hidden-dot prefix convention as {@link #PARTIAL_SUFFIX}; the stage is renamed over the target
+     * only after the reconstruction verifies, and deleted on every failure path.
+     */
+    private static final String DELTA_STAGE_SUFFIX = ".filesync-delta";
 
     /**
      * Receive file data and save to directory. Payloads above {@link

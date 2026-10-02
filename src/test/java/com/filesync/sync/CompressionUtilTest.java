@@ -417,6 +417,39 @@ class CompressionUtilTest {
     }
 
     @Test
+    void compressedSizeIfBeneficialMatchesTheByteArrayPath() throws IOException {
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("csize-parity");
+        // Compressible text, incompressible random bytes, a sub-sample tiny payload, and empty
+        // content: the streaming file path must report the same wire size the byte-array path
+        // would send, on both the compressed and the uncompressed side of the decision.
+        java.util.Random rng = new java.util.Random(7);
+        byte[] random = new byte[50_000];
+        rng.nextBytes(random);
+        Object[][] cases = {
+            {"a.txt", repeatingBytes(300_000)},
+            {"b.bin", random},
+            {"c.txt", repeatingBytes(100)},
+            {"d.txt", new byte[0]},
+        };
+        for (Object[] c : cases) {
+            String name = (String) c[0];
+            byte[] data = (byte[]) c[1];
+            java.nio.file.Path f = dir.resolve(name);
+            java.nio.file.Files.write(f, data);
+            CompressionUtil.CompressedData viaBytes =
+                    CompressionUtil.compressIfBeneficial(name, data);
+            assertEquals(
+                    viaBytes.getData().length,
+                    CompressionUtil.compressedSizeIfBeneficial(name, f.toFile()),
+                    "wire size mismatch for "
+                            + name
+                            + " (compressed="
+                            + viaBytes.isCompressed()
+                            + ")");
+        }
+    }
+
+    @Test
     void decompressTruncatedReturnsPrefixOfTruncatedStream() throws IOException {
         byte[] original = repeatingBytes(200_000);
         byte[] compressed = CompressionUtil.compress(original);
