@@ -10,6 +10,7 @@ import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.ManifestMismatchException;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.protocol.TransferCancelledException;
+import com.filesync.util.IoUtil;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -402,12 +403,9 @@ public class SyncCoordinator {
             protocol.setTimeout(savedTimeout);
         }
 
-        String logMsg = "Remote manifest received (" + remoteManifest.getFileCount() + " files";
-        if (remoteManifest.getEmptyDirectoryCount() > 0) {
-            logMsg += ", " + remoteManifest.getEmptyDirectoryCount() + " empty dirs";
-        }
-        logMsg += ")";
-        eventBus.post(new SyncEvent.LogEvent(logMsg));
+        eventBus.post(
+                new SyncEvent.LogEvent(
+                        manifestCountMessage("Remote manifest received", remoteManifest)));
 
         List<FileChangeDetector.FileInfo> filesToSync =
                 FileChangeDetector.getChangedFiles(localManifest, remoteManifest);
@@ -861,6 +859,20 @@ public class SyncCoordinator {
     }
 
     /**
+     * Builds the manifest-count log line shared by the sender and receiver sides of the manifest
+     * exchange, e.g. {@code "Manifest sent (42 files, 3 empty dirs)"}; the empty-dir segment only
+     * appears when there is at least one.
+     */
+    private String manifestCountMessage(String verb, FileChangeDetector.FileManifest manifest) {
+        String logMsg = verb + " (" + manifest.getFileCount() + " files";
+        if (manifest.getEmptyDirectoryCount() > 0) {
+            logMsg += ", " + manifest.getEmptyDirectoryCount() + " empty dirs";
+        }
+        logMsg += ")";
+        return logMsg;
+    }
+
+    /**
      * Handle manifest request from sender. Uses sender's settings if provided, otherwise falls back
      * to local settings. This ensures both sides generate manifests with the same options
      * (especially fast mode).
@@ -937,12 +949,7 @@ public class SyncCoordinator {
                 }
             }
             protocol.sendManifest(manifest);
-            String logMsg = "Manifest sent (" + manifest.getFileCount() + " files";
-            if (manifest.getEmptyDirectoryCount() > 0) {
-                logMsg += ", " + manifest.getEmptyDirectoryCount() + " empty dirs";
-            }
-            logMsg += ")";
-            eventBus.post(new SyncEvent.LogEvent(logMsg));
+            eventBus.post(new SyncEvent.LogEvent(manifestCountMessage("Manifest sent", manifest)));
         } finally {
             syncing.set(false);
             onSyncIdle.run();
@@ -1038,28 +1045,32 @@ public class SyncCoordinator {
         }
     }
 
-    public void handleIncomingFileData(SyncProtocol.Message msg) throws IOException {
-        File syncFolder = syncFolderSupplier.get();
-        if (syncFolder == null) {
-            syncing.set(false);
-            onSyncIdle.run();
-            return;
-        }
+    /**
+     * One single-file receive exchange: parses the command's parameters (original order), posts the
+     * "Receiving" log, acknowledges, resolves the path, receives the payload, and posts the
+     * completion log. Returns the announced relative path for {@code markWritten}.
+     */
+    @FunctionalInterface
+    private interface FileTransfer {
+        String receive() throws IOException;
+    }
+
+    /**
+     * Shared skeleton for the three single-file receive handlers ({@link #handleIncomingFileData},
+     * {@link #handleIncomingFileDelta}, {@link #handleIncomingFileAppend}): toggles the syncing
+     * flag around the exchange, runs the transfer lambda (parameter parsing through the completion
+     * log, all inside the try so any failure there still clears the flag), and marks the write
+     * complete. A write failure caused by a locked target is swallowed and queued for a user
+     * decision once the flag is cleared; every other failure propagates so the listen loop can
+     * restart. The caller must have null-checked the sync folder first: a missing folder ends the
+     * receive before the message is touched.
+     */
+    private void receiveSingleFileTransfer(File syncFolder, FileTransfer transfer)
+            throws IOException {
         syncing.set(true);
         FileWriteException lockedTarget = null;
         try {
-            String relativePath = msg.getParam(0);
-            int size = msg.getParamAsInt(1);
-            boolean compressed = msg.getParamAsBoolean(2);
-            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-            String manifestMd5 = msg.getParams().length > 4 ? msg.getParam(4) : null;
-
-            eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
-            protocol.sendAck();
-            resolveSafe(syncFolder, relativePath);
-            protocol.receiveFile(
-                    syncFolder, relativePath, size, compressed, lastModified, manifestMd5);
-            eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
+            String relativePath = transfer.receive();
             pendingFileWriteService.markWritten(relativePath);
             touchHeartbeat();
             flushSharedTextBetweenOperations();
@@ -1067,11 +1078,6 @@ public class SyncCoordinator {
             // The transfer succeeded but the target file is locked by another program: queue it
             // for a user decision instead of dropping it or tearing down the connection.
             lockedTarget = e;
-        } catch (ManifestMismatchException e) {
-            // The decoded content did not reproduce the announced manifest md5. The protocol
-            // layer already reported the path as a write failure; these bytes must not be
-            // written or retried, so the file is left alone and retransferred next sync.
-            eventBus.post(new SyncEvent.ErrorEvent(e.getMessage()));
         } finally {
             // Cleared on every exit path, success included: the sender sends no CMD_SYNC_COMPLETE
             // for a single file, so a flag left set would keep the receiver's Sync Control button
@@ -1091,6 +1097,44 @@ public class SyncCoordinator {
                     lockedTarget.getData(),
                     lockedTarget.getLastModified(),
                     lockedTarget.getMessage());
+        }
+    }
+
+    public void handleIncomingFileData(SyncProtocol.Message msg) throws IOException {
+        File syncFolder = syncFolderSupplier.get();
+        if (syncFolder == null) {
+            syncing.set(false);
+            onSyncIdle.run();
+            return;
+        }
+        try {
+            receiveSingleFileTransfer(
+                    syncFolder,
+                    () -> {
+                        String relativePath = msg.getParam(0);
+                        int size = msg.getParamAsInt(1);
+                        boolean compressed = msg.getParamAsBoolean(2);
+                        long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+                        String manifestMd5 = msg.getParams().length > 4 ? msg.getParam(4) : null;
+
+                        eventBus.post(new SyncEvent.LogEvent("Receiving file: " + relativePath));
+                        protocol.sendAck();
+                        resolveSafe(syncFolder, relativePath);
+                        protocol.receiveFile(
+                                syncFolder,
+                                relativePath,
+                                size,
+                                compressed,
+                                lastModified,
+                                manifestMd5);
+                        eventBus.post(new SyncEvent.LogEvent("File received: " + relativePath));
+                        return relativePath;
+                    });
+        } catch (ManifestMismatchException e) {
+            // The decoded content did not reproduce the announced manifest md5. The protocol
+            // layer already reported the path as a write failure; these bytes must not be
+            // written or retried, so the file is left alone and retransferred next sync.
+            eventBus.post(new SyncEvent.ErrorEvent(e.getMessage()));
         }
     }
 
@@ -1146,53 +1190,32 @@ public class SyncCoordinator {
             onSyncIdle.run();
             return;
         }
-        syncing.set(true);
-        FileWriteException lockedTarget = null;
-        try {
-            String relativePath = msg.getParam(0);
-            int size = msg.getParamAsInt(1);
-            boolean compressed = msg.getParamAsBoolean(2);
-            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-            long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
-            String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
-            String manifestMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
+        receiveSingleFileTransfer(
+                syncFolder,
+                () -> {
+                    String relativePath = msg.getParam(0);
+                    int size = msg.getParamAsInt(1);
+                    boolean compressed = msg.getParamAsBoolean(2);
+                    long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+                    long sourceSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+                    String sourceMd5 = msg.getParams().length > 5 ? msg.getParam(5) : null;
+                    String manifestMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
 
-            eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
-            protocol.sendAck();
-            resolveSafe(syncFolder, relativePath);
-            protocol.receiveFileDelta(
-                    syncFolder,
-                    relativePath,
-                    size,
-                    compressed,
-                    lastModified,
-                    sourceSize,
-                    sourceMd5,
-                    manifestMd5);
-            eventBus.post(new SyncEvent.LogEvent("Delta applied: " + relativePath));
-            pendingFileWriteService.markWritten(relativePath);
-            touchHeartbeat();
-            flushSharedTextBetweenOperations();
-        } catch (FileWriteException e) {
-            // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
-            lockedTarget = e;
-        } finally {
-            // See handleIncomingFileData: the flag must not survive a successful single-file
-            // receive, because nothing else clears it for this path.
-            syncing.set(false);
-            onSyncIdle.run();
-        }
-        if (lockedTarget != null) {
-            // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
-            // delta transfer left it as an enabled "Cancel", but syncing is now false.
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-            pendingFileWriteService.enqueue(
-                    syncFolder,
-                    lockedTarget.getRelativePath(),
-                    lockedTarget.getData(),
-                    lockedTarget.getLastModified(),
-                    lockedTarget.getMessage());
-        }
+                    eventBus.post(new SyncEvent.LogEvent("Receiving delta: " + relativePath));
+                    protocol.sendAck();
+                    resolveSafe(syncFolder, relativePath);
+                    protocol.receiveFileDelta(
+                            syncFolder,
+                            relativePath,
+                            size,
+                            compressed,
+                            lastModified,
+                            sourceSize,
+                            sourceMd5,
+                            manifestMd5);
+                    eventBus.post(new SyncEvent.LogEvent("Delta applied: " + relativePath));
+                    return relativePath;
+                });
     }
 
     /**
@@ -1209,55 +1232,34 @@ public class SyncCoordinator {
             onSyncIdle.run();
             return;
         }
-        syncing.set(true);
-        FileWriteException lockedTarget = null;
-        try {
-            String relativePath = msg.getParam(0);
-            int size = msg.getParamAsInt(1);
-            boolean compressed = msg.getParamAsBoolean(2);
-            long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
-            long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
-            long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
-            String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
-            String manifestMd5 = msg.getParams().length > 7 ? msg.getParam(7) : null;
+        receiveSingleFileTransfer(
+                syncFolder,
+                () -> {
+                    String relativePath = msg.getParam(0);
+                    int size = msg.getParamAsInt(1);
+                    boolean compressed = msg.getParamAsBoolean(2);
+                    long lastModified = msg.getParams().length > 3 ? msg.getParamAsLong(3) : 0L;
+                    long baseSize = msg.getParams().length > 4 ? msg.getParamAsLong(4) : 0L;
+                    long finalSize = msg.getParams().length > 5 ? msg.getParamAsLong(5) : 0L;
+                    String finalMd5 = msg.getParams().length > 6 ? msg.getParam(6) : null;
+                    String manifestMd5 = msg.getParams().length > 7 ? msg.getParam(7) : null;
 
-            eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
-            protocol.sendAck();
-            resolveSafe(syncFolder, relativePath);
-            protocol.receiveFileAppend(
-                    syncFolder,
-                    relativePath,
-                    size,
-                    compressed,
-                    lastModified,
-                    baseSize,
-                    finalSize,
-                    finalMd5,
-                    manifestMd5);
-            eventBus.post(new SyncEvent.LogEvent("Append applied: " + relativePath));
-            pendingFileWriteService.markWritten(relativePath);
-            touchHeartbeat();
-            flushSharedTextBetweenOperations();
-        } catch (FileWriteException e) {
-            // Reconstruction succeeded but the target is locked: queue the reconstructed bytes.
-            lockedTarget = e;
-        } finally {
-            // See handleIncomingFileData: the flag must not survive a successful single-file
-            // receive, because nothing else clears it for this path.
-            syncing.set(false);
-            onSyncIdle.run();
-        }
-        if (lockedTarget != null) {
-            // Refresh the Sync Control button (see handleIncomingFileData for rationale): the
-            // append transfer left it as an enabled "Cancel", but syncing is now false.
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
-            pendingFileWriteService.enqueue(
-                    syncFolder,
-                    lockedTarget.getRelativePath(),
-                    lockedTarget.getData(),
-                    lockedTarget.getLastModified(),
-                    lockedTarget.getMessage());
-        }
+                    eventBus.post(new SyncEvent.LogEvent("Receiving append: " + relativePath));
+                    protocol.sendAck();
+                    resolveSafe(syncFolder, relativePath);
+                    protocol.receiveFileAppend(
+                            syncFolder,
+                            relativePath,
+                            size,
+                            compressed,
+                            lastModified,
+                            baseSize,
+                            finalSize,
+                            finalMd5,
+                            manifestMd5);
+                    eventBus.post(new SyncEvent.LogEvent("Append applied: " + relativePath));
+                    return relativePath;
+                });
     }
 
     /**
@@ -1746,6 +1748,138 @@ public class SyncCoordinator {
         protocol.sendAck();
     }
 
+    /**
+     * Builds the "[verb] [index/total]: path" prefix shared by the per-file sync log lines; call
+     * sites append their own compression, savings, and timing suffixes.
+     */
+    private String transferLogPrefix(String verb, int index, int total, String path) {
+        return verb + " [" + index + "/" + total + "]: " + path;
+    }
+
+    /**
+     * Sends one accumulated batch as a single XMODEM transfer; when the batch transfer fails,
+     * re-sends its files one by one. Returns the updated transfer counters as {@code {savedOpIndex,
+     * operationIndex}}: inside the fallback loop the two only advance in lockstep, a successful
+     * batch sets them equal, and they can differ on entry (earlier single-file phases advance
+     * {@code operationIndex} without {@code savedOpIndex}), so both must round-trip instead of
+     * deriving one from the other.
+     *
+     * @param finalBatch true for the end-of-sync flush: its failure log posts unconditionally
+     *     ("Final batch transfer failed; falling back to per-file"); false for the mid-loop flush,
+     *     whose failure log ("Batch transfer failed for N file(s); ...") is suppressed when a
+     *     cancel was requested, because the fallback loop stops on that same flag anyway
+     * @param rethrowTransferCancelled true to rethrow a peer-initiated {@link
+     *     TransferCancelledException} out of the fallback loop (mid-loop flush, so a peer that
+     *     cancelled is never sent the remaining files); false to fall through to the cancel check
+     *     like any other per-file failure (final flush)
+     */
+    private int[] flushBatch(
+            List<Object[]> batch,
+            int savedOpIndex,
+            int operationIndex,
+            int totalOperations,
+            int batchByteTarget,
+            File syncFolder,
+            SyncSession session,
+            boolean finalBatch,
+            boolean rethrowTransferCancelled)
+            throws IOException {
+        // Each batch gets its own callback capturing the correct starting index.
+        // savedOpIndex tracks the highest operation index already confirmed
+        // (by batch callback or fallback per-file progress), so the next batch
+        // continues without gaps or collisions.
+        int batchStartOpIdx = savedOpIndex + 1;
+        BatchTransferSession.BatchProgressCallback batchCallback =
+                (entryIdx, total, relPath) -> {
+                    int current = batchStartOpIdx + entryIdx;
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Batch [" + current + "/" + totalOperations + "]: " + relPath));
+                    eventBus.post(
+                            new SyncEvent.FileProgressEvent(current, totalOperations, relPath));
+                };
+        int inBatch = batch.size();
+        long batchStart = System.currentTimeMillis();
+        boolean ok = protocol.sendBatch(batch, batchByteTarget, batchCallback, syncFolder);
+        long batchMs = System.currentTimeMillis() - batchStart;
+        if (!ok) {
+            if (finalBatch) {
+                eventBus.post(
+                        new SyncEvent.ErrorEvent(
+                                "Final batch transfer failed; falling back to per-file"));
+            } else {
+                // A cancel-driven batch failure is expected, not an error; the
+                // fallback loop below stops on the same flag.
+                if (!session.cancelRequested.get()) {
+                    eventBus.post(
+                            new SyncEvent.ErrorEvent(
+                                    "Batch transfer failed for "
+                                            + inBatch
+                                            + " file(s); falling back to per-file"));
+                }
+            }
+            boolean anyFileFailed = false;
+            for (int i = 0; i < batch.size(); i++) {
+                if (session.cancelRequested.get()) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent("Sync cancelled - stopping fallback transfers"));
+                    break;
+                }
+                String rp = (String) batch.get(i)[1];
+                String rpMd5 = batch.get(i).length > 2 ? (String) batch.get(i)[2] : null;
+                savedOpIndex++;
+                operationIndex++;
+                long t0 = System.currentTimeMillis();
+                boolean sentOk = false;
+                try {
+                    sentOk = protocol.sendFile(syncFolder, rp, rpMd5);
+                } catch (IOException | IllegalStateException e) {
+                    if (rethrowTransferCancelled && e instanceof TransferCancelledException) {
+                        // The peer cancelled the session; do not send the remaining
+                        // fallback files.
+                        throw (TransferCancelledException) e;
+                    }
+                    if (session.cancelRequested.get()) {
+                        break;
+                    }
+                    anyFileFailed = true;
+                    eventBus.post(
+                            new SyncEvent.ErrorEvent(
+                                    "Failed to send file (fallback) "
+                                            + rp
+                                            + ": "
+                                            + e.getMessage()));
+                }
+                long ms = System.currentTimeMillis() - t0;
+                if (sentOk) {
+                    touchHeartbeat();
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Syncing (fallback) ["
+                                            + savedOpIndex
+                                            + "/"
+                                            + totalOperations
+                                            + "]: "
+                                            + rp
+                                            + String.format(" [%dms]", ms)));
+                }
+                eventBus.post(new SyncEvent.FileProgressEvent(savedOpIndex, totalOperations, rp));
+            }
+            if (anyFileFailed) {
+                protocol.sendTransferCancel();
+                throw new IOException(
+                        "Failed to transfer " + inBatch + " file(s) after fallback attempts");
+            }
+        } else {
+            savedOpIndex = batchStartOpIdx + inBatch - 1;
+            operationIndex = savedOpIndex;
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Batch of " + inBatch + " files sent in " + batchMs + "ms"));
+        }
+        return new int[] {savedOpIndex, operationIndex};
+    }
+
     private void performSync(SyncPreviewPlan providedPlan, SyncSession session) {
         try {
             eventBus.post(new SyncEvent.SyncStartedEvent());
@@ -1846,12 +1980,11 @@ public class SyncCoordinator {
                         protocol.sendFile(syncFolder, filePath, mergedContent, lastModified);
                 long fileSendMs = System.currentTimeMillis() - fileSendStart;
                 String msg =
-                        "Syncing (merged) ["
-                                + operationIndex
-                                + "/"
-                                + totalOperationsRef[0]
-                                + "]: "
-                                + filePath;
+                        transferLogPrefix(
+                                "Syncing (merged)",
+                                operationIndex,
+                                totalOperationsRef[0],
+                                filePath);
                 if (wasCompressed) msg += " (compressed)";
                 msg += String.format(" [%dms]", fileSendMs);
                 eventBus.post(new SyncEvent.LogEvent(msg));
@@ -1917,12 +2050,11 @@ public class SyncCoordinator {
                                     append.fileInfo.getMd5());
                     long sendMs = System.currentTimeMillis() - sendStart;
                     String msg =
-                            "Append-only syncing ["
-                                    + operationIndex
-                                    + "/"
-                                    + totalOperationsRef[0]
-                                    + "]: "
-                                    + path
+                            transferLogPrefix(
+                                            "Append-only syncing",
+                                            operationIndex,
+                                            totalOperationsRef[0],
+                                            path)
                                     + " (+"
                                     + append.tail.length
                                     + " bytes of "
@@ -2113,12 +2245,11 @@ public class SyncCoordinator {
                         long sendMs = System.currentTimeMillis() - sendStart;
                         int pct = (int) (100 * savedBytes / Math.max(1, fullWireSize));
                         String msg =
-                                "Delta syncing ["
-                                        + operationIndex
-                                        + "/"
-                                        + totalOperationsRef[0]
-                                        + "]: "
-                                        + path;
+                                transferLogPrefix(
+                                        "Delta syncing",
+                                        operationIndex,
+                                        totalOperationsRef[0],
+                                        path);
                         if (wasCompressed) msg += " (compressed)";
                         msg += " (saved " + pct + "%)" + String.format(" [%dms]", sendMs);
                         eventBus.post(new SyncEvent.LogEvent(msg));
@@ -2209,111 +2340,19 @@ public class SyncCoordinator {
                     batchBytes += estimateEntryBytes(file, path, md5);
 
                     if (batch.size() >= 256 || batchBytes >= BATCH_BYTE_TARGET) {
-                        // Each batch gets its own callback capturing the correct starting index.
-                        // savedOpIndex tracks the highest operation index already confirmed
-                        // (by batch callback or fallback per-file progress), so the next batch
-                        // continues without gaps or collisions.
-                        int batchStartOpIdx = savedOpIndex + 1;
-                        BatchTransferSession.BatchProgressCallback batchCallback =
-                                (entryIdx, total, relPath) -> {
-                                    int current = batchStartOpIdx + entryIdx;
-                                    eventBus.post(
-                                            new SyncEvent.LogEvent(
-                                                    "Batch ["
-                                                            + current
-                                                            + "/"
-                                                            + totalOperationsRef[0]
-                                                            + "]: "
-                                                            + relPath));
-                                    eventBus.post(
-                                            new SyncEvent.FileProgressEvent(
-                                                    current, totalOperationsRef[0], relPath));
-                                };
-                        long batchStart = System.currentTimeMillis();
-                        int inBatch = batch.size();
-                        boolean ok =
-                                protocol.sendBatch(
-                                        batch, BATCH_BYTE_TARGET, batchCallback, syncFolder);
-                        long batchMs = System.currentTimeMillis() - batchStart;
-                        if (!ok) {
-                            // A cancel-driven batch failure is expected, not an error; the
-                            // fallback loop below stops on the same flag.
-                            if (!session.cancelRequested.get()) {
-                                eventBus.post(
-                                        new SyncEvent.ErrorEvent(
-                                                "Batch transfer failed for "
-                                                        + inBatch
-                                                        + " file(s); falling back to per-file"));
-                            }
-                            boolean anyFileFailed = false;
-                            for (int i = 0; i < batch.size(); i++) {
-                                if (session.cancelRequested.get()) {
-                                    eventBus.post(
-                                            new SyncEvent.LogEvent(
-                                                    "Sync cancelled - stopping fallback transfers"));
-                                    break;
-                                }
-                                String rp = (String) batch.get(i)[1];
-                                String rpMd5 =
-                                        batch.get(i).length > 2 ? (String) batch.get(i)[2] : null;
-                                savedOpIndex++;
-                                operationIndex++;
-                                long t0 = System.currentTimeMillis();
-                                boolean sentOk = false;
-                                try {
-                                    sentOk = protocol.sendFile(syncFolder, rp, rpMd5);
-                                } catch (IOException | IllegalStateException e) {
-                                    if (e instanceof TransferCancelledException) {
-                                        // The peer cancelled the session; do not send the
-                                        // remaining fallback files.
-                                        throw (TransferCancelledException) e;
-                                    }
-                                    if (session.cancelRequested.get()) {
-                                        break;
-                                    }
-                                    anyFileFailed = true;
-                                    eventBus.post(
-                                            new SyncEvent.ErrorEvent(
-                                                    "Failed to send file (fallback) "
-                                                            + rp
-                                                            + ": "
-                                                            + e.getMessage()));
-                                }
-                                long ms = System.currentTimeMillis() - t0;
-                                if (sentOk) {
-                                    touchHeartbeat();
-                                    eventBus.post(
-                                            new SyncEvent.LogEvent(
-                                                    "Syncing (fallback) ["
-                                                            + savedOpIndex
-                                                            + "/"
-                                                            + totalOperationsRef[0]
-                                                            + "]: "
-                                                            + rp
-                                                            + String.format(" [%dms]", ms)));
-                                }
-                                eventBus.post(
-                                        new SyncEvent.FileProgressEvent(
-                                                savedOpIndex, totalOperationsRef[0], rp));
-                            }
-                            if (anyFileFailed) {
-                                protocol.sendTransferCancel();
-                                throw new IOException(
-                                        "Failed to transfer "
-                                                + inBatch
-                                                + " file(s) after fallback attempts");
-                            }
-                        } else {
-                            savedOpIndex = batchStartOpIdx + inBatch - 1;
-                            operationIndex = savedOpIndex;
-                            eventBus.post(
-                                    new SyncEvent.LogEvent(
-                                            "Batch of "
-                                                    + inBatch
-                                                    + " files sent in "
-                                                    + batchMs
-                                                    + "ms"));
-                        }
+                        int[] idx =
+                                flushBatch(
+                                        batch,
+                                        savedOpIndex,
+                                        operationIndex,
+                                        totalOperationsRef[0],
+                                        BATCH_BYTE_TARGET,
+                                        syncFolder,
+                                        session,
+                                        false,
+                                        true);
+                        savedOpIndex = idx[0];
+                        operationIndex = idx[1];
                         batch.clear();
                         batchBytes = 0;
                         flushSharedTextBetweenOperations();
@@ -2322,95 +2361,19 @@ public class SyncCoordinator {
 
                 // Flush remaining small files as one final batch
                 if (!batch.isEmpty()) {
-                    int batchStartOpIdx = savedOpIndex + 1;
-                    BatchTransferSession.BatchProgressCallback batchCallback =
-                            (entryIdx, total, relPath) -> {
-                                int current = batchStartOpIdx + entryIdx;
-                                eventBus.post(
-                                        new SyncEvent.LogEvent(
-                                                "Batch ["
-                                                        + current
-                                                        + "/"
-                                                        + totalOperationsRef[0]
-                                                        + "]: "
-                                                        + relPath));
-                                eventBus.post(
-                                        new SyncEvent.FileProgressEvent(
-                                                current, totalOperationsRef[0], relPath));
-                            };
-                    int inBatch = batch.size();
-                    long batchStart = System.currentTimeMillis();
-                    boolean ok =
-                            protocol.sendBatch(batch, BATCH_BYTE_TARGET, batchCallback, syncFolder);
-                    long batchMs = System.currentTimeMillis() - batchStart;
-                    if (!ok) {
-                        eventBus.post(
-                                new SyncEvent.ErrorEvent(
-                                        "Final batch transfer failed; falling back to per-file"));
-                        boolean anyFileFailed = false;
-                        for (int i = 0; i < batch.size(); i++) {
-                            if (session.cancelRequested.get()) {
-                                eventBus.post(
-                                        new SyncEvent.LogEvent(
-                                                "Sync cancelled - stopping fallback transfers"));
-                                break;
-                            }
-                            String rp = (String) batch.get(i)[1];
-                            String rpMd5 =
-                                    batch.get(i).length > 2 ? (String) batch.get(i)[2] : null;
-                            savedOpIndex++;
-                            operationIndex++;
-                            long t0 = System.currentTimeMillis();
-                            boolean sentOk = false;
-                            try {
-                                sentOk = protocol.sendFile(syncFolder, rp, rpMd5);
-                            } catch (IOException | IllegalStateException e) {
-                                if (session.cancelRequested.get()) {
-                                    break;
-                                }
-                                anyFileFailed = true;
-                                eventBus.post(
-                                        new SyncEvent.ErrorEvent(
-                                                "Failed to send file (fallback) "
-                                                        + rp
-                                                        + ": "
-                                                        + e.getMessage()));
-                            }
-                            long ms = System.currentTimeMillis() - t0;
-                            if (sentOk) {
-                                touchHeartbeat();
-                                eventBus.post(
-                                        new SyncEvent.LogEvent(
-                                                "Syncing (fallback) ["
-                                                        + savedOpIndex
-                                                        + "/"
-                                                        + totalOperationsRef[0]
-                                                        + "]: "
-                                                        + rp
-                                                        + String.format(" [%dms]", ms)));
-                            }
-                            eventBus.post(
-                                    new SyncEvent.FileProgressEvent(
-                                            savedOpIndex, totalOperationsRef[0], rp));
-                        }
-                        if (anyFileFailed) {
-                            protocol.sendTransferCancel();
-                            throw new IOException(
-                                    "Failed to transfer "
-                                            + inBatch
-                                            + " file(s) after fallback attempts");
-                        }
-                    } else {
-                        savedOpIndex = batchStartOpIdx + inBatch - 1;
-                        operationIndex = savedOpIndex;
-                        eventBus.post(
-                                new SyncEvent.LogEvent(
-                                        "Batch of "
-                                                + inBatch
-                                                + " files sent in "
-                                                + batchMs
-                                                + "ms"));
-                    }
+                    int[] idx =
+                            flushBatch(
+                                    batch,
+                                    savedOpIndex,
+                                    operationIndex,
+                                    totalOperationsRef[0],
+                                    BATCH_BYTE_TARGET,
+                                    syncFolder,
+                                    session,
+                                    true,
+                                    false);
+                    savedOpIndex = idx[0];
+                    operationIndex = idx[1];
                     batch.clear();
                     batchBytes = 0;
                     flushSharedTextBetweenOperations();
@@ -2772,13 +2735,9 @@ public class SyncCoordinator {
         long fileSize = file.length();
         int sampleSize = (int) Math.min(fileSize, 4096);
         byte[] sample = new byte[sampleSize];
-        int totalRead = 0;
+        int totalRead;
         try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
-            while (totalRead < sampleSize) {
-                int read = fis.read(sample, totalRead, sampleSize - totalRead);
-                if (read == -1) break;
-                totalRead += read;
-            }
+            totalRead = IoUtil.readFully(fis, sample, 0, sampleSize);
         }
         return totalRead < fileSize ? Arrays.copyOf(sample, totalRead) : sample;
     }
