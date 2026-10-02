@@ -1,23 +1,11 @@
 package com.filesync.sync;
 
 import com.filesync.delta.FileSignatures;
-import com.filesync.delta.HashUtil;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Sender-side persistent cache of block signatures received from the peer, keyed by the receiver
@@ -42,15 +30,15 @@ import java.util.Set;
  * cached signatures still describe them.
  *
  * <p>Cache files live under the shared cache directory ({@link CacheLocations#cacheDir()}, outside
- * the sync folder so the manifest scan never sees them), one JSON file per sync folder.
+ * the sync folder so the manifest scan never sees them), one JSON file per sync folder. Storage is
+ * the {@link AbstractJsonStore} temp-file + move scheme shared with {@link SyncStateStore}.
  */
-public final class SignatureCache {
+public final class SignatureCache extends AbstractJsonStore<SignatureCache.CacheEntry> {
 
     private static final int SCHEMA_VERSION = 1;
     private static final String CACHE_FILE_PREFIX = "sigcache-";
     private static final String CACHE_FILE_SUFFIX = ".json";
 
-    private static final Gson GSON = new GsonBuilder().create();
     private static final TypeToken<Map<String, CacheEntry>> ENTRY_MAP_TYPE =
             new TypeToken<Map<String, CacheEntry>>() {};
 
@@ -59,31 +47,22 @@ public final class SignatureCache {
      * {@code rejected} entry (a BASE_STALE notification arrived for exactly this identity) carries
      * no payload when it was created by {@link #markRejected} rather than {@link #store}.
      */
-    private static final class CacheEntry {
+    /** Package-private so it can name the {@link AbstractJsonStore} supertype's type argument. */
+    static final class CacheEntry {
         long remoteSize;
         String remoteMd5;
         String signaturesBase64;
         boolean rejected;
     }
 
-    private final File cacheFile;
-    private final Map<String, CacheEntry> entries = new HashMap<>();
-    private boolean dirty = false;
-
     /** Open (or start) the cache for the given sync folder. */
     public static SignatureCache forFolder(File syncFolder) {
-        String folderKey =
-                HashUtil.md5Hex(syncFolder.getAbsolutePath().getBytes(StandardCharsets.UTF_8));
-        return new SignatureCache(
-                new File(
-                        CacheLocations.cacheDir(),
-                        CACHE_FILE_PREFIX + folderKey + CACHE_FILE_SUFFIX));
+        return new SignatureCache(cacheFileFor(syncFolder, CACHE_FILE_PREFIX, CACHE_FILE_SUFFIX));
     }
 
     /** Open (or start) the cache backed by the given file. */
     SignatureCache(File cacheFile) {
-        this.cacheFile = cacheFile;
-        load();
+        super(cacheFile, ENTRY_MAP_TYPE, SCHEMA_VERSION, "signatures");
     }
 
     /**
@@ -96,7 +75,7 @@ public final class SignatureCache {
         if (remote == null || remote.getMd5() == null || remote.getMd5().isEmpty()) {
             return null;
         }
-        CacheEntry entry = entries.get(path);
+        CacheEntry entry = entries().get(path);
         if (entry == null || entry.signaturesBase64 == null || entry.rejected) {
             return null;
         }
@@ -121,15 +100,8 @@ public final class SignatureCache {
         entry.remoteSize = remote.getSize();
         entry.remoteMd5 = remote.getMd5();
         entry.signaturesBase64 = Base64.getEncoder().encodeToString(signatures.toBytes());
-        entries.put(path, entry);
-        dirty = true;
-    }
-
-    /** Drop entries for paths outside {@code keepPaths} (e.g. files deleted on the receiver). */
-    public synchronized void prune(Set<String> keepPaths) {
-        if (entries.keySet().retainAll(keepPaths)) {
-            dirty = true;
-        }
+        entries().put(path, entry);
+        markDirty();
     }
 
     /**
@@ -139,15 +111,15 @@ public final class SignatureCache {
      * overwrites the entry.
      */
     public synchronized void markRejected(String path, long remoteSize, String remoteMd5) {
-        CacheEntry entry = entries.get(path);
+        CacheEntry entry = entries().get(path);
         if (entry == null) {
             entry = new CacheEntry();
-            entries.put(path, entry);
+            entries().put(path, entry);
         }
         entry.remoteSize = remoteSize;
         entry.remoteMd5 = remoteMd5;
         entry.rejected = true;
-        dirty = true;
+        markDirty();
     }
 
     /**
@@ -157,75 +129,11 @@ public final class SignatureCache {
         if (remote == null || remote.getMd5() == null || remote.getMd5().isEmpty()) {
             return false;
         }
-        CacheEntry entry = entries.get(path);
+        CacheEntry entry = entries().get(path);
         if (entry == null || !entry.rejected) {
             return false;
         }
         return identityMatches(entry, remote.getSize(), remote.getMd5());
-    }
-
-    /** Persist to disk if anything changed since load. Best-effort: IO errors are ignored. */
-    public synchronized void flush() {
-        if (!dirty) {
-            return;
-        }
-        Path path = cacheFile.toPath();
-        Path temp = null;
-        try {
-            Path parent = path.toAbsolutePath().getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            JsonObject root = new JsonObject();
-            root.addProperty("schemaVersion", SCHEMA_VERSION);
-            root.add("entries", GSON.toJsonTree(entries, ENTRY_MAP_TYPE.getType()));
-            // Write beside the target and move it into place: a crash mid-write would otherwise
-            // leave a truncated JSON that the next load discards.
-            temp = Files.createTempFile(parent, "signatures", ".tmp");
-            Files.writeString(temp, GSON.toJson(root));
-            try {
-                Files.move(
-                        temp,
-                        path,
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                // Some filesystems (and some network shares) cannot move atomically.
-                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
-            }
-            dirty = false;
-        } catch (IOException e) {
-            // Best effort: a failed cache write only costs a signature exchange next time.
-        } finally {
-            if (temp != null) {
-                try {
-                    Files.deleteIfExists(temp);
-                } catch (IOException ignored) {
-                    // The move already consumed it, or nothing can be done about it.
-                }
-            }
-        }
-    }
-
-    private void load() {
-        if (!cacheFile.isFile()) {
-            return;
-        }
-        try {
-            String json = Files.readString(cacheFile.toPath());
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            if (!root.has("schemaVersion")
-                    || root.get("schemaVersion").getAsInt() != SCHEMA_VERSION) {
-                return; // incompatible or from another version: start fresh
-            }
-            Map<String, CacheEntry> loaded =
-                    GSON.fromJson(root.get("entries"), ENTRY_MAP_TYPE.getType());
-            if (loaded != null) {
-                entries.putAll(loaded);
-            }
-        } catch (RuntimeException | IOException e) {
-            // Corrupt cache: start empty rather than failing the sync.
-        }
     }
 
     /**
