@@ -37,6 +37,7 @@ AGENTS.md
 
 # ZCode
 .zcode/
+.zcodeignore
 
 # Build
 *.class
