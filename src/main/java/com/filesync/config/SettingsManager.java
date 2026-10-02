@@ -425,18 +425,18 @@ public class SettingsManager {
 
     /** Get the index of a stop bits value in STOP_BITS_VALUES array */
     public static int getStopBitsIndex(int value) {
-        for (int i = 0; i < STOP_BITS_VALUES.length; i++) {
-            if (STOP_BITS_VALUES[i] == value) {
-                return i;
-            }
-        }
-        return 0;
+        return indexOf(STOP_BITS_VALUES, value);
     }
 
     /** Get the index of a parity value in PARITY_VALUES array */
     public static int getParityIndex(int value) {
-        for (int i = 0; i < PARITY_VALUES.length; i++) {
-            if (PARITY_VALUES[i] == value) {
+        return indexOf(PARITY_VALUES, value);
+    }
+
+    /** Return the index of {@code value} in {@code values}, or 0 when it is not present. */
+    private static int indexOf(int[] values, int value) {
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == value) {
                 return i;
             }
         }

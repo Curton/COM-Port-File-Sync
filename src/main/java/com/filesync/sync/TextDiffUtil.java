@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.ToIntFunction;
 
 /**
  * Utility for computing line-by-line differences between two text files, similar to git diff. Uses
@@ -793,37 +794,33 @@ public final class TextDiffUtil {
 
     /** Find the local line number where the hunk at the given index starts. */
     private static int findLocalStartLine(List<DiffLine> allLines, int idx) {
-        for (int i = idx; i < allLines.size(); i++) {
-            DiffLine line = allLines.get(i);
-            if (line.getLocalLineNumber() > 0) {
-                return line.getLocalLineNumber();
-            }
-        }
-        // No subsequent line with a local line number — scan backward from idx
-        // to find the last context/removed line's local position
-        for (int i = idx - 1; i >= 0; i--) {
-            DiffLine line = allLines.get(i);
-            if (line.getLocalLineNumber() > 0) {
-                return line.getLocalLineNumber() + 1;
-            }
-        }
-        return 1;
+        return findStartLine(allLines, idx, DiffLine::getLocalLineNumber);
     }
 
     /** Find the remote line number where the hunk at the given index starts. */
     private static int findRemoteStartLine(List<DiffLine> allLines, int idx) {
+        return findStartLine(allLines, idx, DiffLine::getRemoteLineNumber);
+    }
+
+    /**
+     * Find the side-specific line number where the hunk at the given index starts: the first line
+     * at or after {@code idx} carrying a {@code lineNumber} value, or — when none follows — one
+     * past the last numbered line before {@code idx}, or 1 for a hunk at the very top.
+     */
+    private static int findStartLine(
+            List<DiffLine> allLines, int idx, ToIntFunction<DiffLine> lineNumber) {
         for (int i = idx; i < allLines.size(); i++) {
-            DiffLine line = allLines.get(i);
-            if (line.getRemoteLineNumber() > 0) {
-                return line.getRemoteLineNumber();
+            int n = lineNumber.applyAsInt(allLines.get(i));
+            if (n > 0) {
+                return n;
             }
         }
-        // No subsequent line with a remote line number — scan backward from idx
-        // to find the last context/added line's remote position
+        // No subsequent numbered line — scan backward from idx to find the last numbered line's
+        // position; the hunk starts right after it.
         for (int i = idx - 1; i >= 0; i--) {
-            DiffLine line = allLines.get(i);
-            if (line.getRemoteLineNumber() > 0) {
-                return line.getRemoteLineNumber() + 1;
+            int n = lineNumber.applyAsInt(allLines.get(i));
+            if (n > 0) {
+                return n + 1;
             }
         }
         return 1;

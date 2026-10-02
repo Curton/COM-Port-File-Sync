@@ -311,8 +311,10 @@ public final class SyncPreviewPlan {
                         .mapToLong(FileChangeDetector.FileInfo::getSize)
                         .sum();
 
-        Set<String> filteredDeltaCandidates = filterDeltaCandidates(filteredFilesToTransfer);
-        Set<String> filteredAppendResumable = filterAppendResumable(filteredFilesToTransfer);
+        Set<String> filteredDeltaCandidates =
+                filterPathsByMembership(filteredFilesToTransfer, deltaCandidatePaths);
+        Set<String> filteredAppendResumable =
+                filterPathsByMembership(filteredFilesToTransfer, appendResumablePaths);
 
         return new SyncPreviewPlan(
                 filteredFilesToTransfer,
@@ -348,28 +350,19 @@ public final class SyncPreviewPlan {
         return result;
     }
 
-    /** Delta candidates that survived the selection filter (and were not dropped as conflicts). */
-    private Set<String> filterDeltaCandidates(List<FileChangeDetector.FileInfo> filteredFiles) {
-        if (deltaCandidatePaths.isEmpty()) {
+    /**
+     * Paths that survived the selection filter (and were not dropped as conflicts), restricted to
+     * the plan's {@code memberPaths} — the delta candidates on one call, the exempted
+     * append-resumable prefix conflicts on the other.
+     */
+    private Set<String> filterPathsByMembership(
+            List<FileChangeDetector.FileInfo> filteredFiles, Set<String> memberPaths) {
+        if (memberPaths.isEmpty()) {
             return Collections.emptySet();
         }
         Set<String> result = new HashSet<>();
         for (FileChangeDetector.FileInfo fi : filteredFiles) {
-            if (deltaCandidatePaths.contains(fi.getPath())) {
-                result.add(fi.getPath());
-            }
-        }
-        return result;
-    }
-
-    /** Exempted prefix conflicts that survived the selection filter. */
-    private Set<String> filterAppendResumable(List<FileChangeDetector.FileInfo> filteredFiles) {
-        if (appendResumablePaths.isEmpty()) {
-            return Collections.emptySet();
-        }
-        Set<String> result = new HashSet<>();
-        for (FileChangeDetector.FileInfo fi : filteredFiles) {
-            if (appendResumablePaths.contains(fi.getPath())) {
+            if (memberPaths.contains(fi.getPath())) {
                 result.add(fi.getPath());
             }
         }
