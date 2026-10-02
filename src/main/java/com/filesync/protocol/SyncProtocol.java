@@ -1481,11 +1481,13 @@ public class SyncProtocol {
     public static final String PARTIAL_SUFFIX = ".filesync-part";
 
     /**
-     * Suffix of the receive-side staging file holding a delta reconstruction in progress. Same
-     * hidden-dot prefix convention as {@link #PARTIAL_SUFFIX}; the stage is renamed over the target
-     * only after the reconstruction verifies, and deleted on every failure path.
+     * Suffix of the receive-side staging file holding a delta reconstruction in progress ({@code
+     * ".<name>" + this}), written next to the target and renamed over it only after the
+     * reconstruction verifies. The manifest scan skips these (see {@link
+     * com.filesync.sync.FileChangeDetector}) so a stage left behind by a crash is never synced as
+     * user content; every failure path here deletes it.
      */
-    private static final String DELTA_STAGE_SUFFIX = ".filesync-delta";
+    public static final String DELTA_STAGE_SUFFIX = ".filesync-delta";
 
     /**
      * Receive file data and save to directory. Payloads above {@link

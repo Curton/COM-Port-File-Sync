@@ -162,6 +162,23 @@ class FileChangeDetectorTest {
     }
 
     @Test
+    void manifestSkipsDeltaReconstructionStagingFiles() throws IOException {
+        Files.writeString(
+                tempDir.resolve(".big.bin" + SyncProtocol.DELTA_STAGE_SUFFIX), "stage bytes");
+        Files.writeString(tempDir.resolve("real.txt"), "real");
+
+        FileChangeDetector.FileManifest manifest =
+                FileChangeDetector.generateManifest(
+                        tempDir.toFile(),
+                        FileChangeDetector.ManifestGenerationOptions.builder().build());
+
+        assertNull(
+                manifest.getFiles().get(".big.bin" + SyncProtocol.DELTA_STAGE_SUFFIX),
+                "A crash-left delta staging file must never be synced as user content");
+        assertNotNull(manifest.getFiles().get("real.txt"));
+    }
+
+    @Test
     void reusesCachedHashWhenMetadataUnchanged() throws IOException {
         Path filePath = tempDir.resolve("sample.txt");
         Files.writeString(filePath, "hello world");
