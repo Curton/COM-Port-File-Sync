@@ -64,13 +64,22 @@ public final class CliMain {
         out.println("Usage: java -jar com-file-sync.jar <mode> [options]");
         out.println();
         out.println("Runs one headless sync session over the serial link and exits with a code.");
-        out.println("Without arguments the Swing GUI starts as before.");
+        out.println("Without arguments the Swing GUI starts as before. Every mode needs the peer");
+        out.println("up as the opposite side: send and preview talk to a connected receiver (the");
+        out.println("GUI in receiver direction works too), receive waits for a sender to start.");
         out.println();
         out.println("Modes:");
-        out.println("  send      Connect, push a full sync as sender, disconnect when it ends.");
-        out.println("  receive   Connect, serve exactly one incoming sync session, disconnect.");
+        out.println("  send      Push a full sync as sender, disconnect when the session ends.");
         out.println(
-                "  preview   Connect, compute and print the sync plan (no transfer), disconnect.");
+                "  receive   Serve exactly one incoming sync session, then disconnect. Exits 1");
+        out.println(
+                "            if the peer hangs up before a session starts (e.g. after preview).");
+        out.println(
+                "  preview   Sender-side dry run: fetch the peer's manifest and print what send");
+        out.println(
+                "            would transfer/delete/rename. Nothing is sent, so only this side");
+        out.println(
+                "            runs a command; the peer just answers the manifest request.");
         out.println();
         out.println("Options:");
         out.println("  --port <name>         Serial port to open, e.g. COM3 (required)");
