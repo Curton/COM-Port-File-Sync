@@ -81,8 +81,7 @@ public class FileDropService {
             eventBus.post(new SyncEvent.LogEvent("Dropped file sent: " + file.getName()));
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (TransferCancelledException e) {
-            // A peer cancel is expected; log it benignly instead of raising an error.
-            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+            logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
@@ -162,8 +161,7 @@ public class FileDropService {
                             "Dropped file received: " + savedFile.getAbsolutePath()));
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (TransferCancelledException e) {
-            // A peer cancel is expected; log it benignly instead of raising an error.
-            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+            logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
             eventBus.post(
@@ -175,6 +173,11 @@ public class FileDropService {
                 sharedTextFlushCallback.run();
             }
         }
+    }
+
+    /** A peer cancel is an expected outcome; log it benignly instead of raising an error. */
+    private void logPeerCancel(TransferCancelledException e) {
+        eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
     }
 
     public boolean isTransferInProgress() {

@@ -88,8 +88,7 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                     return;
                 }
             } catch (TransferCancelledException e) {
-                // A peer cancel is expected; log it benignly instead of raising an error.
-                eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+                logPeerCancel(e);
                 return;
             } catch (IOException e) {
                 eventBus.post(
@@ -140,8 +139,7 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
         } catch (TransferCancelledException e) {
-            // A peer cancel is expected; log it benignly instead of raising an error.
-            eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+            logPeerCancel(e);
         } catch (IOException e) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Failed to receive shared text: " + e.getMessage()));
@@ -151,6 +149,11 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
             // refresh here or the buttons stay gray after "Shared text received".
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         }
+    }
+
+    /** A peer cancel is an expected outcome; log it benignly instead of raising an error. */
+    private void logPeerCancel(TransferCancelledException e) {
+        eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
     }
 
     public void onSyncIdle() {
