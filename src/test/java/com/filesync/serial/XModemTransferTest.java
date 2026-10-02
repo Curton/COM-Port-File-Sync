@@ -205,6 +205,53 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
+    void sendDrainsInFlightHandshakeCharWithoutResendingBlock() throws IOException {
+        // A straggler 'C' still in flight when the handshake completes lands ~10ms later, inside
+        // the drain's quiet window, so it must be cleared there: the first block is written
+        // exactly once.
+        StagedTestSerialPortManager serialPort =
+                new StagedTestSerialPortManager(
+                        new byte[] {XModemTransfer.C},
+                        new byte[] {
+                            XModemTransfer.C, // straggler handshake char, drained
+                            XModemTransfer.ACK, // consumed by drainExtraHandshakeChars
+                            XModemTransfer.ACK, // consumed by sendBlock's stale-char drain
+                            XModemTransfer.ACK, // acknowledges the data block
+                            XModemTransfer.ACK // acknowledges the EOT
+                        },
+                        10);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(new byte[10]), "an in-flight straggler 'C' must be drained");
+
+        assertEquals(1, countDataPackets(serialPort.getWrites()), "the block must not be re-sent");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendRecoversViaBlockResendWhenHandshakeCharOutrunsDrainWindow() throws IOException {
+        // A straggler 'C' that lands after the drain window (~100ms here) is read at the block's
+        // ACK position instead; that must cost exactly one block re-send, not the session — the
+        // receiver ACKs duplicate blocks.
+        StagedTestSerialPortManager serialPort =
+                new StagedTestSerialPortManager(
+                        new byte[] {XModemTransfer.C},
+                        new byte[] {
+                            XModemTransfer.C, // straggler read at the ACK position, triggers retry
+                            XModemTransfer.ACK, // consumed by the retry's stale-char drain
+                            XModemTransfer.ACK, // acknowledges the re-sent block
+                            XModemTransfer.ACK // acknowledges the EOT
+                        },
+                        100);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(new byte[10]), "a late straggler 'C' must not fail the session");
+
+        assertEquals(2, countDataPackets(serialPort.getWrites()), "the miss costs one re-send");
+    }
+
+    @Test
+    @Timeout(20)
     void sendSplitsShortTailInto128ByteBlocksInsteadOfOnePadded1KBlock() throws IOException {
         // 4300 bytes = one 4K block + a 204-byte tail. The tail used to ride in a single 1K
         // block padded with 820 CTRL-Z bytes; it must now walk out as two 128-byte blocks so
@@ -479,6 +526,17 @@ class XModemTransferTest {
         int count = 0;
         for (byte[] write : writes) {
             if (Arrays.equals(write, expected)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Count block packet writes (header + blockNum + complement + data + CRC), i.e. re-sends. */
+    private static int countDataPackets(List<byte[]> writes) {
+        int count = 0;
+        for (byte[] write : writes) {
+            if (write.length > 4) {
                 count++;
             }
         }
@@ -843,6 +901,60 @@ class XModemTransferTest {
         @Override
         public void clearInputBuffer() throws IOException {
             // Intentionally ignored in test.
+        }
+    }
+
+    /**
+     * Port manager that records writes and serves input in two stages: the leading bytes are
+     * visible immediately, the rest only after a delay, so a straggler handshake char can be
+     * scripted to land mid-drain (inside the quiet window) or after the drain window.
+     */
+    private static final class StagedTestSerialPortManager extends SerialPortManager {
+        private final ByteArrayInputStream immediate;
+        private final ByteArrayInputStream delayed;
+        private final long delayedAtMillis;
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+
+        private StagedTestSerialPortManager(byte[] immediate, byte[] delayed, long delayMillis) {
+            this.immediate = new ByteArrayInputStream(immediate);
+            this.delayed = new ByteArrayInputStream(delayed);
+            this.delayedAtMillis = System.currentTimeMillis() + delayMillis;
+        }
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            int count = immediate.available();
+            if (System.currentTimeMillis() >= delayedAtMillis) {
+                count += delayed.available();
+            }
+            return count;
+        }
+
+        @Override
+        public int read() {
+            if (immediate.available() > 0) {
+                return immediate.read();
+            }
+            return delayed.read();
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
         }
     }
 }
