@@ -312,7 +312,13 @@ class DeltaSyncProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.sendFileAppend(
-                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100L, 103L, "def", null));
+                                        "a.bin",
+                                        new byte[] {1, 2, 3},
+                                        0L,
+                                        100L,
+                                        103L,
+                                        "def",
+                                        null));
         assertTrue(thrown.getMessage().contains("Failed to send file append"));
         assertEquals(
                 3,
@@ -329,7 +335,8 @@ class DeltaSyncProtocolTest {
     }
 
     @Test
-    void sendFileAppend_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt() throws IOException {
+    void sendFileAppend_xmodemPhaseFailure_sendsCancelAndThrowsAfterOneAttempt()
+            throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         serial.feedLine("[[SYNC:ACK]]"); // ACK for the first attempt's waitForCommand
         // Peer rejects the block with CAN -> xmodem.send returns false (XMODEM-phase failure).
@@ -345,7 +352,13 @@ class DeltaSyncProtocolTest {
                         IOException.class,
                         () ->
                                 protocol.sendFileAppend(
-                                        "a.bin", new byte[] {1, 2, 3}, 0L, 100L, 103L, "def", null));
+                                        "a.bin",
+                                        new byte[] {1, 2, 3},
+                                        0L,
+                                        100L,
+                                        103L,
+                                        "def",
+                                        null));
         assertTrue(
                 thrown instanceof TransferCancelledException,
                 "a CAN response is a deliberate peer cancel: " + thrown.getMessage());
@@ -382,9 +395,9 @@ class DeltaSyncProtocolTest {
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("FILE_DATA:a.bin")),
                 "must announce FILE_DATA with the path");
         assertTrue(
-                serial.getWrittenLines().stream().anyMatch(l -> l.matches(".*:5:false:\\d+:\\]\\]")),
-                "frame must end with length:compressed:lastModified: "
-                        + serial.getWrittenLines());
+                serial.getWrittenLines().stream()
+                        .anyMatch(l -> l.matches(".*:5:false:\\d+:\\]\\]")),
+                "frame must end with length:compressed:lastModified: " + serial.getWrittenLines());
         assertFalse(protocol.isXmodemInProgress(), "xmodem flag must be reset after send");
         // For this small payload, compressIfBeneficial leaves it uncompressed.
         assertFalse(compressed);
