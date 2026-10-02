@@ -419,22 +419,12 @@ public class SyncProtocol {
     /** Receive manifest data with optional expected payload length. */
     public FileChangeDetector.FileManifest receiveManifest(int expectedCompressedLength)
             throws IOException {
-        xmodemInProgress.set(true);
-        byte[] compressed;
-        try {
-            compressed = xmodem.receive(expectedCompressedLength);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (compressed == null) {
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "Manifest transfer cancelled by sender",
-                    "Failed to receive manifest data (" + detail + ")");
-        }
+        byte[] compressed =
+                receiveXmodemPayload(
+                        expectedCompressedLength,
+                        false,
+                        "Manifest transfer cancelled by sender",
+                        "Failed to receive manifest data");
 
         byte[] data = CompressionUtil.decompress(compressed);
         String json = new String(data, StandardCharsets.UTF_8);
@@ -466,22 +456,12 @@ public class SyncProtocol {
 
     /** Receive and deserialize the signature-set payload sent by the receiver. */
     public SignatureSet receiveDeltaSignatures(int expectedCompressedLength) throws IOException {
-        xmodemInProgress.set(true);
-        byte[] compressed;
-        try {
-            compressed = xmodem.receive(expectedCompressedLength);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (compressed == null) {
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "Delta signature transfer cancelled by sender",
-                    "Failed to receive delta signatures (" + detail + ")");
-        }
+        byte[] compressed =
+                receiveXmodemPayload(
+                        expectedCompressedLength,
+                        false,
+                        "Delta signature transfer cancelled by sender",
+                        "Failed to receive delta signatures");
         byte[] data = CompressionUtil.decompress(compressed);
         return SignatureSet.fromBytes(data);
     }
@@ -741,26 +721,12 @@ public class SyncProtocol {
             String sourceMd5,
             String manifestMd5)
             throws IOException {
-        xmodemInProgress.set(true);
-        byte[] payload;
-        try {
-            payload = xmodem.receive(expectedSize);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (payload == null) {
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException ignored) {
-            }
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "Delta transfer of " + relativePath + " cancelled by sender",
-                    "Failed to receive file delta for " + relativePath + " (" + detail + ")");
-        }
+        byte[] payload =
+                receiveXmodemPayload(
+                        expectedSize,
+                        true,
+                        "Delta transfer of " + relativePath + " cancelled by sender",
+                        "Failed to receive file delta for " + relativePath);
         validateReceivedSize("file delta", relativePath, expectedSize, payload);
 
         // The delta itself stays in memory (it is the wire payload, bounded by expectedSize); the
@@ -941,26 +907,12 @@ public class SyncProtocol {
             return;
         }
 
-        xmodemInProgress.set(true);
-        byte[] payload;
-        try {
-            payload = xmodem.receive(expectedSize);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (payload == null) {
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException ignored) {
-            }
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "Append transfer of " + relativePath + " cancelled by sender",
-                    "Failed to receive file append for " + relativePath + " (" + detail + ")");
-        }
+        byte[] payload =
+                receiveXmodemPayload(
+                        expectedSize,
+                        true,
+                        "Append transfer of " + relativePath + " cancelled by sender",
+                        "Failed to receive file append for " + relativePath);
         applyReceivedAppend(
                 existing,
                 relativePath,
@@ -1601,29 +1553,12 @@ public class SyncProtocol {
             long lastModified,
             String manifestMd5)
             throws IOException {
-        xmodemInProgress.set(true);
-        byte[] data;
-        try {
-            data = xmodem.receive(expectedSize);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (data == null) {
-            // Best-effort recovery: clear any stale data from the input buffer
-            try {
-                serialPort.clearInputBuffer();
-            } catch (IOException e) {
-                // Ignore cleanup failure; we are already reporting a higher-level error
-            }
-
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "File transfer of " + relativePath + " cancelled by sender",
-                    "Failed to receive file data for " + relativePath + " (" + detail + ")");
-        }
+        byte[] data =
+                receiveXmodemPayload(
+                        expectedSize,
+                        true,
+                        "File transfer of " + relativePath + " cancelled by sender",
+                        "Failed to receive file data for " + relativePath);
 
         // Verify sender-reported size before any transformation or disk write
         validateReceivedSize("file", relativePath, expectedSize, data);
@@ -1792,22 +1727,12 @@ public class SyncProtocol {
 
         String fileName = sanitizeDropFileName(originalFileName);
         File targetFile = resolveDropFileDestination(downloadsDir, fileName);
-        xmodemInProgress.set(true);
-        byte[] data;
-        try {
-            data = xmodem.receive(expectedSize);
-        } finally {
-            xmodemInProgress.set(false);
-        }
-        if (data == null) {
-            String detail = xmodem.getLastErrorMessage();
-            if (detail == null || detail.isEmpty()) {
-                detail = "no detailed XMODEM error available";
-            }
-            throw xmodemReceiveFailure(
-                    "Dropped file transfer of " + fileName + " cancelled by sender",
-                    "Failed to receive dropped file " + fileName + " (" + detail + ")");
-        }
+        byte[] data =
+                receiveXmodemPayload(
+                        expectedSize,
+                        false,
+                        "Dropped file transfer of " + fileName + " cancelled by sender",
+                        "Failed to receive dropped file " + fileName);
 
         // Verify sender-reported size before any transformation or disk write
         try {
@@ -1945,22 +1870,11 @@ public class SyncProtocol {
      */
     public byte[] receiveFileContentViaXmodem(int expectedSize) throws IOException {
         sendAck();
-        xmodemInProgress.set(true);
-        try {
-            byte[] data = xmodem.receive(expectedSize);
-            if (data == null) {
-                String detail = xmodem.getLastErrorMessage();
-                if (detail == null || detail.isEmpty()) {
-                    detail = "no detailed XMODEM error available";
-                }
-                throw xmodemReceiveFailure(
-                        "File content transfer cancelled by sender",
-                        "Failed to receive file content via XMODEM (" + detail + ")");
-            }
-            return data;
-        } finally {
-            xmodemInProgress.set(false);
-        }
+        return receiveXmodemPayload(
+                expectedSize,
+                false,
+                "File content transfer cancelled by sender",
+                "Failed to receive file content via XMODEM");
     }
 
     /**
@@ -2017,6 +1931,51 @@ public class SyncProtocol {
     /** Send error message */
     public void sendError(String message) throws IOException {
         sendCommand(CMD_ERROR, message);
+    }
+
+    /**
+     * Receive one XMODEM payload under the shared in-progress guard, translating a failed transfer
+     * into the standard cancel/failure pair built by {@link #xmodemReceiveFailure}: a peer cancel
+     * surfaces as a benign {@link TransferCancelledException}, anything else as a plain
+     * communication-failure IOException.
+     *
+     * @param expectedSize the announced payload size, or -1 when unknown
+     * @param clearInputBufferOnFailure whether to drain stale bytes from the serial input buffer
+     *     before reporting, so they cannot corrupt the next command frame
+     * @param cancelMessage message used when the peer cancelled the transfer
+     * @param failureMessagePrefix prefix of the communication-failure message; the XMODEM error
+     *     detail is appended in parentheses
+     */
+    private byte[] receiveXmodemPayload(
+            int expectedSize,
+            boolean clearInputBufferOnFailure,
+            String cancelMessage,
+            String failureMessagePrefix)
+            throws IOException {
+        xmodemInProgress.set(true);
+        byte[] data;
+        try {
+            data = xmodem.receive(expectedSize);
+        } finally {
+            xmodemInProgress.set(false);
+        }
+        if (data == null) {
+            if (clearInputBufferOnFailure) {
+                // Best-effort recovery: clear any stale bytes so they cannot corrupt the next
+                // command frame.
+                try {
+                    serialPort.clearInputBuffer();
+                } catch (IOException ignored) {
+                    // A cleanup failure is not worth hiding the transfer failure behind.
+                }
+            }
+            String detail = xmodem.getLastErrorMessage();
+            if (detail == null || detail.isEmpty()) {
+                detail = "no detailed XMODEM error available";
+            }
+            throw xmodemReceiveFailure(cancelMessage, failureMessagePrefix + " (" + detail + ")");
+        }
+        return data;
     }
 
     /**
