@@ -1,5 +1,6 @@
 package com.filesync.delta;
 
+import com.filesync.util.IoUtil;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -207,14 +208,7 @@ public final class DeltaEncoder {
 
     /** Read exactly {@code len} bytes into {@code buf[off..off+len)} or fail. */
     private static void readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
-        int done = 0;
-        while (done < len) {
-            int read = in.read(buf, off + done, len - done);
-            if (read < 0) {
-                throw new IOException("Source ended early while delta-encoding");
-            }
-            done += read;
-        }
+        IoUtil.readFullyOrThrow(in, buf, off, len, "Source ended early while delta-encoding");
     }
 
     /** Pump exactly {@code count} remaining source bytes into the literal sink. */

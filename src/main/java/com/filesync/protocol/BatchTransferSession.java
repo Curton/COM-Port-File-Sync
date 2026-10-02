@@ -1,8 +1,10 @@
 package com.filesync.protocol;
 
+import com.filesync.delta.HashUtil;
 import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.FileChangeDetector;
 import com.filesync.sync.SafePaths;
+import com.filesync.util.IoUtil;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -51,8 +53,6 @@ public class BatchTransferSession {
     private static final int MAX_PATH_LENGTH = 4096;
 
     private static final int MD5_BYTES = 16;
-
-    private static final char[] HEX = "0123456789abcdef".toCharArray();
 
     private BatchTransferSession() {}
 
@@ -300,7 +300,7 @@ public class BatchTransferSession {
             if (hasMd5) {
                 byte[] md5Buf = new byte[MD5_BYTES];
                 readFully(in, md5Buf);
-                manifestMd5 = encodeHex(md5Buf);
+                manifestMd5 = HashUtil.toHex(md5Buf);
             }
 
             // LEN
@@ -438,21 +438,8 @@ public class BatchTransferSession {
         return out;
     }
 
-    private static String encodeHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(HEX[(b >> 4) & 0xF]).append(HEX[b & 0xF]);
-        }
-        return sb.toString();
-    }
-
     private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {
-        int total = 0;
-        while (total < buf.length) {
-            int r = in.read(buf, total, buf.length - total);
-            if (r == -1) throw new IOException("Unexpected end of batch stream");
-            total += r;
-        }
+        IoUtil.readFullyOrThrow(in, buf, 0, buf.length, "Unexpected end of batch stream");
     }
 
     /** Callback for batch decode progress. */

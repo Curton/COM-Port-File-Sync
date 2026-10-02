@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import com.filesync.delta.HashUtil;
 import com.filesync.protocol.SyncProtocol;
+import com.filesync.util.IoUtil;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
@@ -11,12 +12,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.DosFileAttributes;
 import java.security.MessageDigest;
@@ -1054,7 +1053,7 @@ public class FileChangeDetector {
             try (FileInputStream fis = new FileInputStream(file)) {
                 // Read a sample for binary detection.
                 byte[] sample = new byte[BINARY_SAMPLE_SIZE];
-                int sampleRead = readFully(fis, sample, 0, BINARY_SAMPLE_SIZE);
+                int sampleRead = IoUtil.readFully(fis, sample, 0, BINARY_SAMPLE_SIZE);
 
                 boolean binary = false;
                 if (sampleRead > 0) {
@@ -1097,7 +1096,7 @@ public class FileChangeDetector {
                     }
                 }
             }
-            return toHex(md.digest());
+            return HashUtil.toHex(md.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("MD5 algorithm not available", e);
         }
@@ -1131,7 +1130,7 @@ public class FileChangeDetector {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             if (len <= 0) {
-                return toHex(md.digest());
+                return HashUtil.toHex(md.digest());
             }
             int sampleLen = Math.min(len, BINARY_SAMPLE_SIZE);
             byte[] sample = Arrays.copyOf(data, sampleLen);
@@ -1152,7 +1151,7 @@ public class FileChangeDetector {
                     md.update((byte) '\n');
                 }
             }
-            return toHex(md.digest());
+            return HashUtil.toHex(md.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("MD5 algorithm not available", e);
         }
@@ -1185,7 +1184,8 @@ public class FileChangeDetector {
             try (FileInputStream fis = new FileInputStream(file)) {
                 byte[] sample = new byte[BINARY_SAMPLE_SIZE];
                 int sampleRead =
-                        readFully(fis, sample, 0, (int) Math.min(BINARY_SAMPLE_SIZE, remaining));
+                        IoUtil.readFully(
+                                fis, sample, 0, (int) Math.min(BINARY_SAMPLE_SIZE, remaining));
                 remaining -= sampleRead;
 
                 boolean binary = false;
@@ -1234,7 +1234,7 @@ public class FileChangeDetector {
                     }
                 }
             }
-            return new PrefixHash(toHex(manifestMd.digest()), rawMd);
+            return new PrefixHash(HashUtil.toHex(manifestMd.digest()), rawMd);
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("MD5 algorithm not available", e);
         }
@@ -1247,7 +1247,7 @@ public class FileChangeDetector {
     private static int readBounded(InputStream in, byte[] buffer, long remaining)
             throws IOException {
         int want = (int) Math.min(HASH_BUFFER_SIZE, remaining);
-        int total = readFully(in, buffer, 0, want);
+        int total = IoUtil.readFully(in, buffer, 0, want);
         if (total != want) {
             throw new java.io.EOFException("file ended inside the expected prefix");
         }
@@ -1276,25 +1276,8 @@ public class FileChangeDetector {
          */
         public String rawMd5With(byte[] extra) {
             rawDigest.update(extra);
-            return toHex(rawDigest.digest());
+            return HashUtil.toHex(rawDigest.digest());
         }
-    }
-
-    /**
-     * Read up to {@code len} bytes into {@code buf[off..off+len)}, returning the number actually
-     * read. Unlike {@link java.io.InputStream#read(byte[], int, int)} this loops until either the
-     * requested length is filled or EOF is reached.
-     */
-    private static int readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
-        int total = 0;
-        while (total < len) {
-            int read = in.read(buf, off + total, len - total);
-            if (read == -1) {
-                break;
-            }
-            total += read;
-        }
-        return total;
     }
 
     /**
@@ -1356,15 +1339,6 @@ public class FileChangeDetector {
             md.update(outBuffer, 0, outLen);
         }
         return pendingCR;
-    }
-
-    /** Format a digest as a lowercase hex string. */
-    private static String toHex(byte[] digest) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : digest) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 
     /** Serialize manifest to JSON */
@@ -1628,29 +1602,8 @@ public class FileChangeDetector {
         if (manifestFile == null) {
             return;
         }
-        Path path = manifestFile.toPath();
-        Path parent = path.toAbsolutePath().getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
-        // Write beside the target and move it into place: a crash mid-write would otherwise leave
-        // a truncated JSON that the next generation silently discards.
-        Path temp = Files.createTempFile(parent, "manifest", ".tmp");
-        try {
-            Files.writeString(temp, PERSIST_GSON.toJson(manifest), StandardCharsets.UTF_8);
-            try {
-                Files.move(
-                        temp,
-                        path,
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                // Some filesystems (and some network shares) cannot move atomically.
-                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } finally {
-            Files.deleteIfExists(temp);
-        }
+        IoUtil.writeStringAtomically(
+                manifestFile.toPath(), PERSIST_GSON.toJson(manifest), "manifest");
     }
 
     /**

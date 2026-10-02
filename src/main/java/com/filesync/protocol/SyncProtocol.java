@@ -7,6 +7,7 @@ import com.filesync.serial.SerialPortManager;
 import com.filesync.serial.XModemTransfer;
 import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.FileChangeDetector;
+import com.filesync.util.IoUtil;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -2687,13 +2688,10 @@ public class SyncProtocol {
                             + " bytes)");
         }
         try (FileInputStream fis = new FileInputStream(file)) {
+            // The array is returned as-is: if the file shrank since length() was taken, the tail
+            // stays zero-filled rather than being truncated away.
             byte[] data = new byte[(int) fileSize];
-            int totalRead = 0;
-            while (totalRead < data.length) {
-                int read = fis.read(data, totalRead, data.length - totalRead);
-                if (read == -1) break;
-                totalRead += read;
-            }
+            IoUtil.readFully(fis, data, 0, data.length);
             return data;
         }
     }
