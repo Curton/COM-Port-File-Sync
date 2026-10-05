@@ -46,7 +46,7 @@ port at all. Find your row and read only what it asks for.
 | You want to | You need |
 |---|---|
 | `selftest` — check the emulator's pacing and fault statistics | nothing |
-| `mvn -o test` — the 49 wire-model unit tests | nothing |
+| `mvn -o test` — the wire-model unit tests | nothing |
 | `mvn -o test -Pe2e` — the two-ended regression suite (§9) | nothing |
 | `peer` — one app instance plus one simulated remote machine | a serial port pair (§2) |
 | `bridge` — two app instances relayed through the emulated wire | two serial port pairs (§2) |
@@ -333,11 +333,11 @@ Operational notes for these tests:
 ### Where they run
 
 The whole `com.filesync.lab.e2e` package is excluded from the default local build (`mvn test` runs
-only the 49 wire-model unit tests). It runs:
+only the wire-model unit tests). It runs:
 
 - in CI, from the GitHub Actions **"link-lab regression"** workflow (`.github/workflows/link-lab.yml`)
   — manual dispatch only, never on push or pull request;
-- locally on demand: `mvn -o test -Pe2e` in this directory (49 + 8 e2e tests, ~1 minute).
+- locally on demand: `mvn -o test -Pe2e` in this directory (all unit and e2e tests, ~1 minute).
 
 ## 10. Development notes
 
