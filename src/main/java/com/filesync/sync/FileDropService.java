@@ -79,7 +79,9 @@ public class FileDropService {
         try {
             protocol.sendDropFile(file);
             eventBus.post(new SyncEvent.LogEvent("Dropped file sent: " + file.getName()));
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            // TRANSFER_COMPLETE also refreshes the sync controls and arms the Ready revert,
+            // so the progress bar does not stay on the last block after a successful drop.
+            eventBus.post(new SyncEvent.TransferCompleteEvent());
         } catch (TransferCancelledException e) {
             logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
@@ -159,7 +161,7 @@ public class FileDropService {
             eventBus.post(
                     new SyncEvent.LogEvent(
                             "Dropped file received: " + savedFile.getAbsolutePath()));
-            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+            eventBus.post(new SyncEvent.TransferCompleteEvent());
         } catch (TransferCancelledException e) {
             logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());

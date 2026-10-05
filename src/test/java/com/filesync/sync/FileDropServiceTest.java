@@ -33,6 +33,7 @@ class FileDropServiceTest {
     private static final class RecordingBus extends SimpleSyncEventBus {
         private final List<String> logs = new ArrayList<>();
         private final List<String> errors = new ArrayList<>();
+        private int transferCompleteCount;
 
         private RecordingBus() {
             register(
@@ -41,6 +42,8 @@ class FileDropServiceTest {
                             logs.add(logEvent.getMessage());
                         } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
                             errors.add(errorEvent.getMessage());
+                        } else if (event instanceof SyncEvent.TransferCompleteEvent) {
+                            transferCompleteCount++;
                         }
                     });
         }
@@ -96,6 +99,10 @@ class FileDropServiceTest {
         assertTrue(
                 bus.logs.contains("Dropped file sent: " + file.getName()),
                 "the success is logged, got: " + bus.logs);
+        assertEquals(
+                1,
+                bus.transferCompleteCount,
+                "a successful drop posts TRANSFER_COMPLETE so the UI reverts the bar to Ready");
         assertFalse(service.isTransferInProgress(), "the slot is free for the next drop");
     }
 
@@ -115,6 +122,8 @@ class FileDropServiceTest {
         assertTrue(
                 bus.errors.stream().anyMatch(msg -> msg.contains("Failed to send dropped file")),
                 "the failure surfaces as an error, got: " + bus.errors);
+        assertEquals(
+                0, bus.transferCompleteCount, "a failed drop must not report a completed transfer");
         assertFalse(service.isTransferInProgress());
     }
 
