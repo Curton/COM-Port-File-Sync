@@ -151,13 +151,10 @@ public class BatchTransferSession {
                             + " bytes)");
         }
         try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+            // The array is returned as-is: if the file shrank since length() was taken, the tail
+            // stays zero-filled rather than being truncated away.
             byte[] data = new byte[(int) fileSize];
-            int totalRead = 0;
-            while (totalRead < data.length) {
-                int read = fis.read(data, totalRead, data.length - totalRead);
-                if (read == -1) break;
-                totalRead += read;
-            }
+            IoUtil.readFully(fis, data, 0, data.length);
             return data;
         }
     }
