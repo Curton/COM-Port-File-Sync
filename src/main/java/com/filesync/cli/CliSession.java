@@ -15,6 +15,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
@@ -35,6 +37,12 @@ final class CliSession {
 
     private static final long POLL_INTERVAL_MS = 100;
 
+    /**
+     * How long a finished receive session waits for the sender to hang up before closing its own
+     * end. See {@link #lingerForSenderGoodbye()}.
+     */
+    private static final long SENDER_GOODBYE_GRACE_MS = 2000;
+
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     private final CliSpec spec;
@@ -45,6 +53,9 @@ final class CliSession {
 
     private SerialPortManager port;
     private FileSyncManager manager;
+
+    /** Counted down on the first connection-loss event; a finished receiver waits on it. */
+    private final CountDownLatch peerDisconnected = new CountDownLatch(1);
 
     CliSession(CliSpec spec, SettingsManager settings, SerialPortManager portOverride) {
         this.spec = spec;
@@ -150,7 +161,30 @@ final class CliSession {
     private int runReceive() throws InterruptedException {
         println("Waiting for incoming sync session...");
         outcome.begin();
-        return awaitOutcome();
+        int code = awaitOutcome();
+        if (code == CliMain.EXIT_SUCCESS || code == CliMain.EXIT_PARTIAL) {
+            lingerForSenderGoodbye();
+        }
+        return code;
+    }
+
+    /**
+     * Wait for the sender to hang up before this receiver tears down its own end. The sender's
+     * session ends a few local steps after the receiver's SYNC_COMPLETE — it records the confirmed
+     * base and posts its own completion — and a CLI sender disconnects right after that. Hanging up
+     * the instant this side completes races that wrap-up: the goodbye frame can reach the sender
+     * while it is still finishing, and its one-shot run then reports the lost link as exit 1 for a
+     * sync that succeeded. Waiting for the disconnect notification makes the ordering
+     * deterministic; a GUI sender that stays connected only delays this exit by the grace bound.
+     */
+    private void lingerForSenderGoodbye() {
+        try {
+            peerDisconnected.await(SENDER_GOODBYE_GRACE_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            // The session already succeeded; an interrupt during the post-success linger must not
+            // turn the exit code into a failure.
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** Builds the preview plan; on failure the reason is printed and null is returned. */
@@ -190,6 +224,7 @@ final class CliSession {
             case CONNECTION_STATUS -> {
                 if (!((SyncEvent.ConnectionEvent) event).isConnected()) {
                     outcome.connectionLost();
+                    peerDisconnected.countDown();
                 }
             }
             case PENDING_FILE_WRITE -> {
