@@ -44,19 +44,18 @@ class SyncProtocolMessageParsingTest {
     }
 
     @Test
-    void getParamAsIntThrowsProtocolFieldParseExceptionForInvalidValue() {
-        SyncProtocol.Message message = new SyncProtocol.Message("FILE_DATA", new String[] {"abc"});
+    void getParamAsIntAndLongThrowProtocolFieldParseExceptionForInvalidValue() {
+        SyncProtocol.Message intMessage =
+                new SyncProtocol.Message("FILE_DATA", new String[] {"abc"});
         assertThrows(
                 SyncProtocol.Message.ProtocolFieldParseException.class,
-                () -> message.getParamAsInt(0));
-    }
+                () -> intMessage.getParamAsInt(0));
 
-    @Test
-    void getParamAsLongThrowsProtocolFieldParseExceptionForInvalidValue() {
-        SyncProtocol.Message message = new SyncProtocol.Message("DROP_FILE", new String[] {"abc"});
+        SyncProtocol.Message longMessage =
+                new SyncProtocol.Message("DROP_FILE", new String[] {"abc"});
         assertThrows(
                 SyncProtocol.Message.ProtocolFieldParseException.class,
-                () -> message.getParamAsLong(0));
+                () -> longMessage.getParamAsLong(0));
     }
 
     private static class RecordingSerialPortManager extends SerialPortManager {
@@ -122,11 +121,6 @@ class SyncProtocolMessageParsingTest {
     }
 
     @Test
-    void parseMessage_returnsNullForMissingEndMarker() {
-        assertNull(SyncProtocol.parseMessage("[[SYNC:ACK"));
-    }
-
-    @Test
     void parseMessage_parsesCommandOnlyNoParams() {
         SyncProtocol.Message msg = SyncProtocol.parseMessage("[[SYNC:ACK]]");
         assertNotNull(msg);
@@ -165,28 +159,20 @@ class SyncProtocolMessageParsingTest {
     }
 
     @Test
-    void messageGetParamAsInt_parsesValidInteger() {
+    void messageGetParamAsIntAndLong_parseValidValues() {
         SyncProtocol.Message msg = new SyncProtocol.Message("CMD", new String[] {"42", "-7"});
         assertEquals(42, msg.getParamAsInt(0));
         assertEquals(-7, msg.getParamAsInt(1));
+
+        SyncProtocol.Message longMsg = new SyncProtocol.Message("CMD", new String[] {"9999999999"});
+        assertEquals(9999999999L, longMsg.getParamAsLong(0));
     }
 
     @Test
-    void messageGetParamAsLong_parsesValidLong() {
-        SyncProtocol.Message msg = new SyncProtocol.Message("CMD", new String[] {"9999999999"});
-        assertEquals(9999999999L, msg.getParamAsLong(0));
-    }
-
-    @Test
-    void messageGetParamAsInt_throwsForMissingParam() {
+    void messageGetParamAsIntAndLong_throwForMissingParam() {
         SyncProtocol.Message msg = new SyncProtocol.Message("CMD", new String[] {});
         assertThrows(
                 SyncProtocol.Message.ProtocolFieldParseException.class, () -> msg.getParamAsInt(0));
-    }
-
-    @Test
-    void messageGetParamAsLong_throwsForMissingParam() {
-        SyncProtocol.Message msg = new SyncProtocol.Message("CMD", new String[] {});
         assertThrows(
                 SyncProtocol.Message.ProtocolFieldParseException.class,
                 () -> msg.getParamAsLong(0));

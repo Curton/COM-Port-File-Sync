@@ -65,18 +65,9 @@ class SimpleSyncEventBusTest {
         bus.unregister(listener);
         bus.post(new SyncEvent.SyncStartedEvent());
         assertEquals(1, eventCount.get(), "After unregister, listener should not receive events");
-    }
-
-    @Test
-    void unregisterNonExistentListenerDoesNotThrow() {
-        SimpleSyncEventBus bus = new SimpleSyncEventBus();
-        AtomicInteger eventCount = new AtomicInteger(0);
-
-        bus.register(event -> eventCount.incrementAndGet());
 
         // Unregistering a listener that was never registered should not throw
         bus.unregister(event -> {});
-
         bus.post(new SyncEvent.SyncStartedEvent());
         assertEquals(1, eventCount.get());
     }
@@ -96,14 +87,6 @@ class SimpleSyncEventBusTest {
 
         bus.post(new SyncEvent.SyncStartedEvent());
         assertEquals(2, eventCount.get(), "After clear, no listeners should receive events");
-    }
-
-    @Test
-    void postToEmptyBusDoesNotThrow() {
-        SimpleSyncEventBus bus = new SimpleSyncEventBus();
-
-        // Posting to an empty bus should not throw
-        bus.post(new SyncEvent.SyncStartedEvent());
     }
 
     @Test

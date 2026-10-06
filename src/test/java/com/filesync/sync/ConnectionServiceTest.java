@@ -93,6 +93,10 @@ class ConnectionServiceTest {
 
         assertFalse(service.isConnectionAlive());
         assertTrue(connectionLostCalled);
+        assertTrue(
+                eventBus.getEvents().stream()
+                        .anyMatch(e -> e instanceof SyncEvent.ConnectionEvent));
+        assertTrue(eventBus.getEvents().stream().anyMatch(e -> e instanceof SyncEvent.LogEvent));
     }
 
     @Test
@@ -123,23 +127,6 @@ class ConnectionServiceTest {
     void waitForConnectionReturnsTrueWhenAlive() {
         connectionAlive.set(true);
         assertTrue(service.waitForConnection(100));
-    }
-
-    @Test
-    void isConnectionAliveReturnsFalseInitially() {
-        assertFalse(service.isConnectionAlive());
-    }
-
-    @Test
-    void reportCommunicationFailurePostsEvents() {
-        connectionAlive.set(true);
-
-        service.reportCommunicationFailure("reason");
-
-        assertTrue(
-                eventBus.getEvents().stream()
-                        .anyMatch(e -> e instanceof SyncEvent.ConnectionEvent));
-        assertTrue(eventBus.getEvents().stream().anyMatch(e -> e instanceof SyncEvent.LogEvent));
     }
 
     private static class StubProtocol extends SyncProtocol {

@@ -37,86 +37,29 @@ class SyncEventBridgeTest {
     }
 
     @Test
-    void handleSyncStartedRoutesToController() {
-        SyncEvent event = new SyncEvent.SyncStartedEvent();
+    void handleSyncEventRoutesEachEventTypeToItsHandler() {
+        String logMessage = "Test log message";
+        String errorMessage = "Test error";
+        String sharedText = "Shared text content";
 
-        bridge.handleSyncEvent(event);
+        bridge.handleSyncEvent(new SyncEvent.SyncStartedEvent());
+        bridge.handleSyncEvent(new SyncEvent.SyncCompleteEvent());
+        bridge.handleSyncEvent(new SyncEvent.SyncCancelledEvent());
+        bridge.handleSyncEvent(new SyncEvent.TransferCompleteEvent());
+        bridge.handleSyncEvent(new SyncEvent.LogEvent(logMessage));
+        bridge.handleSyncEvent(new SyncEvent.ErrorEvent(errorMessage));
+        bridge.handleSyncEvent(new SyncEvent.SharedTextReceivedEvent(sharedText));
+        bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(true));
+        bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(false));
 
         verify(syncController).onSyncStarted();
-    }
-
-    @Test
-    void handleSyncCompleteRoutesToController() {
-        SyncEvent event = new SyncEvent.SyncCompleteEvent();
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onSyncComplete();
-    }
-
-    @Test
-    void handleSyncCancelledRoutesToController() {
-        SyncEvent event = new SyncEvent.SyncCancelledEvent();
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onSyncCancelled();
-    }
-
-    @Test
-    void handleTransferCompleteRoutesToController() {
-        SyncEvent event = new SyncEvent.TransferCompleteEvent();
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onTransferComplete();
-    }
-
-    @Test
-    void handleLogEventRoutesToController() {
-        String logMessage = "Test log message";
-        SyncEvent.LogEvent event = new SyncEvent.LogEvent(logMessage);
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onLog(logMessage);
-    }
-
-    @Test
-    void handleErrorEventRoutesToController() {
-        String errorMessage = "Test error";
-        SyncEvent.ErrorEvent event = new SyncEvent.ErrorEvent(errorMessage);
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onError(errorMessage);
-    }
-
-    @Test
-    void handleSharedTextReceivedRoutesToSharedTextController() {
-        String text = "Shared text content";
-        SyncEvent.SharedTextReceivedEvent event = new SyncEvent.SharedTextReceivedEvent(text);
-
-        bridge.handleSyncEvent(event);
-
-        verify(sharedTextController).onSharedTextReceived(text);
-    }
-
-    @Test
-    void handleConnectionStatusRoutesToController() {
-        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(true);
-
-        bridge.handleSyncEvent(event);
-
+        verify(sharedTextController).onSharedTextReceived(sharedText);
         verify(syncController).onConnectionStatusChanged(true);
-    }
-
-    @Test
-    void handleConnectionStatusDisconnectedRoutesToController() {
-        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(false);
-
-        bridge.handleSyncEvent(event);
-
         verify(syncController).onConnectionStatusChanged(false);
     }
 

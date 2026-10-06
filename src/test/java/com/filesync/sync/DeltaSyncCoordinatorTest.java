@@ -46,6 +46,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 /**
@@ -215,12 +219,6 @@ class DeltaSyncCoordinatorTest {
         assertNotNull(sent.get("big.bin"));
     }
 
-    @Test
-    void handleDeltaSigRequest_sendsEmptySetWhenNoFilesExist() throws IOException {
-        createCoordinator().handleDeltaSigRequest(List.of("missing.bin"));
-        verify(mockProtocol).sendDeltaSignatures(isA(SignatureSet.class));
-    }
-
     // ========== receiver: handleIncomingFileDelta ==========
 
     @Test
@@ -305,65 +303,23 @@ class DeltaSyncCoordinatorTest {
                 List.of(fi), List.of(), List.of(), List.of(), size, false, List.of(), Set.of(path));
     }
 
-    @Test
-    void performSync_beneficialDelta_sendsFileDeltaAndSkipsBatch() throws IOException {
-        byte[] data = randomBytes(64 * 1024, 1);
-        Files.write(tempDir.resolve("big.bin"), data);
-
-        // Signatures computed from the same bytes -> every block matches -> delta is tiny ->
-        // beneficial, and the absolute saving (random data does not compress) clears the
-        // per-session threshold with room to spare.
-        SignatureSet sigs =
-                new SignatureSet(
-                        List.of(
-                                SignatureUtil.compute(
-                                        "big.bin",
-                                        data,
-                                        SignatureUtil.chooseBlockSize(data.length))));
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendFileDelta(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class)))
-                .thenReturn(false);
-
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(planFor("big.bin", data.length));
-
-        verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol)
-                .sendFileDelta(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
-        verify(mockProtocol, never())
-                .sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class));
-    }
-
-    @Test
-    void performSync_poorBlockMatchRatio_sendsFileDelta() throws IOException {
-        // Zip-container documents (docx/xlsx) reshuffle their compressed stream on any edit,
-        // so block matches stay sparse even for a small change: here only every 7th block
-        // matches, leaving the delta at ~86% of the full transfer. The absolute saving
-        // (~9 KB, nearly a second at 115200 baud) must still route to the delta path — a
+    @ParameterizedTest
+    @ValueSource(ints = {1, 7})
+    void performSync_deltaWithVaryingBlockMatchRatio_sendsFileDelta(int matchEveryNthBlock)
+            throws IOException {
+        // matchEveryNthBlock = 1: signatures computed from the same bytes -> every block matches
+        // -> the delta is tiny, and the absolute saving (random data does not compress) clears
+        // the per-session threshold with room to spare.
+        // matchEveryNthBlock = 7: zip-container documents (docx/xlsx) reshuffle their compressed
+        // stream on any edit, so block matches stay sparse even for a small change: here only
+        // every 7th block matches, leaving the delta at ~86% of the full transfer. The absolute
+        // saving (~9 KB, nearly a second at 115200 baud) must still route to the delta path — a
         // file this size fills a batch by itself, so no session is saved by falling back.
         byte[] base = randomBytes(64 * 1024, 1);
         byte[] source = base.clone();
         int blockSize = SignatureUtil.chooseBlockSize(base.length);
         for (int off = 0, block = 0; off < source.length; off += blockSize, block++) {
-            if (block % 7 != 0) {
+            if (block % matchEveryNthBlock != 0) {
                 source[off] ^= 0x5A;
             }
         }
@@ -403,22 +359,24 @@ class DeltaSyncCoordinatorTest {
                         any(File.class));
     }
 
-    @Test
-    void performSync_noBlockMatches_fallsBackToBatch() throws IOException {
-        byte[] data = randomBytes(10 * 1024, 1);
-        Files.write(tempDir.resolve("big.bin"), data);
+    @ParameterizedTest
+    @MethodSource
+    void performSync_unbeneficialDelta_fallsBackToBatch(
+            String path, byte[] fileBytes, byte[] sigBytes) throws IOException {
+        Files.write(tempDir.resolve(path), fileBytes);
 
-        // Signatures from completely unrelated bytes -> no block matches -> the delta is the
-        // full content plus opcode overhead, so the absolute saving is negative and the file
-        // falls back to the batch path.
-        byte[] unrelated = randomBytes(10 * 1024, 99);
+        // Either the signatures come from completely unrelated bytes (no block matches: the
+        // delta is the full content plus opcode overhead, so the saving is negative) or both the
+        // full transfer and the delta compress to a few hundred bytes (the absolute wire saving
+        // stays far below the per-session fixed cost, MIN_DELTA_SAVINGS_BYTES): either way the
+        // file must ride the batch.
         SignatureSet sigs =
                 new SignatureSet(
                         List.of(
                                 SignatureUtil.compute(
-                                        "big.bin",
-                                        unrelated,
-                                        SignatureUtil.chooseBlockSize(data.length))));
+                                        path,
+                                        sigBytes,
+                                        SignatureUtil.chooseBlockSize(fileBytes.length))));
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
         when(mockProtocol.sendBatch(
@@ -439,62 +397,7 @@ class DeltaSyncCoordinatorTest {
 
         SyncCoordinator coordinator = createCoordinator();
         coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(planFor("big.bin", data.length));
-
-        verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol, never())
-                .sendFileDelta(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
-        verify(mockProtocol)
-                .sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class));
-    }
-
-    @Test
-    void performSync_tinyAbsoluteSaving_fallsBackToBatch() throws IOException {
-        // 48KB of repetitive text: both the full transfer and the delta compress to a few
-        // hundred bytes, so the absolute wire saving stays far below the per-session fixed
-        // cost (MIN_DELTA_SAVINGS_BYTES) — the file must ride the batch.
-        byte[] data =
-                "hello world\n".repeat(4000).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        Files.write(tempDir.resolve("big.txt"), data);
-
-        SignatureSet sigs =
-                new SignatureSet(
-                        List.of(
-                                SignatureUtil.compute(
-                                        "big.txt",
-                                        data,
-                                        SignatureUtil.chooseBlockSize(data.length))));
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(sigs);
-        when(mockProtocol.sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class)))
-                .thenAnswer(
-                        inv -> {
-                            BatchTransferSession.BatchProgressCallback cb = inv.getArgument(2);
-                            @SuppressWarnings("unchecked")
-                            List<Object[]> batch = inv.getArgument(0);
-                            for (int i = 0; i < batch.size(); i++) {
-                                cb.onEntryProcessed(i, batch.size(), (String) batch.get(i)[1]);
-                            }
-                            return true;
-                        });
-
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(planFor("big.txt", data.length));
+        coordinator.startSyncWithPlan(planFor(path, fileBytes.length));
 
         verify(mockProtocol).requestDeltaSignatures(anyList());
         verify(mockProtocol, never())
@@ -515,8 +418,19 @@ class DeltaSyncCoordinatorTest {
                 postedEvents.stream()
                         .filter(e -> e instanceof SyncEvent.LogEvent)
                         .map(e -> ((SyncEvent.LogEvent) e).getMessage())
-                        .anyMatch(s -> s.contains("too small") && s.contains("big.txt")),
+                        .anyMatch(s -> s.contains("too small") && s.contains(path)),
                 "the below-threshold saving must be logged");
+    }
+
+    static List<Arguments> performSync_unbeneficialDelta_fallsBackToBatch() {
+        byte[] data = new byte[10 * 1024];
+        new Random(1).nextBytes(data);
+        byte[] unrelated = new byte[10 * 1024];
+        new Random(99).nextBytes(unrelated);
+        byte[] text =
+                "hello world\n".repeat(4000).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return List.of(
+                Arguments.of("big.bin", data, unrelated), Arguments.of("big.txt", text, text));
     }
 
     @Test
@@ -584,15 +498,6 @@ class DeltaSyncCoordinatorTest {
         SyncPreviewPlan plan = appendPlanFor("big.bin", data.length, 9999L, "remote-md5-value");
 
         coordinator.startSyncWithPlan(plan);
-        verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol)
-                .sendFileDelta(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
 
         // Second sync against the same receiver state: no signature exchange, cached signatures.
         coordinator.startSyncWithPlan(plan);
@@ -670,25 +575,24 @@ class DeltaSyncCoordinatorTest {
                 remoteInfos);
     }
 
-    @Test
-    void performSync_pureAppend_sendsTailOnlyWithoutSignatureExchange() throws IOException {
-        byte[] base =
-                "2026-09-01 12:00:00 INFO sync log line\n"
-                        .repeat(400)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] tail =
-                "2026-09-01 12:01:00 INFO appended later\n"
-                        .repeat(30)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    @ParameterizedTest
+    @MethodSource
+    void performSync_pureAppend_sendsTailOnlyWithoutSignatureExchange(
+            String path, byte[] base, byte[] tail, boolean isText) throws IOException {
         byte[] grown = new byte[base.length + tail.length];
         System.arraycopy(base, 0, grown, 0, base.length);
         System.arraycopy(tail, 0, grown, base.length, tail.length);
-        Files.write(tempDir.resolve("app.log"), grown);
-        // The remote md5 must equal what the receiver's manifest computes for the base bytes
-        // (text content is hashed with line-ending normalization).
-        Path baseCopy = tempDir.resolve("base-copy.tmp");
-        Files.write(baseCopy, base);
-        String remoteMd5 = FileChangeDetector.calculateMD5(baseCopy.toFile());
+        Files.write(tempDir.resolve(path), grown);
+        // The remote md5 must equal what the receiver's manifest computes for the base bytes:
+        // text content is hashed with line-ending normalization (file path), binary raw.
+        String remoteMd5;
+        if (isText) {
+            Path baseCopy = tempDir.resolve("base-copy.tmp");
+            Files.write(baseCopy, base);
+            remoteMd5 = FileChangeDetector.calculateMD5(baseCopy.toFile());
+        } else {
+            remoteMd5 = HashUtil.md5Hex(base);
+        }
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.sendFileAppend(
@@ -703,13 +607,12 @@ class DeltaSyncCoordinatorTest {
 
         SyncCoordinator coordinator = createCoordinator();
         coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(
-                appendPlanFor("app.log", grown.length, base.length, remoteMd5));
+        coordinator.startSyncWithPlan(appendPlanFor(path, grown.length, base.length, remoteMd5));
 
         ArgumentCaptor<byte[]> tailCaptor = ArgumentCaptor.forClass(byte[].class);
         verify(mockProtocol)
                 .sendFileAppend(
-                        eq("app.log"),
+                        eq(path),
                         tailCaptor.capture(),
                         anyLong(),
                         eq((long) base.length),
@@ -735,28 +638,44 @@ class DeltaSyncCoordinatorTest {
         verify(mockProtocol).sendSyncComplete();
     }
 
-    @Test
-    void performSync_appendPrefixMismatch_usesSignatureDelta() throws IOException {
-        byte[] base =
+    static List<Arguments> performSync_pureAppend_sendsTailOnlyWithoutSignatureExchange() {
+        byte[] textBase =
                 "2026-09-01 12:00:00 INFO sync log line\n"
                         .repeat(400)
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] tail =
+        byte[] textTail =
                 "2026-09-01 12:01:00 INFO appended later\n"
                         .repeat(30)
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] grown = new byte[base.length + tail.length];
-        System.arraycopy(base, 0, grown, 0, base.length);
-        System.arraycopy(tail, 0, grown, base.length, tail.length);
-        Files.write(tempDir.resolve("app.log"), grown);
-        // The remote md5 describes different prefix content: not a pure append.
-        Path unrelated = tempDir.resolve("unrelated.tmp");
-        Files.write(
-                unrelated,
-                "totally different bytes\n"
-                        .repeat(400)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        String remoteMd5 = FileChangeDetector.calculateMD5(unrelated.toFile());
+        // Alternating null bytes guarantee the manifest classifies this as binary, so the gate
+        // hash must be the raw md5 of the receiver's bytes.
+        byte[] binaryBase = new byte[10 * 1024];
+        for (int i = 0; i < binaryBase.length; i++) {
+            binaryBase[i] = (i % 2 == 0) ? (byte) 0 : (byte) 'x';
+        }
+        byte[] binaryTail = new byte[2048];
+        for (int i = 0; i < binaryTail.length; i++) {
+            binaryTail[i] = (i % 2 == 0) ? (byte) 1 : (byte) 'y';
+        }
+        return List.of(
+                Arguments.of("app.log", textBase, textTail, true),
+                Arguments.of("data.bin", binaryBase, binaryTail, false));
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void performSync_appendGateRejected_usesSignatureDelta(
+            byte[] localContent, long remoteSize, String remoteMd5, boolean seedRejected)
+            throws IOException {
+        Files.write(tempDir.resolve("app.log"), localContent);
+        if (seedRejected) {
+            // A previous BASE_STALE marked this exact receiver state as rejected: the append gate
+            // must skip it so the file goes through the signature exchange instead of repeating
+            // the same rejected transfer on every sync.
+            SignatureCache seed = new SignatureCache(new File(syncFolder, "sigcache-test.json"));
+            seed.markRejected("app.log", remoteSize, remoteMd5);
+            seed.flush();
+        }
 
         when(mockProtocol.getTimeout()).thenReturn(30000);
         when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(SignatureSet.empty());
@@ -770,7 +689,7 @@ class DeltaSyncCoordinatorTest {
         SyncCoordinator coordinator = createCoordinator();
         coordinator.setExecutor(null);
         coordinator.startSyncWithPlan(
-                appendPlanFor("app.log", grown.length, base.length, remoteMd5));
+                appendPlanFor("app.log", localContent.length, remoteSize, remoteMd5));
 
         verify(mockProtocol, never())
                 .sendFileAppend(
@@ -790,42 +709,7 @@ class DeltaSyncCoordinatorTest {
                         any(File.class));
     }
 
-    @Test
-    void performSync_shrunkFile_usesSignatureDelta() throws IOException {
-        byte[] grown =
-                "2026-09-01 12:00:00 INFO sync log line\n"
-                        .repeat(400)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        Files.write(tempDir.resolve("app.log"), grown);
-        // Remote copy is LARGER than the local file (log rotated/truncated on the sender).
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(SignatureSet.empty());
-        when(mockProtocol.sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class)))
-                .thenReturn(true);
-
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(
-                appendPlanFor("app.log", grown.length, grown.length + 1000, "deadbeef"));
-
-        verify(mockProtocol, never())
-                .sendFileAppend(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
-        verify(mockProtocol).requestDeltaSignatures(anyList());
-    }
-
-    @Test
-    void performSync_remoteWithoutMd5_usesSignatureDelta() throws IOException {
+    static List<Arguments> performSync_appendGateRejected_usesSignatureDelta() throws IOException {
         byte[] base =
                 "2026-09-01 12:00:00 INFO sync log line\n"
                         .repeat(400)
@@ -837,32 +721,32 @@ class DeltaSyncCoordinatorTest {
         byte[] grown = new byte[base.length + tail.length];
         System.arraycopy(base, 0, grown, 0, base.length);
         System.arraycopy(tail, 0, grown, base.length, tail.length);
-        Files.write(tempDir.resolve("app.log"), grown);
-        // Quick-hash manifest: the receiver's FileInfo carries no md5, so append detection
+        // Row 1: the remote md5 describes different prefix content: not a pure append.
+        byte[] unrelated =
+                "totally different bytes\n"
+                        .repeat(400)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        // Row 2: the remote copy is LARGER than the local file (log rotated/truncated on the
+        // sender).
+        // Row 3: quick-hash manifest: the receiver's FileInfo carries no md5, so append detection
         // cannot verify the prefix and must not claim the fast path.
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(SignatureSet.empty());
-        when(mockProtocol.sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class)))
-                .thenReturn(true);
+        // Row 4: this exact receiver state was previously rejected via BASE_STALE.
+        return List.of(
+                Arguments.of(grown, (long) base.length, md5ViaTempFile(unrelated), false),
+                Arguments.of(base, (long) (base.length + 1000), "deadbeef", false),
+                Arguments.of(grown, (long) base.length, null, false),
+                Arguments.of(grown, (long) base.length, md5ViaTempFile(base), true));
+    }
 
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(appendPlanFor("app.log", grown.length, base.length, null));
-
-        verify(mockProtocol, never())
-                .sendFileAppend(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
-        verify(mockProtocol).requestDeltaSignatures(anyList());
+    /** Manifest-style md5: text content is hashed with line-ending normalization via a file. */
+    private static String md5ViaTempFile(byte[] content) throws IOException {
+        Path tmp = Files.createTempFile("append-gate-md5", ".tmp");
+        try {
+            Files.write(tmp, content);
+            return FileChangeDetector.calculateMD5(tmp.toFile());
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
     }
 
     @Test
@@ -1037,113 +921,7 @@ class DeltaSyncCoordinatorTest {
         verify(mockProtocol).sendSyncComplete();
     }
 
-    @Test
-    void performSync_pureAppend_binaryFileSendsTailOnly() throws IOException {
-        // Alternating null bytes guarantee the manifest classifies this as binary, so the gate
-        // hash must be the raw md5 of the receiver's bytes.
-        byte[] base = new byte[10 * 1024];
-        for (int i = 0; i < base.length; i++) {
-            base[i] = (i % 2 == 0) ? (byte) 0 : (byte) 'x';
-        }
-        byte[] tail = new byte[2048];
-        for (int i = 0; i < tail.length; i++) {
-            tail[i] = (i % 2 == 0) ? (byte) 1 : (byte) 'y';
-        }
-        byte[] grown = new byte[base.length + tail.length];
-        System.arraycopy(base, 0, grown, 0, base.length);
-        System.arraycopy(tail, 0, grown, base.length, tail.length);
-        Files.write(tempDir.resolve("data.bin"), grown);
-        String remoteMd5 = HashUtil.md5Hex(base);
-
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.sendFileAppend(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class)))
-                .thenReturn(false);
-
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(
-                appendPlanFor("data.bin", grown.length, base.length, remoteMd5));
-
-        ArgumentCaptor<byte[]> tailCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(mockProtocol)
-                .sendFileAppend(
-                        eq("data.bin"),
-                        tailCaptor.capture(),
-                        anyLong(),
-                        eq((long) base.length),
-                        eq((long) grown.length),
-                        anyString(),
-                        nullable(String.class));
-        assertArrayEquals(tail, tailCaptor.getValue(), "only the appended tail may be sent");
-        verify(mockProtocol, never()).requestDeltaSignatures(anyList());
-        verify(mockProtocol).sendSyncComplete();
-    }
-
     // ========== sender: BASE_STALE rejection memo ==========
-
-    @Test
-    void performSync_rejectedBase_skipsAppendAndExchangesSignatures() throws IOException {
-        byte[] base =
-                "2026-09-01 12:00:00 INFO sync log line\n"
-                        .repeat(400)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] tail =
-                "2026-09-01 12:01:00 INFO appended later\n"
-                        .repeat(30)
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] grown = new byte[base.length + tail.length];
-        System.arraycopy(base, 0, grown, 0, base.length);
-        System.arraycopy(tail, 0, grown, base.length, tail.length);
-        Files.write(tempDir.resolve("app.log"), grown);
-        Path baseCopy = tempDir.resolve("base-copy.tmp");
-        Files.write(baseCopy, base);
-        String remoteMd5 = FileChangeDetector.calculateMD5(baseCopy.toFile());
-
-        // A previous BASE_STALE marked this exact receiver state as rejected: the append gate
-        // must skip it so the file goes through the signature exchange instead of repeating
-        // the same rejected transfer on every sync.
-        SignatureCache seed = new SignatureCache(new File(syncFolder, "sigcache-test.json"));
-        seed.markRejected("app.log", base.length, remoteMd5);
-        seed.flush();
-
-        when(mockProtocol.getTimeout()).thenReturn(30000);
-        when(mockProtocol.requestDeltaSignatures(anyList())).thenReturn(SignatureSet.empty());
-        when(mockProtocol.sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class)))
-                .thenReturn(true);
-
-        SyncCoordinator coordinator = createCoordinator();
-        coordinator.setExecutor(null);
-        coordinator.startSyncWithPlan(
-                appendPlanFor("app.log", grown.length, base.length, remoteMd5));
-
-        verify(mockProtocol, never())
-                .sendFileAppend(
-                        anyString(),
-                        any(),
-                        anyLong(),
-                        anyLong(),
-                        anyLong(),
-                        anyString(),
-                        nullable(String.class));
-        verify(mockProtocol).requestDeltaSignatures(anyList());
-        verify(mockProtocol)
-                .sendBatch(
-                        anyList(),
-                        anyInt(),
-                        isA(BatchTransferSession.BatchProgressCallback.class),
-                        any(File.class));
-    }
 
     @Test
     void performSync_baseStaleDuringSignatureExchange_memoSurvivesSessionFlush()

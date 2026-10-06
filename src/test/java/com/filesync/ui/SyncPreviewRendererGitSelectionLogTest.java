@@ -3,11 +3,16 @@ package com.filesync.ui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Verifies git-selection outcomes are routed to the log sink instead of failing silently. */
 class SyncPreviewRendererGitSelectionLogTest {
@@ -16,40 +21,38 @@ class SyncPreviewRendererGitSelectionLogTest {
         return new SyncPreviewRow(SyncPreviewOperationType.NEW, path, "1 B", 1L);
     }
 
-    @Test
-    void outcomeLogsMatchCounts() {
+    @ParameterizedTest
+    @MethodSource("outcomeLogSamples")
+    void outcomeLogsMatchCountsAndTheExecutableUsed(
+            String previewRowPaths, int matches, String executable, String expectedMessage) {
         List<String> logs = new ArrayList<>();
         SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, logs::add);
 
+        List<SyncPreviewRow> rows = new ArrayList<>();
+        for (String path : previewRowPaths.split(",")) {
+            rows.add(row(path));
+        }
         renderer.logGitSelectionOutcome(
-                new LinkedHashSet<>(List.of("a.txt")),
-                1,
-                List.of(row("a.txt"), row("b.txt")),
-                "git");
+                new LinkedHashSet<>(List.of("a.txt")), matches, rows, executable);
 
         assertEquals(1, logs.size());
-        assertEquals(
-                "git: matched 1 of 2 preview row(s); git reported 1 changed path(s) via git",
-                logs.get(0));
+        assertEquals(expectedMessage, logs.get(0));
     }
 
-    @Test
-    void outcomeLogsWhichGitExecutableWasUsed() {
-        List<String> logs = new ArrayList<>();
-        SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, logs::add);
-
-        // Install-location fallback: the resolved path must appear in the log.
-        renderer.logGitSelectionOutcome(
-                new LinkedHashSet<>(List.of("a.txt")),
-                1,
-                List.of(row("a.txt")),
-                "D:\\appl\\git\\cmd\\git.exe");
-
-        assertEquals(1, logs.size());
-        assertEquals(
-                "git: matched 1 of 1 preview row(s); git reported 1 changed path(s) via "
-                        + "D:\\appl\\git\\cmd\\git.exe",
-                logs.get(0));
+    private static Stream<Arguments> outcomeLogSamples() {
+        return Stream.of(
+                arguments(
+                        "a.txt,b.txt",
+                        1,
+                        "git",
+                        "git: matched 1 of 2 preview row(s); git reported 1 changed path(s) via git"),
+                // Install-location fallback: the resolved path must appear in the log.
+                arguments(
+                        "a.txt",
+                        1,
+                        "D:\\appl\\git\\cmd\\git.exe",
+                        "git: matched 1 of 1 preview row(s); git reported 1 changed path(s) via "
+                                + "D:\\appl\\git\\cmd\\git.exe"));
     }
 
     @Test

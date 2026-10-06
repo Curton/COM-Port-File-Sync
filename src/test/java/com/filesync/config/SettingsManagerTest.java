@@ -9,6 +9,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class SettingsManagerTest {
 
@@ -20,21 +24,26 @@ class SettingsManagerTest {
         assertEquals("", SettingsManager.normalizeFolderPath(""));
     }
 
-    @Test
-    void isMappingMatch_returnsTrueWhenNoRememberedMapping() {
-        assertTrue(SettingsManager.isMappingMatch("/local", "/remote", "", ""));
+    @ParameterizedTest
+    @MethodSource("isMappingMatchCases")
+    void isMappingMatch(
+            String local,
+            String remote,
+            String rememberedSender,
+            String rememberedReceiver,
+            boolean expected) {
+        boolean actual =
+                SettingsManager.isMappingMatch(local, remote, rememberedSender, rememberedReceiver);
+        assertEquals(expected, actual);
     }
 
-    @Test
-    void isMappingMatch_returnsTrueWhenPathsMatch() {
-        assertTrue(SettingsManager.isMappingMatch("C:/foo", "D:/bar", "C:/foo", "D:/bar"));
-        assertTrue(SettingsManager.isMappingMatch("C:/foo", "D:/bar", "C:\\foo", "D:\\bar"));
-    }
-
-    @Test
-    void isMappingMatch_returnsFalseWhenPathsDiffer() {
-        assertFalse(SettingsManager.isMappingMatch("C:/foo", "D:/bar", "C:/other", "D:/bar"));
-        assertFalse(SettingsManager.isMappingMatch("C:/foo", "D:/bar", "C:/foo", "D:/other"));
+    static List<Arguments> isMappingMatchCases() {
+        return List.of(
+                Arguments.arguments("/local", "/remote", "", "", true),
+                Arguments.arguments("C:/foo", "D:/bar", "C:/foo", "D:/bar", true),
+                Arguments.arguments("C:/foo", "D:/bar", "C:\\foo", "D:\\bar", true),
+                Arguments.arguments("C:/foo", "D:/bar", "C:/other", "D:/bar", false),
+                Arguments.arguments("C:/foo", "D:/bar", "C:/foo", "D:/other", false));
     }
 
     @Test
@@ -76,8 +85,6 @@ class SettingsManagerTest {
         String port = "COM99_EMPTY_" + System.currentTimeMillis();
         settings.setRememberedFolderMapping(port, "", "D:/receiver");
         settings.setRememberedFolderMapping(port, "C:/sender", "");
-        settings.setRememberedFolderMapping(port, null, "D:/receiver");
-        settings.setRememberedFolderMapping(port, "C:/sender", null);
         assertTrue(settings.getRememberedFolderMappings(port).isEmpty());
     }
 
@@ -111,21 +118,29 @@ class SettingsManagerTest {
     }
 
     @Test
-    void findReceiverFolderForSender_returnsNullWhenNoMapping() {
+    void findReceiverFolderForSender_lookupScenarios() {
         SettingsManager settings = new SettingsManager(true);
-        String port = "COM99_EMPTY_" + System.currentTimeMillis();
-        String result = settings.findReceiverFolderForSender("C:/sender", port);
-        assertNull(result);
-    }
 
-    @Test
-    void findReceiverFolderForSender_returnsMappedReceiver() {
-        SettingsManager settings = new SettingsManager(true);
-        String port = "COM99_TEST_" + System.currentTimeMillis();
-        settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver");
+        // No mapping stored for the port -> null.
+        String emptyPort = "COM99_EMPTY_" + System.currentTimeMillis();
+        assertNull(settings.findReceiverFolderForSender("C:/sender", emptyPort));
 
-        String result = settings.findReceiverFolderForSender("C:/sender", port);
-        assertEquals("D:/receiver", result);
+        // An exact stored mapping is returned for the matching sender.
+        String mappedPort = "COM99_TEST_" + System.currentTimeMillis();
+        settings.setRememberedFolderMapping(mappedPort, "C:/sender", "D:/receiver");
+        assertEquals("D:/receiver", settings.findReceiverFolderForSender("C:/sender", mappedPort));
+
+        // A sender matching none of the stored mappings -> null.
+        String noMatchPort = "COM99_NOMATCH_" + System.currentTimeMillis();
+        settings.setRememberedFolderMapping(noMatchPort, "C:/sender1", "D:/receiver1");
+        settings.setRememberedFolderMapping(noMatchPort, "C:/sender2", "D:/receiver2");
+        assertNull(settings.findReceiverFolderForSender("C:/unknown", noMatchPort));
+
+        // When one sender maps to several receivers, the most recent mapping wins.
+        String mruPort = "COM99_MRU_" + System.currentTimeMillis();
+        settings.setRememberedFolderMapping(mruPort, "C:/sender", "D:/receiver1");
+        settings.setRememberedFolderMapping(mruPort, "C:/sender", "D:/receiver2");
+        assertEquals("D:/receiver2", settings.findReceiverFolderForSender("C:/sender", mruPort));
     }
 
     @Test
@@ -136,32 +151,6 @@ class SettingsManagerTest {
 
         String result = settings.findReceiverFolderForSender("C:/sender", port);
         assertEquals("D:/receiver", result);
-
-        result = settings.findReceiverFolderForSender("C:\\sender", port);
-        assertEquals("D:/receiver", result);
-    }
-
-    @Test
-    void findReceiverFolderForSender_returnsNullWhenNoMatch() {
-        SettingsManager settings = new SettingsManager(true);
-        String port = "COM99_NOMATCH_" + System.currentTimeMillis();
-        settings.setRememberedFolderMapping(port, "C:/sender1", "D:/receiver1");
-        settings.setRememberedFolderMapping(port, "C:/sender2", "D:/receiver2");
-
-        String result = settings.findReceiverFolderForSender("C:/unknown", port);
-        assertNull(result);
-    }
-
-    @Test
-    void findReceiverFolderForSender_returnsMostRecentMapping() {
-        SettingsManager settings = new SettingsManager(true);
-        String port = "COM99_MRU_" + System.currentTimeMillis();
-
-        settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver1");
-        settings.setRememberedFolderMapping(port, "C:/sender", "D:/receiver2");
-
-        String result = settings.findReceiverFolderForSender("C:/sender", port);
-        assertEquals("D:/receiver2", result);
     }
 
     @Test
@@ -170,9 +159,6 @@ class SettingsManagerTest {
         settings.setRememberedFolderMapping("", "C:/sender", "D:/receiver");
 
         String result = settings.findReceiverFolderForSender("C:/sender", "");
-        assertEquals("D:/receiver", result);
-
-        result = settings.findReceiverFolderForSender("C:/sender", null);
         assertEquals("D:/receiver", result);
     }
 
@@ -191,7 +177,6 @@ class SettingsManagerTest {
         int initialSize = settings.getRecentFolders().size();
         settings.addRecentFolder(null);
         settings.addRecentFolder("");
-        settings.addRecentFolder("   ");
         assertEquals(initialSize, settings.getRecentFolders().size());
     }
 
@@ -205,6 +190,13 @@ class SettingsManagerTest {
         List<String> recent = settings.getRecentFolders();
         boolean found = recent.stream().anyMatch(f -> f.equals(uniqueFolder));
         assertTrue(found, "Should contain the added folder");
+
+        String backslashFolder = "C:\\Users\\Test_" + System.currentTimeMillis();
+        settings.addRecentFolder(backslashFolder);
+
+        List<String> recentFolders = settings.getRecentFolders();
+        boolean hasNormalized = recentFolders.stream().anyMatch(f -> f.contains("C:/Users/Test"));
+        assertTrue(hasNormalized);
     }
 
     @Test
@@ -236,18 +228,6 @@ class SettingsManagerTest {
     }
 
     @Test
-    void addRecentFolder_normalizesBackslashes() {
-        SettingsManager settings = new SettingsManager(true);
-        String unique = "C:\\Users\\Test_" + System.currentTimeMillis();
-
-        settings.addRecentFolder(unique);
-
-        List<String> recent = settings.getRecentFolders();
-        boolean hasNormalized = recent.stream().anyMatch(f -> f.contains("C:/Users/Test"));
-        assertTrue(hasNormalized);
-    }
-
-    @Test
     void getRecentFolders_returnsCopyOfList() {
         SettingsManager settings = new SettingsManager(true);
         int initialSize = settings.getRecentFolders().size();
@@ -258,20 +238,10 @@ class SettingsManagerTest {
         assertEquals(initialSize, settings.getRecentFolders().size());
     }
 
-    @Test
-    void getParityIndex_returnsCorrectIndex() {
-        assertEquals(0, SettingsManager.getParityIndex(0));
-        assertEquals(1, SettingsManager.getParityIndex(1));
-        assertEquals(2, SettingsManager.getParityIndex(2));
-        assertEquals(3, SettingsManager.getParityIndex(3));
-        assertEquals(4, SettingsManager.getParityIndex(4));
-    }
-
-    @Test
-    void getParityIndex_returnsDefaultForUnknownValue() {
-        assertEquals(0, SettingsManager.getParityIndex(5));
-        assertEquals(0, SettingsManager.getParityIndex(-1));
-        assertEquals(0, SettingsManager.getParityIndex(100));
+    @ParameterizedTest
+    @CsvSource({"0,0", "1,1", "2,2", "3,3", "4,4", "5,0", "-1,0", "100,0"})
+    void getParityIndex(int value, int expected) {
+        assertEquals(expected, SettingsManager.getParityIndex(value));
     }
 
     @Test

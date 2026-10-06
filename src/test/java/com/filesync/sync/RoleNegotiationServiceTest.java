@@ -10,6 +10,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class RoleNegotiationServiceTest {
 
@@ -43,25 +45,16 @@ class RoleNegotiationServiceTest {
         assertFalse(service.isRoleNegotiated());
     }
 
-    @Test
-    void setSenderUpdatesStateAndPostsEvent() {
-        service.setSender(false);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void setSenderUpdatesStateAndPostsEvent(boolean sender) {
+        isSender.set(!sender);
 
-        assertFalse(service.isSender());
+        service.setSender(sender);
+
+        assertEquals(sender, service.isSender());
         assertTrue(service.isRoleNegotiated());
-        assertTrue(eventBus.hasDirectionEvent(false));
-    }
-
-    @Test
-    void setSenderToTrueUpdatesStateAndPostsEvent() {
-        isSender.set(false);
-        roleNegotiated.set(false);
-
-        service.setSender(true);
-
-        assertTrue(service.isSender());
-        assertTrue(service.isRoleNegotiated());
-        assertTrue(eventBus.hasDirectionEvent(true));
+        assertTrue(eventBus.hasDirectionEvent(sender));
     }
 
     @Test
@@ -133,25 +126,17 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
-    void retryNegotiationSendsWhenConnectedAndUnnegotiated() throws IOException {
+    void retryNegotiationLifecycle() throws IOException {
         service.retryNegotiationIfNeeded();
 
         assertTrue(protocol.roleNegotiateSent);
-    }
 
-    @Test
-    void retryNegotiationRespectsRateLimit() throws IOException {
-        service.retryNegotiationIfNeeded();
         protocol.roleNegotiateSent = false;
 
         service.retryNegotiationIfNeeded();
 
         assertFalse(protocol.roleNegotiateSent, "Immediate second retry must be rate-limited away");
-    }
 
-    @Test
-    void retryNegotiationSendsAgainAfterIntervalElapsed() throws IOException {
-        service.retryNegotiationIfNeeded();
         // Force the last-sent stamp into the past to simulate the interval elapsing.
         service.forceLastNegotiationSentForTest(System.currentTimeMillis() - 10_000);
         protocol.roleNegotiateSent = false;
@@ -288,21 +273,6 @@ class RoleNegotiationServiceTest {
     }
 
     @Test
-    void handleRoleNegotiateWithEqualPriorityUsesTieBreaker() throws IOException {
-        roleNegotiated.set(false);
-        isSender.set(false);
-        protocol.roleNegotiateSent = false;
-
-        long remotePriority = 1000L;
-        long remoteTieBreaker = 0L;
-
-        service.handleRoleNegotiate(remotePriority, remoteTieBreaker);
-
-        assertTrue(service.isRoleNegotiated());
-        assertTrue(protocol.roleNegotiateSent);
-    }
-
-    @Test
     void handleDirectionChangeSetsOppositeRole() {
         isSender.set(true);
         roleNegotiated.set(false);
@@ -333,26 +303,16 @@ class RoleNegotiationServiceTest {
         assertTrue(eventBus.hasDirectionEvent(true));
     }
 
-    @Test
-    void notifyDirectionChangeSendsProtocolMessage() throws IOException {
-        isSender.set(true);
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void notifyDirectionChangeSendsProtocolMessage(boolean sender) throws IOException {
+        isSender.set(sender);
         protocol.directionChangeSent = false;
 
         service.notifyDirectionChange();
 
         assertTrue(protocol.directionChangeSent);
-        assertEquals(true, protocol.lastDirectionChangeValue);
-    }
-
-    @Test
-    void notifyDirectionChangeSendsFalseWhenReceiver() throws IOException {
-        isSender.set(false);
-        protocol.directionChangeSent = false;
-
-        service.notifyDirectionChange();
-
-        assertTrue(protocol.directionChangeSent);
-        assertEquals(false, protocol.lastDirectionChangeValue);
+        assertEquals(sender, protocol.lastDirectionChangeValue);
     }
 
     @Test

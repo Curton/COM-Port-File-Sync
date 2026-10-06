@@ -17,7 +17,7 @@ import org.junit.jupiter.api.io.TempDir;
 class ConflictInfoTest {
 
     @Test
-    void constructorStoresValues() {
+    void constructorStoresValuesAndBinaryFlag() {
         FileChangeDetector.FileInfo localInfo =
                 new FileChangeDetector.FileInfo("test.txt", 100L, 0L, "md5-a");
         FileChangeDetector.FileInfo remoteInfo =
@@ -32,138 +32,69 @@ class ConflictInfoTest {
         assertEquals(remoteInfo, info.getRemoteInfo());
         assertFalse(info.isBinary());
         assertArrayEquals(localContent, info.getLocalContent());
+
+        ConflictInfo binaryInfo =
+                new ConflictInfo(
+                        "test.bin",
+                        new FileChangeDetector.FileInfo("test.bin", 100L, 0L, "md5-a"),
+                        new FileChangeDetector.FileInfo("test.bin", 200L, 0L, "md5-b"),
+                        true,
+                        new byte[] {0x01});
+        assertTrue(binaryInfo.isBinary());
     }
 
     @Test
-    void constructorStoresBinaryFlag() {
-        FileChangeDetector.FileInfo localInfo =
-                new FileChangeDetector.FileInfo("test.bin", 100L, 0L, "md5-a");
-        FileChangeDetector.FileInfo remoteInfo =
-                new FileChangeDetector.FileInfo("test.bin", 200L, 0L, "md5-b");
-
-        ConflictInfo info =
-                new ConflictInfo("test.bin", localInfo, remoteInfo, true, new byte[] {0x01});
-
-        assertTrue(info.isBinary());
-    }
-
-    @Test
-    void setRemoteContentStoresRemoteContent() {
+    void remoteContentLifecycle() {
         ConflictInfo info = createDefaultConflictInfo();
-        byte[] remoteContent = "remote content".getBytes(StandardCharsets.UTF_8);
-
-        info.setRemoteContent(remoteContent);
-
-        assertArrayEquals(remoteContent, info.getRemoteContent());
-    }
-
-    @Test
-    void getRemoteContentReturnsNullWhenNotSet() {
-        ConflictInfo info = createDefaultConflictInfo();
-
         assertNull(info.getRemoteContent());
+        assertEquals("", info.getRemoteContentAsString());
+
+        byte[] remoteContent = "remote content".getBytes(StandardCharsets.UTF_8);
+        info.setRemoteContent(remoteContent);
+        assertArrayEquals(remoteContent, info.getRemoteContent());
+        assertEquals("remote content", info.getRemoteContentAsString());
     }
 
     @Test
-    void setMergedContentStoresMergedContent() {
+    void mergedContentLifecycle() {
         ConflictInfo info = createDefaultConflictInfo();
+        assertNull(info.getMergedContentAsBytes());
 
         info.setMergedContent("merged content");
-
         assertEquals("merged content", info.getMergedContent());
-    }
-
-    @Test
-    void getMergedContentAsBytesReturnsUtf8Bytes() {
-        ConflictInfo info = createDefaultConflictInfo();
-        info.setMergedContent("merged content");
-
         byte[] expected = "merged content".getBytes(StandardCharsets.UTF_8);
         assertArrayEquals(expected, info.getMergedContentAsBytes());
     }
 
     @Test
-    void getMergedContentAsBytesReturnsNullWhenNotSet() {
-        ConflictInfo info = createDefaultConflictInfo();
-
-        assertNull(info.getMergedContentAsBytes());
-    }
-
-    @Test
-    void setResolutionStoresResolution() {
-        ConflictInfo info = createDefaultConflictInfo();
-
-        info.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
-
-        assertEquals(ConflictInfo.Resolution.KEEP_LOCAL, info.getResolution());
-    }
-
-    @Test
-    void getResolutionReturnsUnresolvedByDefault() {
+    void resolutionLifecycle() {
         ConflictInfo info = createDefaultConflictInfo();
 
         assertEquals(ConflictInfo.Resolution.UNRESOLVED, info.getResolution());
-    }
+        assertFalse(info.isResolved());
 
-    @Test
-    void setApplyTargetStoresApplyTarget() {
-        ConflictInfo info = createDefaultConflictInfo();
-
-        info.setApplyTarget(ConflictInfo.ApplyTarget.REMOTE_ONLY);
-
-        assertEquals(ConflictInfo.ApplyTarget.REMOTE_ONLY, info.getApplyTarget());
-    }
-
-    @Test
-    void getApplyTargetReturnsBothByDefault() {
-        ConflictInfo info = createDefaultConflictInfo();
-
-        assertEquals(ConflictInfo.ApplyTarget.BOTH, info.getApplyTarget());
-    }
-
-    @Test
-    void isResolvedReturnsTrueWhenResolved() {
-        ConflictInfo info = createDefaultConflictInfo();
-        info.setResolution(ConflictInfo.Resolution.SKIP);
-
+        info.setResolution(ConflictInfo.Resolution.KEEP_LOCAL);
+        assertEquals(ConflictInfo.Resolution.KEEP_LOCAL, info.getResolution());
         assertTrue(info.isResolved());
     }
 
     @Test
-    void isResolvedReturnsFalseWhenUnresolved() {
+    void applyTargetDefaultsToBothAndStores() {
         ConflictInfo info = createDefaultConflictInfo();
+        assertEquals(ConflictInfo.ApplyTarget.BOTH, info.getApplyTarget());
 
-        assertFalse(info.isResolved());
+        info.setApplyTarget(ConflictInfo.ApplyTarget.REMOTE_ONLY);
+        assertEquals(ConflictInfo.ApplyTarget.REMOTE_ONLY, info.getApplyTarget());
     }
 
     @Test
-    void getLocalContentAsStringReturnsUtf8String() {
+    void getLocalContentAsString_decodesUtf8AndHandlesNull() {
         byte[] localContent = "local content".getBytes(StandardCharsets.UTF_8);
         ConflictInfo info = new ConflictInfo("test.txt", null, null, false, localContent);
-
         assertEquals("local content", info.getLocalContentAsString());
-    }
 
-    @Test
-    void getLocalContentAsStringReturnsEmptyStringWhenNull() {
-        ConflictInfo info = new ConflictInfo("test.txt", null, null, false, null);
-
-        assertEquals("", info.getLocalContentAsString());
-    }
-
-    @Test
-    void getRemoteContentAsStringReturnsUtf8String() {
-        ConflictInfo info = createDefaultConflictInfo();
-        info.setRemoteContent("remote content".getBytes(StandardCharsets.UTF_8));
-
-        assertEquals("remote content", info.getRemoteContentAsString());
-    }
-
-    @Test
-    void getRemoteContentAsStringReturnsEmptyStringWhenNull() {
-        ConflictInfo info = createDefaultConflictInfo();
-
-        assertEquals("", info.getRemoteContentAsString());
+        ConflictInfo withoutContent = new ConflictInfo("test.txt", null, null, false, null);
+        assertEquals("", withoutContent.getLocalContentAsString());
     }
 
     @Test
@@ -179,9 +110,9 @@ class ConflictInfoTest {
     }
 
     @Test
-    void resolutionEnumHasAllExpectedValues() {
-        ConflictInfo.Resolution[] values = ConflictInfo.Resolution.values();
-        assertEquals(5, values.length);
+    void enumsHaveExpectedValues() {
+        ConflictInfo.Resolution[] resolutions = ConflictInfo.Resolution.values();
+        assertEquals(5, resolutions.length);
         assertEquals(
                 ConflictInfo.Resolution.KEEP_LOCAL, ConflictInfo.Resolution.valueOf("KEEP_LOCAL"));
         assertEquals(
@@ -191,12 +122,9 @@ class ConflictInfoTest {
         assertEquals(ConflictInfo.Resolution.MERGE, ConflictInfo.Resolution.valueOf("MERGE"));
         assertEquals(
                 ConflictInfo.Resolution.UNRESOLVED, ConflictInfo.Resolution.valueOf("UNRESOLVED"));
-    }
 
-    @Test
-    void applyTargetEnumHasAllExpectedValues() {
-        ConflictInfo.ApplyTarget[] values = ConflictInfo.ApplyTarget.values();
-        assertEquals(2, values.length);
+        ConflictInfo.ApplyTarget[] targets = ConflictInfo.ApplyTarget.values();
+        assertEquals(2, targets.length);
         assertEquals(
                 ConflictInfo.ApplyTarget.REMOTE_ONLY,
                 ConflictInfo.ApplyTarget.valueOf("REMOTE_ONLY"));

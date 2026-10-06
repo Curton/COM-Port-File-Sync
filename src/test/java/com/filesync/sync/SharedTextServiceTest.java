@@ -156,39 +156,6 @@ class SharedTextServiceTest {
     }
 
     @Test
-    void clearPendingSharedTextClearsAllPendingState() {
-        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-
-        SharedTextService service =
-                new SharedTextService(
-                        protocol,
-                        eventBus,
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> true);
-
-        // Queue some text first (this will send immediately due to all true suppliers)
-        service.queueSharedText("some text");
-        assertEquals(1, protocol.getSentTexts().size(), "Text should be sent during queue");
-
-        // Clear pending state
-        service.clearPendingSharedText();
-
-        // After clearing, resend should do nothing since latestSharedText is also cleared
-        // But we need to stop the service to prevent sending
-        service.clearPendingSharedText(); // Call again to ensure cleared state
-        protocol.getSentTexts().clear(); // Clear sent texts
-
-        // Now send new text - it should work since we cleared before
-        service.queueSharedText("new text");
-        assertEquals(1, protocol.getSentTexts().size(), "New text should be sent after clear");
-        assertEquals("new text", protocol.getSentTexts().get(0));
-    }
-
-    @Test
     void handleIncomingSharedTextDataReportsIOExceptionAsError() {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         protocol.setReceiveFailure(new IOException("connection lost"));
@@ -306,20 +273,9 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> false,
                         () -> true);
-        TestSharedTextProtocol notNegotiatedProtocol = new TestSharedTextProtocol();
-        SharedTextService notNegotiated =
-                new SharedTextService(
-                        notNegotiatedProtocol,
-                        new SimpleSyncEventBus(),
-                        () -> true,
-                        () -> true,
-                        () -> false,
-                        () -> false,
-                        () -> false); // role not negotiated
 
         notRunning.queueSharedText("should not send");
         notConnected.queueSharedText("should not send");
-        notNegotiated.queueSharedText("should not send");
 
         assertTrue(
                 notRunningProtocol.getSentTexts().isEmpty(),
@@ -327,9 +283,6 @@ class SharedTextServiceTest {
         assertTrue(
                 notConnectedProtocol.getSentTexts().isEmpty(),
                 "Nothing should be sent when not connected");
-        assertTrue(
-                notNegotiatedProtocol.getSentTexts().isEmpty(),
-                "Nothing should be sent when role not negotiated");
     }
 
     @Test

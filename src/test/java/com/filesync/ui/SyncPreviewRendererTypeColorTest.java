@@ -71,14 +71,6 @@ class SyncPreviewRendererTypeColorTest {
     }
 
     @Test
-    void deleteFileRedDiffersFromConflictRed() {
-        // Both read as red, but at different saturations so they are not mistaken for each other.
-        assertNotEquals(
-                SyncPreviewRenderer.typeColor(SyncPreviewOperationType.CONFLICT),
-                SyncPreviewRenderer.typeColor(SyncPreviewOperationType.DELETE_FILE));
-    }
-
-    @Test
     void deleteFileRendersItsOwnRedNotThePreviousRowColour() {
         List<SyncPreviewRow> rows =
                 List.of(

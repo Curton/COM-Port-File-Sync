@@ -13,7 +13,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Tests for CompressionUtil smart compression detection. */
 class CompressionUtilTest {
@@ -293,59 +297,44 @@ class CompressionUtilTest {
         assertArrayEquals(new byte[] {}, result.getData());
     }
 
-    @Test
-    void hasHighCompressionPotentialRejectsCompressedFormats() {
-        byte[] data = new byte[1000];
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.zip", data));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.jpg", data));
+    @ParameterizedTest
+    @MethodSource("hasHighCompressionPotentialClassifiesContent")
+    void hasHighCompressionPotentialClassifiesContent(
+            String fileName, byte[] data, boolean expected) {
+        assertEquals(
+                expected,
+                CompressionUtil.hasHighCompressionPotential(fileName, data),
+                "unexpected potential for " + fileName);
     }
 
-    @Test
-    void hasHighCompressionPotentialRejectsHighEntropyBinary() {
+    private static Stream<Arguments> hasHighCompressionPotentialClassifiesContent() {
+        byte[] zeros = new byte[1000];
         byte[] highEntropy = new byte[2000];
-        for (int i = 0; i < highEntropy.length; i++) {
-            highEntropy[i] = (byte) (Math.random() * 256);
-        }
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.bin", highEntropy));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("noextension", highEntropy));
-    }
-
-    @Test
-    void hasHighCompressionPotentialAcceptsTextFiles() {
-        String text = "Hello World\nThis is a test file.\nWith some content.\n";
-        byte[] data = text.repeat(100).getBytes(StandardCharsets.UTF_8);
-        assertTrue(CompressionUtil.hasHighCompressionPotential("file.txt", data));
-        assertTrue(CompressionUtil.hasHighCompressionPotential("file.java", data));
-        assertTrue(CompressionUtil.hasHighCompressionPotential("file.xml", data));
-        assertTrue(CompressionUtil.hasHighCompressionPotential("file.json", data));
-    }
-
-    @Test
-    void hasHighCompressionPotentialRejectsSmallData() {
+        new java.util.Random(42).nextBytes(highEntropy);
+        byte[] moreHighEntropy = new byte[2000];
+        new java.util.Random(1337).nextBytes(moreHighEntropy);
+        byte[] textData =
+                "Hello World\nThis is a test file.\nWith some content.\n"
+                        .repeat(100)
+                        .getBytes(StandardCharsets.UTF_8);
         byte[] smallData = "Small".getBytes(StandardCharsets.UTF_8);
-        assertFalse(
-                CompressionUtil.hasHighCompressionPotential("file.unknown", smallData),
-                "Unknown extension with small data should be rejected");
-    }
-
-    @Test
-    void hasHighCompressionPotentialHandlesEdgeCases() {
-        assertFalse(CompressionUtil.hasHighCompressionPotential(null, null));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.unknown", null));
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.unknown", new byte[] {}));
-        assertFalse(CompressionUtil.hasHighCompressionPotential(null, new byte[] {1, 2, 3, 4, 5}));
-    }
-
-    @Test
-    void hasHighCompressionPotentialForUnknownExtensionAnalyzesContent() {
         byte[] repetitiveData = "AAAA".repeat(500).getBytes(StandardCharsets.UTF_8);
-        assertTrue(CompressionUtil.hasHighCompressionPotential("file.unk", repetitiveData));
-
-        byte[] randomData = new byte[2000];
-        for (int i = 0; i < randomData.length; i++) {
-            randomData[i] = (byte) (Math.random() * 256);
-        }
-        assertFalse(CompressionUtil.hasHighCompressionPotential("file.unk", randomData));
+        return Stream.of(
+                Arguments.of("file.zip", zeros, false),
+                Arguments.of("file.jpg", zeros, false),
+                Arguments.of("file.bin", highEntropy, false),
+                Arguments.of("noextension", highEntropy, false),
+                Arguments.of("file.txt", textData, true),
+                Arguments.of("file.java", textData, true),
+                Arguments.of("file.xml", textData, true),
+                Arguments.of("file.json", textData, true),
+                Arguments.of("file.unknown", smallData, false),
+                Arguments.of(null, null, false),
+                Arguments.of("file.unknown", null, false),
+                Arguments.of("file.unknown", new byte[] {}, false),
+                Arguments.of(null, new byte[] {1, 2, 3, 4, 5}, false),
+                Arguments.of("file.unk", repetitiveData, true),
+                Arguments.of("file.unk", moreHighEntropy, false));
     }
 
     @Test

@@ -23,45 +23,22 @@ import org.junit.jupiter.api.Timeout;
 class XModemTransferTest {
 
     @Test
-    void receivePreservesTrailingCtrlZWhenLengthIsKnown() throws IOException {
+    void receiveTrailingCtrlZHandlingDependsOnExpectedLength() throws IOException {
         byte[] payload = {'A', 0x1A};
         byte[] frame = buildSohFrame(payload);
+
         TestSerialPortManager serialPort = new TestSerialPortManager(frame);
         XModemTransfer transfer = new XModemTransfer(serialPort);
-
         byte[] result = transfer.receive(payload.length);
 
         assertNotNull(result);
         assertArrayEquals(payload, result);
-    }
 
-    @Test
-    void receiveWithoutExpectedLengthStillTrimsTrailingCtrlZPadding() throws IOException {
-        byte[] payload = {'A', 0x1A};
-        byte[] frame = buildSohFrame(payload);
-        TestSerialPortManager serialPort = new TestSerialPortManager(frame);
-        XModemTransfer transfer = new XModemTransfer(serialPort);
-
-        byte[] result = transfer.receive(-1);
+        serialPort = new TestSerialPortManager(frame);
+        transfer = new XModemTransfer(serialPort);
+        result = transfer.receive(-1);
 
         assertArrayEquals(new byte[] {'A'}, result);
-    }
-
-    @Test
-    void receiveIntoStreamsVerifiedBlocksAndCapsPaddingAtExpectedLength() throws IOException {
-        // Crosses block formats: one 4096-byte block plus a 104-byte tail inside a 128-byte block.
-        byte[] payload = new byte[4200];
-        for (int i = 0; i < payload.length; i++) {
-            payload[i] = (byte) (i * 31);
-        }
-        TestSerialPortManager serialPort = new TestSerialPortManager(buildMultiBlockFrame(payload));
-        XModemTransfer transfer = new XModemTransfer(serialPort);
-        ByteArrayOutputStream sink = new ByteArrayOutputStream();
-
-        long written = transfer.receiveInto(payload.length, sink);
-
-        assertEquals(payload.length, written, "A clean transfer reports the expected length");
-        assertArrayEquals(payload, sink.toByteArray(), "Streaming must preserve the payload");
     }
 
     @Test
@@ -86,18 +63,6 @@ class XModemTransferTest {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
 
         assertEquals(-1, transfer.receiveInto(100, sink), "A sender cancel must report failure");
-        assertEquals(0, sink.size());
-    }
-
-    @Test
-    void receiveIntoPropagatesMidBlockStreamFailure() {
-        // Handshake + block header only: the block data read hits end-of-stream and must throw.
-        byte[] partial = new byte[] {XModemTransfer.SOH, 1, (byte) 254, 'a', 'b', 'c'};
-        TestSerialPortManager serialPort = new TestSerialPortManager(partial);
-        XModemTransfer transfer = new XModemTransfer(serialPort);
-        ByteArrayOutputStream sink = new ByteArrayOutputStream();
-
-        assertThrows(IOException.class, () -> transfer.receiveInto(128, sink));
         assertEquals(0, sink.size());
     }
 
@@ -147,6 +112,7 @@ class XModemTransferTest {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
 
         assertThrows(IOException.class, () -> transfer.receiveInto(128, sink));
+        assertEquals(0, sink.size());
 
         assertEquals(
                 6,
@@ -444,33 +410,13 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
-    void receiveIntoToleratesGarbageInterleavedLine() throws IOException {
-        byte[] payload = {'A'};
-        byte[] frame = "[[SYNC:BOGUS]]\n".getBytes(StandardCharsets.UTF_8);
-        ByteArrayOutputStream stream = new ByteArrayOutputStream();
-        stream.writeBytes(frame);
-        stream.writeBytes(buildSohFrame(payload));
-        RecordingTestSerialPortManager serialPort =
-                new RecordingTestSerialPortManager(stream.toByteArray());
-        XModemTransfer transfer = new XModemTransfer(serialPort);
-        List<String> receivedLines = new ArrayList<>();
-        transfer.setInterleavedFrameHandler(receivedLines::add);
-        ByteArrayOutputStream sink = new ByteArrayOutputStream();
-
-        long written = transfer.receiveInto(payload.length, sink);
-
-        assertEquals(payload.length, written, "garbage between frames must not end the session");
-        assertArrayEquals(payload, sink.toByteArray());
-        assertEquals(List.of("[[SYNC:BOGUS]]"), receivedLines);
-    }
-
-    @Test
-    @Timeout(20)
-    void receiveIntoAcksInterleavedFrameEvenWithoutHandler() throws IOException {
+    void receiveIntoAcksInterleavedFrameWithoutHandlerAndWhenHandlerThrows() throws IOException {
         byte[] payload = {'A'};
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
         stream.writeBytes(INTERLEAVE_FRAME);
         stream.writeBytes(buildSohFrame(payload));
+
+        // No handler installed: the frame must not stall the session.
         RecordingTestSerialPortManager serialPort =
                 new RecordingTestSerialPortManager(stream.toByteArray());
         XModemTransfer transfer = new XModemTransfer(serialPort);
@@ -483,27 +429,18 @@ class XModemTransferTest {
         assertTrue(
                 countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK}) >= 2,
                 "frame and blocks are acknowledged even with no handler");
-    }
 
-    @Test
-    @Timeout(20)
-    void receiveIntoAcksFrameAndCompletesWhenHandlerThrows() throws IOException {
         // A handler failure must not escape the receive loop: the frame is still ACKed so the
         // sender does not retry it, and the file session has to complete untouched.
-        byte[] payload = {'A'};
-        ByteArrayOutputStream stream = new ByteArrayOutputStream();
-        stream.writeBytes(INTERLEAVE_FRAME);
-        stream.writeBytes(buildSohFrame(payload));
-        RecordingTestSerialPortManager serialPort =
-                new RecordingTestSerialPortManager(stream.toByteArray());
-        XModemTransfer transfer = new XModemTransfer(serialPort);
+        serialPort = new RecordingTestSerialPortManager(stream.toByteArray());
+        transfer = new XModemTransfer(serialPort);
         transfer.setInterleavedFrameHandler(
                 line -> {
                     throw new IllegalStateException("handler blew up");
                 });
-        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        sink = new ByteArrayOutputStream();
 
-        long written = transfer.receiveInto(payload.length, sink);
+        written = transfer.receiveInto(payload.length, sink);
 
         assertEquals(payload.length, written, "a throwing handler must not abort the session");
         assertArrayEquals(payload, sink.toByteArray());

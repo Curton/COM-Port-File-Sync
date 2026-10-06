@@ -129,6 +129,18 @@ class SyncCoordinatorRenameExecutionTest {
         assertNotNull(store.base("new.bin"));
         assertEquals("md5-abc", store.base("new.bin").md5());
         assertEquals(1024L, store.base("new.bin").size());
+
+        // The rename's progress event counts towards the session total like any transfer.
+        ArgumentCaptor<SyncEvent> events = ArgumentCaptor.forClass(SyncEvent.class);
+        verify(mockEventBus, atLeastOnce()).post(events.capture());
+        List<String> progressPaths =
+                events.getAllValues().stream()
+                        .filter(e -> e instanceof SyncEvent.FileProgressEvent)
+                        .map(e -> ((SyncEvent.FileProgressEvent) e).getFileName())
+                        .toList();
+        assertTrue(
+                progressPaths.contains("[REN] old.bin -> new.bin"),
+                "the rename must show in the progress line, got: " + progressPaths);
     }
 
     @Test
@@ -153,27 +165,5 @@ class SyncCoordinatorRenameExecutionTest {
         SyncStateStore store = coordinator.baseStateStore();
         assertNotNull(store.base("new.bin"));
         assertEquals("md5-abc", store.base("new.bin").md5());
-    }
-
-    @Test
-    void renameProgressEventsCountTowardsTheSessionTotal() throws IOException {
-        FileRename rename = new FileRename("old.bin", "new.bin", 1024L, 777L, "md5-abc");
-        when(mockProtocol.sendFileRename("old.bin", "new.bin", 1024L, 777L, "md5-abc"))
-                .thenReturn(true);
-        when(mockProtocol.waitForWriteFailures()).thenReturn(Set.of());
-        SyncCoordinator coordinator = createCoordinator();
-
-        coordinator.startSyncWithPlan(planWith(rename));
-
-        ArgumentCaptor<SyncEvent> events = ArgumentCaptor.forClass(SyncEvent.class);
-        verify(mockEventBus, atLeastOnce()).post(events.capture());
-        List<String> progressPaths =
-                events.getAllValues().stream()
-                        .filter(e -> e instanceof SyncEvent.FileProgressEvent)
-                        .map(e -> ((SyncEvent.FileProgressEvent) e).getFileName())
-                        .toList();
-        assertTrue(
-                progressPaths.contains("[REN] old.bin -> new.bin"),
-                "the rename must show in the progress line, got: " + progressPaths);
     }
 }

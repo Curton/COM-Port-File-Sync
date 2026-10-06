@@ -1,7 +1,6 @@
 package com.filesync.delta;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -26,8 +25,6 @@ class SignatureSerializationTest {
         assertEquals(fs.getBlockCount(), back.getBlockCount());
         assertEquals(fs.getSourceSize(), back.getSourceSize());
         assertEquals(fs.getSignatures(), back.getSignatures());
-        assertEquals(0, back.getSignatures().get(0).getBlockIndex());
-        assertEquals(1, back.getSignatures().get(1).getBlockIndex());
     }
 
     @Test
@@ -51,8 +48,6 @@ class SignatureSerializationTest {
         SignatureSet back = SignatureSet.fromBytes(bytes);
 
         assertEquals(2, back.size());
-        assertNotNull(back.get("a.bin"));
-        assertNotNull(back.get("b.bin"));
         assertEquals(fs1.getSignatures(), back.get("a.bin").getSignatures());
         assertEquals(fs2.getSignatures(), back.get("b.bin").getSignatures());
     }

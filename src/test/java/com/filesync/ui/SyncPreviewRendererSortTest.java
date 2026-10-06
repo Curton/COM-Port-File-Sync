@@ -1,16 +1,20 @@
 package com.filesync.ui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 import javax.swing.JTable;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableRowSorter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class SyncPreviewRendererSortTest {
 
@@ -19,35 +23,33 @@ class SyncPreviewRendererSortTest {
                 SyncPreviewOperationType.NEW, path, UiFormatting.formatBytes(sizeBytes), sizeBytes);
     }
 
-    @Test
-    void pathCompareOrdersSegmentsBeforeFileNames() {
-        // Raw string order would put "a.txt" first ('.' < '/'); directory order groups the
-        // "a" directory before "a.txt".
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("a/b.txt", "a.txt") < 0);
-        // Raw string order would put "a-x/c" first ('-' < '/'); directory order compares the
-        // first segment, where "a" < "a-x".
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("a/b", "a-x/c") < 0);
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("a-x/c", "a/b") > 0);
+    @ParameterizedTest
+    @MethodSource("pathCompareSamples")
+    void pathCompareUsesDirectoryOrder(String a, String b, int expectedSignum) {
+        assertEquals(
+                expectedSignum,
+                Integer.signum(SyncPreviewRenderer.comparePathsDirectoryOrder(a, b)));
     }
 
-    @Test
-    void pathCompareOrdersAncestorBeforeDescendant() {
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("dir", "dir/file.txt") < 0);
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("dir/file.txt", "dir") > 0);
-        assertEquals(
-                0, SyncPreviewRenderer.comparePathsDirectoryOrder("dir/file.txt", "dir/file.txt"));
-    }
-
-    @Test
-    void pathCompareHandlesSeparatorsAndCase() {
-        // Windows-style separators compare the same as forward slashes.
-        assertEquals(
-                0, SyncPreviewRenderer.comparePathsDirectoryOrder("dir/file.txt", "dir\\file.txt"));
-        assertTrue(
-                SyncPreviewRenderer.comparePathsDirectoryOrder("dir/file.txt", "dir\\zzz.txt") < 0);
-        // Case is ignored first, so "B" and "b" group together before "c".
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("b/file.txt", "C/file.txt") < 0);
-        assertTrue(SyncPreviewRenderer.comparePathsDirectoryOrder("C/file.txt", "b/file.txt") > 0);
+    private static Stream<Arguments> pathCompareSamples() {
+        return Stream.of(
+                // Raw string order would put "a.txt" first ('.' < '/'); directory order groups the
+                // "a" directory before "a.txt".
+                arguments("a/b.txt", "a.txt", -1),
+                // Raw string order would put "a-x/c" first ('-' < '/'); directory order compares
+                // the first segment, where "a" < "a-x".
+                arguments("a/b", "a-x/c", -1),
+                arguments("a-x/c", "a/b", 1),
+                // An ancestor directory sorts before its descendants.
+                arguments("dir", "dir/file.txt", -1),
+                arguments("dir/file.txt", "dir", 1),
+                arguments("dir/file.txt", "dir/file.txt", 0),
+                // Windows-style separators compare the same as forward slashes.
+                arguments("dir/file.txt", "dir\\file.txt", 0),
+                arguments("dir/file.txt", "dir\\zzz.txt", -1),
+                // Case is ignored first, so "B" and "b" group together before "c".
+                arguments("b/file.txt", "C/file.txt", -1),
+                arguments("C/file.txt", "b/file.txt", 1));
     }
 
     @Test

@@ -9,7 +9,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.filesync.delta.DeltaEncoder;
 import com.filesync.delta.HashUtil;
 import com.filesync.delta.SignatureUtil;
-import com.filesync.protocol.FileWriteException;
 import com.filesync.protocol.ManifestMismatchException;
 import com.filesync.protocol.SyncProtocol;
 import com.filesync.serial.SerialPortManager;
@@ -205,40 +204,6 @@ class SyncProtocolTransferMd5Test {
                 List.of("app.log:" + manifestMd5 + ":" + full.length),
                 confirmed,
                 "the append path confirms from the header's manifest md5");
-    }
-
-    // ========== write-failure confirmation ==========
-
-    @Test
-    void receiveFile_lockedTarget_reportsFailureWithoutConfirming() throws IOException {
-        byte[] payload = randomBytes(300, 9);
-        // A directory at the target path makes FileOutputStream fail on every platform, which is
-        // how a file locked by another program surfaces on Windows.
-        Files.createDirectory(tempDir.resolve("locked.bin"));
-        SyncProtocol protocol = new SyncProtocol(new ByteStreamSerialPortManager(feed(payload)));
-        List<String> confirmed = recordConfirmations(protocol);
-        List<String> failures = recordFailures(protocol);
-
-        String manifestMd5 = FileChangeDetector.manifestMd5(payload);
-        FileWriteException thrown =
-                assertThrows(
-                        FileWriteException.class,
-                        () ->
-                                protocol.receiveFile(
-                                        tempDir.toFile(),
-                                        "locked.bin",
-                                        payload.length,
-                                        false,
-                                        42L,
-                                        manifestMd5));
-        assertEquals("locked.bin", thrown.getRelativePath());
-        assertArrayEquals(
-                payload,
-                thrown.getData(),
-                "the payload must still travel with the exception for a deferred retry");
-        assertEquals(
-                List.of("locked.bin"), failures, "a locked target is reported as a write failure");
-        assertTrue(confirmed.isEmpty(), "a failed write confirms nothing");
     }
 
     // ========== harness ==========

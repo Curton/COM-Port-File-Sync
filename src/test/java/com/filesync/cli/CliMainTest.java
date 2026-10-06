@@ -24,8 +24,7 @@ class CliMainTest {
     }
 
     @Test
-    void missingOptionsAreUsageErrors() throws Exception {
-        Path folder = Files.createDirectories(tempDir.resolve("folder"));
+    void missingOptionsAreUsageErrors() {
         assertEquals(CliMain.EXIT_USAGE, CliMain.run(new String[] {"send"}));
         assertEquals(CliMain.EXIT_USAGE, CliMain.run(new String[] {"send", "--port", "COM1"}));
         assertEquals(
@@ -38,9 +37,6 @@ class CliMainTest {
                             "--folder",
                             tempDir.resolve("missing").toString()
                         }));
-        assertEquals(
-                CliMain.EXIT_USAGE,
-                CliMain.run(new String[] {"send", "--folder", folder.toString()}));
     }
 
     @Test

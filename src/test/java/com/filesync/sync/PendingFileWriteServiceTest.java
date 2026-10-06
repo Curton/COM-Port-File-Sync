@@ -107,10 +107,6 @@ class PendingFileWriteServiceTest {
                     return f.exists() && f.lastModified() == senderModified;
                 },
                 Duration.ofSeconds(5));
-        assertEquals(
-                senderModified,
-                new File(tempDir.toFile(), "a.txt").lastModified(),
-                "Sender timestamp must be restored so the next manifest comparison matches");
     }
 
     @Test

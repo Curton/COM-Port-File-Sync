@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -14,8 +15,12 @@ import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Tests for {@link ConflictAnalyzer}: the base-state arbitration matrix (R == B is the only
@@ -74,74 +79,71 @@ class ConflictAnalyzerTest {
         }
     }
 
-    @Test
-    void bothSidesModifiedWithBase_conflicts() throws IOException {
-        ConflictSetup setup = setup("local version", "remote version");
-        String base =
-                FileChangeDetector.manifestMd5("agreed version".getBytes(StandardCharsets.UTF_8));
-        // L != B, R != B, L != R: both sides moved away from the agreement.
-        List<ConflictInfo> conflicts = findConflicts(setup, base);
+    /**
+     * The base-state arbitration matrix: R == B is the only non-conflict divergence, a receiver
+     * that moved away from the base conflicts, an unknown base (first sync) is conservatively a
+     * conflict, and identical content never conflicts even without a base.
+     */
+    @ParameterizedTest
+    @MethodSource("baseArbitrationMatrix")
+    void findConflicts_baseArbitrationMatrix(
+            String localContent, String remoteContent, BaseMode baseMode, int expectedCount)
+            throws IOException {
+        ConflictSetup setup = setup(localContent, remoteContent);
+        String baseMd5 =
+                switch (baseMode) {
+                    case OTHER ->
+                            FileChangeDetector.manifestMd5(
+                                    "agreed version".getBytes(StandardCharsets.UTF_8));
+                    case REMOTE -> setup.remoteMd5();
+                    case LOCAL -> setup.localMd5();
+                    case NONE -> null;
+                };
 
-        assertEquals(1, conflicts.size(), "both sides modified: conflict");
-        ConflictInfo conflict = conflicts.get(0);
-        assertEquals("file.txt", conflict.getPath());
-        assertFalse(conflict.isBinary(), "Text file should not be marked as binary");
-        assertNotNull(conflict.getLocalContent());
-    }
-
-    @Test
-    void onlySenderModified_normalTransfer_noConflict() throws IOException {
-        ConflictSetup setup = setup("sender modified content", "old content");
-        // The receiver still holds the agreed-on version: only the sender modified the file.
-        List<ConflictInfo> conflicts = findConflicts(setup, setup.remoteMd5());
-
-        assertTrue(
-                conflicts.isEmpty(), "only sender modified (R == B): normal transfer, no conflict");
-    }
-
-    @Test
-    void onlyReceiverModified_conflicts() throws IOException {
-        ConflictSetup setup = setup("old content", "receiver modified content");
-        // The sender still holds the agreed-on version; pushing it would lose receiver changes.
-        List<ConflictInfo> conflicts = findConflicts(setup, setup.localMd5());
-
-        assertEquals(1, conflicts.size(), "only receiver modified (R != B): conflict");
-    }
-
-    @Test
-    void noBase_firstSync_everyDifferenceConflicts() throws IOException {
-        ConflictSetup setup = setup("local version", "remote version");
-        List<ConflictInfo> conflicts = findConflicts(setup, null);
+        List<ConflictInfo> conflicts = findConflicts(setup, baseMd5);
 
         assertEquals(
-                1,
+                expectedCount,
                 conflicts.size(),
-                "without a recorded base the history is unknown: conservatively a conflict");
+                "arbitration verdict for base mode "
+                        + baseMode
+                        + ": "
+                        + localContent
+                        + " vs "
+                        + remoteContent);
+        if (expectedCount == 1) {
+            ConflictInfo conflict = conflicts.get(0);
+            assertEquals("file.txt", conflict.getPath());
+            assertFalse(conflict.isBinary(), "Text file should not be marked as binary");
+            assertNotNull(conflict.getLocalContent());
+        }
     }
 
-    @Test
-    void identicalContent_neverConflicts() throws IOException {
-        Path localDir = tempDir.resolve("local");
-        Path remoteDir = tempDir.resolve("remote");
-        Files.createDirectories(localDir);
-        Files.createDirectories(remoteDir);
-        Files.writeString(localDir.resolve("file.txt"), "same content");
-        Files.writeString(remoteDir.resolve("file.txt"), "same content");
+    private enum BaseMode {
+        /** A third version neither side holds. */
+        OTHER,
+        /** The manifest base is the remote (receiver) content. */
+        REMOTE,
+        /** The manifest base is the local (sender) content. */
+        LOCAL,
+        /** No base recorded yet (first sync). */
+        NONE
+    }
 
-        FileChangeDetector.FileManifest localManifest =
-                FileChangeDetector.generateManifest(localDir.toFile(), false, false);
-        FileChangeDetector.FileManifest remoteManifest =
-                FileChangeDetector.generateManifest(remoteDir.toFile(), false, false);
-
-        // Even a missing base cannot manufacture a conflict: content must differ first.
-        List<ConflictInfo> conflicts =
-                ConflictAnalyzer.findConflicts(
-                        localManifest,
-                        remoteManifest,
-                        localDir.toFile(),
-                        new SyncStateStore(localDir.resolve("state.json").toFile()));
-
-        assertTrue(conflicts.isEmpty(), "No conflicts when files are identical");
+    private static Stream<Arguments> baseArbitrationMatrix() {
+        return Stream.of(
+                // L != B, R != B, L != R: both sides moved away from the agreement.
+                arguments("local version", "remote version", BaseMode.OTHER, 1),
+                // The receiver still holds the agreed-on version: only the sender modified the
+                // file (R == B), so a normal transfer must not raise a conflict.
+                arguments("sender modified content", "old content", BaseMode.REMOTE, 0),
+                // The sender still holds the agreed-on version; pushing it would lose receiver
+                // changes (R != B).
+                arguments("old content", "receiver modified content", BaseMode.LOCAL, 1),
+                // Without a recorded base the history is unknown: conservatively a conflict.
+                arguments("local version", "remote version", BaseMode.NONE, 1),
+                // Even a missing base cannot manufacture a conflict: content must differ first.
+                arguments("same content", "same content", BaseMode.NONE, 0));
     }
 
     @Test
@@ -249,50 +251,46 @@ class ConflictAnalyzerTest {
                 "fast mode with an older receiver must keep transferring without a dialog");
     }
 
-    @Test
-    void isBinaryExtension_detectsBinaryExtensions() {
-        assertTrue(ConflictAnalyzer.isBinaryExtension("image.jpg"));
-        assertTrue(ConflictAnalyzer.isBinaryExtension("document.pdf"));
-        assertTrue(ConflictAnalyzer.isBinaryExtension("archive.zip"));
-        assertTrue(ConflictAnalyzer.isBinaryExtension("video.mp4"));
-        assertTrue(ConflictAnalyzer.isBinaryExtension("audio.mp3"));
+    @ParameterizedTest
+    @MethodSource("binaryExtensionCases")
+    void isBinaryExtension_classifiesByName(String fileName, boolean expected) {
+        assertEquals(expected, ConflictAnalyzer.isBinaryExtension(fileName), "for " + fileName);
     }
 
-    @Test
-    void isBinaryExtension_detectsTextExtensions() {
-        assertFalse(ConflictAnalyzer.isBinaryExtension("file.txt"));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("source.java"));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("document.json"));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("config.xml"));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("script.py"));
+    private static Stream<Arguments> binaryExtensionCases() {
+        return Stream.of(
+                // Binary extensions.
+                arguments("image.jpg", true),
+                arguments("document.pdf", true),
+                arguments("archive.zip", true),
+                arguments("video.mp4", true),
+                arguments("audio.mp3", true),
+                // Text extensions.
+                arguments("file.txt", false),
+                arguments("source.java", false),
+                arguments("document.json", false),
+                arguments("config.xml", false),
+                arguments("script.py", false),
+                // Edge cases: no extension, a trailing dot, an empty name and null.
+                arguments("noextension", false),
+                arguments("file.", false),
+                arguments("", false),
+                arguments(null, false));
     }
 
-    @Test
-    void isBinaryExtension_handlesEdgeCases() {
-        assertFalse(ConflictAnalyzer.isBinaryExtension(null));
-        assertFalse(ConflictAnalyzer.isBinaryExtension(""));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("noextension"));
-        assertFalse(ConflictAnalyzer.isBinaryExtension("file."));
-    }
-
-    @Test
-    void contentDiffers_detectsDifferentMd5() {
+    @ParameterizedTest
+    @MethodSource("md5ContentDifferenceCases")
+    void contentDiffers_comparesMd5(String localMd5, String remoteMd5, boolean expected) {
         FileChangeDetector.FileInfo local =
-                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), "abc123");
+                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), localMd5);
         FileChangeDetector.FileInfo remote =
-                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), "def456");
+                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), remoteMd5);
 
-        assertTrue(ConflictAnalyzer.contentDiffers(local, remote));
+        assertEquals(expected, ConflictAnalyzer.contentDiffers(local, remote));
     }
 
-    @Test
-    void contentDiffers_detectsSameMd5() {
-        FileChangeDetector.FileInfo local =
-                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), "abc123");
-        FileChangeDetector.FileInfo remote =
-                new FileChangeDetector.FileInfo("path", 100, System.currentTimeMillis(), "abc123");
-
-        assertFalse(ConflictAnalyzer.contentDiffers(local, remote));
+    private static Stream<Arguments> md5ContentDifferenceCases() {
+        return Stream.of(arguments("abc123", "def456", true), arguments("abc123", "abc123", false));
     }
 
     @Test

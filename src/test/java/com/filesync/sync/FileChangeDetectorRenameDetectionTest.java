@@ -2,6 +2,7 @@ package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.filesync.sync.FileChangeDetector.FileInfo;
 import com.filesync.sync.FileChangeDetector.FileManifest;
@@ -10,7 +11,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Rename/move detection: a path the sender added whose content matches a path the sender no longer
@@ -51,44 +56,56 @@ class FileChangeDetectorRenameDetectionTest {
         assertEquals("md5-x", rename.getMd5());
     }
 
-    @Test
-    void noPairingWhenContentDiffers() {
-        FileManifest sender = manifest(true, files(file("archive.bin", 100, "md5-new")));
-        FileManifest receiver = manifest(true, files(file("big.bin", 100, "md5-old")));
-
+    @ParameterizedTest
+    @MethodSource("findRenamesSkipsPairingScenarios")
+    void findRenames_skipsPairing(FileManifest sender, FileManifest receiver) {
         assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
     }
 
-    @Test
-    void noPairingWhenOldPathStillExistsOnSender() {
-        // The sender copied the file rather than moving it: the old path must stay on the receiver.
-        FileManifest sender =
-                manifest(
-                        true, files(file("big.bin", 100, "md5-x"), file("copy.bin", 100, "md5-x")));
-        FileManifest receiver = manifest(true, files(file("big.bin", 100, "md5-x")));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
-    }
-
-    @Test
-    void noPairingWhenNewPathAlreadyExistsOnReceiver() {
-        // The new path exists there: this is a modification, not a rename.
-        FileManifest sender = manifest(true, files(file("archive.bin", 110, "md5-x")));
-        FileManifest receiver =
-                manifest(
-                        true,
-                        files(file("big.bin", 100, "md5-x"), file("archive.bin", 100, "md5-old")));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
-    }
-
-    @Test
-    void noPairingWithoutHashesOnBothSides() {
-        // Fast mode leaves binaries unhashed: nothing reliable to match on, transfer as usual.
-        FileManifest sender = manifest(true, files(file("archive.bin", 100, null)));
-        FileManifest receiver = manifest(true, files(file("big.bin", 100, null)));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
+    private static Stream<Arguments> findRenamesSkipsPairingScenarios() {
+        return Stream.of(
+                // Content differs between the old and the new path.
+                arguments(
+                        manifest(true, files(file("archive.bin", 100, "md5-new"))),
+                        manifest(true, files(file("big.bin", 100, "md5-old")))),
+                // The sender copied the file rather than moving it: the old path must stay.
+                arguments(
+                        manifest(
+                                true,
+                                files(
+                                        file("big.bin", 100, "md5-x"),
+                                        file("copy.bin", 100, "md5-x"))),
+                        manifest(true, files(file("big.bin", 100, "md5-x")))),
+                // The new path already exists on the receiver: a modification, not a rename.
+                arguments(
+                        manifest(true, files(file("archive.bin", 110, "md5-x"))),
+                        manifest(
+                                true,
+                                files(
+                                        file("big.bin", 100, "md5-x"),
+                                        file("archive.bin", 100, "md5-old")))),
+                // Fast mode leaves binaries unhashed: nothing reliable to match on.
+                arguments(
+                        manifest(true, files(file("archive.bin", 100, null))),
+                        manifest(true, files(file("big.bin", 100, null)))),
+                // On a case-insensitive receiver Foo.txt and foo.txt are one file: the
+                // "rename" would move the file onto itself. The regular transfer handles the
+                // new spelling instead.
+                arguments(
+                        manifest(false, files(file("foo.txt", 11, "new"))),
+                        manifest(false, files(file("Foo.txt", 10, "new")))),
+                // Even on a case-sensitive target the two spellings are two entries, so the
+                // regular transfer-plus-delete mirrors the rename faithfully; pairing it as a
+                // move would only risk the move clobbering the target.
+                arguments(
+                        manifest(true, files(file("foo.txt", 11, "new"))),
+                        manifest(true, files(file("Foo.txt", 11, "new")))),
+                // The receiver's case-insensitive filesystem already holds the new spelling:
+                // the new path is a modification there, not a rename target.
+                arguments(
+                        manifest(false, files(file("A.txt", 11, "new"))),
+                        manifest(
+                                false, files(file("a.txt", 10, "old"), file("b.txt", 10, "new")))));
     }
 
     @Test
@@ -127,37 +144,6 @@ class FileChangeDetectorRenameDetectionTest {
         assertEquals(1, renames.size());
         assertEquals("old.bin", renames.get(0).getFromPath());
         assertEquals("a.bin", renames.get(0).getToPath());
-    }
-
-    @Test
-    void caseOnlyRenameIsNeverPaired() {
-        // On a case-insensitive receiver Foo.txt and foo.txt are one file: the "rename" would move
-        // the file onto itself. The regular transfer handles the new spelling instead.
-        FileManifest sender = manifest(false, files(file("foo.txt", 11, "new")));
-        FileManifest receiver = manifest(false, files(file("Foo.txt", 10, "new")));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
-    }
-
-    @Test
-    void caseOnlyRenameIsNeverPairedEvenOnCaseSensitiveTarget() {
-        // The two spellings are two entries there, so the regular transfer-plus-delete mirrors the
-        // rename faithfully; pairing it as a move would only risk the move clobbering the target.
-        FileManifest sender = manifest(true, files(file("foo.txt", 11, "new")));
-        FileManifest receiver = manifest(true, files(file("Foo.txt", 11, "new")));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
-    }
-
-    @Test
-    void caseInsensitiveReceiverDoesNotPairPathThatResolvesToExistingFile() {
-        // The sender renamed b.txt to A.txt, but the receiver's filesystem already holds that
-        // spelling: the new path is a modification there, not a rename target.
-        FileManifest sender = manifest(false, files(file("A.txt", 11, "new")));
-        FileManifest receiver =
-                manifest(false, files(file("a.txt", 10, "old"), file("b.txt", 10, "new")));
-
-        assertTrue(FileChangeDetector.findRenames(sender, receiver).isEmpty());
     }
 
     @Test

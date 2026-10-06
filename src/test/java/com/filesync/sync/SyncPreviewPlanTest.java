@@ -285,10 +285,8 @@ class SyncPreviewPlanTest {
                         List.of(),
                         null);
         assertTrue(nullPlan.getDeltaCandidatePaths().isEmpty());
-    }
 
-    @Test
-    void deltaCandidatePathsAreRetainedAndImmutable() {
+        // Candidates supplied by the caller are retained as-is.
         Set<String> candidates = new LinkedHashSet<>(List.of("x.bin", "y.bin"));
         SyncPreviewPlan plan =
                 new SyncPreviewPlan(

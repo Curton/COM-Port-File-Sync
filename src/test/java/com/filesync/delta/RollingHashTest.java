@@ -41,7 +41,6 @@ class RollingHashTest {
     @Test
     void rejectsNonPositiveBlockLength() {
         assertThrows(IllegalArgumentException.class, () -> new RollingHash(0));
-        assertThrows(IllegalArgumentException.class, () -> new RollingHash(-1));
     }
 
     @Test

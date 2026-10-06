@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.filesync.delta.HashUtil;
 import com.filesync.protocol.SyncProtocol;
@@ -27,8 +28,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class FileChangeDetectorTest {
 
@@ -123,31 +128,10 @@ class FileChangeDetectorTest {
         assertTrue(manifest.getFiles().containsKey("a.txt"), "the walk must have completed");
     }
 
-    /** The cache is written through a temporary file, so no partial state is ever observable. */
-    @Test
-    void persistedManifestLeavesNoTemporaryFilesBehind() throws IOException {
-        File tree = tempDir.resolve("tree").toFile();
-        tree.mkdirs();
-        Files.writeString(tree.toPath().resolve("a.txt"), "content");
-        File cacheDir = tempDir.resolve("cache").toFile();
-        File manifestFile = new File(cacheDir, "manifest.json");
-
-        FileChangeDetector.ManifestGenerationOptions options =
-                FileChangeDetector.ManifestGenerationOptions.builder()
-                        .withPersistResult(true)
-                        .withPersistedManifestFile(manifestFile)
-                        .build();
-
-        FileChangeDetector.generateManifest(tree, options);
-
-        assertTrue(manifestFile.exists(), "the cache file must be written");
-        String[] leftovers = cacheDir.list((dir, name) -> name.endsWith(".tmp"));
-        assertEquals(0, leftovers.length, "no temporary file may survive the write");
-    }
-
-    @Test
-    void manifestSkipsLargeTransferStagingFiles() throws IOException {
-        Files.writeString(tempDir.resolve(".big.bin" + SyncProtocol.PARTIAL_SUFFIX), "stage bytes");
+    @ParameterizedTest
+    @MethodSource("stagingSuffixes")
+    void manifestSkipsStagingFiles(String suffix) throws IOException {
+        Files.writeString(tempDir.resolve(".big.bin" + suffix), "stage bytes");
         Files.writeString(tempDir.resolve("real.txt"), "real");
 
         FileChangeDetector.FileManifest manifest =
@@ -156,26 +140,14 @@ class FileChangeDetectorTest {
                         FileChangeDetector.ManifestGenerationOptions.builder().build());
 
         assertNull(
-                manifest.getFiles().get(".big.bin" + SyncProtocol.PARTIAL_SUFFIX),
-                "A transfer staging file must never be synced as user content");
+                manifest.getFiles().get(".big.bin" + suffix),
+                "A staging file must never be synced as user content");
         assertNotNull(manifest.getFiles().get("real.txt"));
     }
 
-    @Test
-    void manifestSkipsDeltaReconstructionStagingFiles() throws IOException {
-        Files.writeString(
-                tempDir.resolve(".big.bin" + SyncProtocol.DELTA_STAGE_SUFFIX), "stage bytes");
-        Files.writeString(tempDir.resolve("real.txt"), "real");
-
-        FileChangeDetector.FileManifest manifest =
-                FileChangeDetector.generateManifest(
-                        tempDir.toFile(),
-                        FileChangeDetector.ManifestGenerationOptions.builder().build());
-
-        assertNull(
-                manifest.getFiles().get(".big.bin" + SyncProtocol.DELTA_STAGE_SUFFIX),
-                "A crash-left delta staging file must never be synced as user content");
-        assertNotNull(manifest.getFiles().get("real.txt"));
+    private static Stream<Arguments> stagingSuffixes() {
+        return Stream.of(
+                arguments(SyncProtocol.PARTIAL_SUFFIX), arguments(SyncProtocol.DELTA_STAGE_SUFFIX));
     }
 
     @Test
@@ -236,6 +208,13 @@ class FileChangeDetectorTest {
                 FileChangeDetector.generateManifest(tempDir.toFile(), options);
 
         assertTrue(Files.exists(manifestFile), "Manifest should be persisted to disk");
+        // The cache is written through a temporary file, so no partial state is ever observable:
+        // no .tmp may survive the write either.
+        String[] leftovers =
+                manifestFile.getParent().toFile().list((dir, name) -> name.endsWith(".tmp"));
+        assertTrue(
+                leftovers == null || leftovers.length == 0,
+                "no temporary file may survive the write");
         String persistedJson = Files.readString(manifestFile);
         FileChangeDetector.FileManifest fromDisk =
                 FileChangeDetector.manifestFromJson(persistedJson);
@@ -272,7 +251,6 @@ class FileChangeDetectorTest {
 
         FileChangeDetector.FileManifest manifest =
                 FileChangeDetector.generateManifest(tempDir.toFile(), options);
-        assertNotNull(manifest);
         assertFalse(
                 hashingThreads.contains(Thread.currentThread().getName()),
                 "Hashing should occur on worker threads, got: " + hashingThreads);
@@ -407,91 +385,62 @@ class FileChangeDetectorTest {
         return new FileChangeDetector.FileManifest(new HashMap<>(), new HashSet<>(Set.of(dirs)));
     }
 
-    @Test
-    void getChangedFiles_returnsFileOnlyInSource() {
-        FileChangeDetector.FileManifest source =
-                manifest(files(file("new.txt", 100, 1000L, "abc")));
+    @ParameterizedTest
+    @MethodSource("getChangedFilesScenarios")
+    void getChangedFiles_classifiesEachScenario(
+            FileChangeDetector.FileManifest source,
+            FileChangeDetector.FileManifest target,
+            List<String> expectedPaths) {
+        List<String> changedPaths =
+                FileChangeDetector.getChangedFiles(source, target).stream()
+                        .map(FileChangeDetector.FileInfo::getPath)
+                        .toList();
 
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, manifest(files()));
-        assertEquals(1, changed.size());
-        assertEquals("new.txt", changed.get(0).getPath());
+        assertEquals(expectedPaths, changedPaths);
     }
 
-    @Test
-    void getChangedFiles_skipsFileWithSameMd5() {
-        FileChangeDetector.FileManifest source =
-                manifest(files(file("file.txt", 100, 1000L, "abc123")));
-        FileChangeDetector.FileManifest target =
-                manifest(files(file("file.txt", 200, 5000L, "abc123")));
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(changed.isEmpty(), "Same MD5 should mean no change");
-    }
-
-    @Test
-    void getChangedFiles_detectsDifferentMd5WithinMetadataWindow() {
-        // Same size, mtime difference within MODIFY_WINDOW_MS, but proven-different MD5s:
-        // the checksum must win over the metadata quick check, otherwise a quick post-sync
-        // re-edit (or FAT 2-second granularity) is skipped silently.
-        FileChangeDetector.FileManifest source =
-                manifest(files(file("file.txt", 100, 1000L, "abc")));
-        FileChangeDetector.FileManifest target =
-                manifest(files(file("file.txt", 100, 2000L, "def")));
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(
-                1,
-                changed.size(),
-                "Differing MD5s must detect change even when metadata matches within window");
-    }
-
-    @Test
-    void getChangedFiles_skipsSameMetadataWhenChecksumIsMissing() {
-        // Neither side hashed (quick-mode binaries on both ends): same size with the mtime
-        // difference inside MODIFY_WINDOW_MS means unchanged.
-        FileChangeDetector.FileManifest source =
-                manifest(files(file("file.txt", 100, 1000L, null)));
-        FileChangeDetector.FileManifest target =
-                manifest(files(file("file.txt", 100, 2000L, null)));
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(
-                changed.isEmpty(),
-                "Within MODIFY_WINDOW_MS (3000) and same size should be unchanged");
-
-        // Only one side hashed (e.g. the other file was unreadable): fall back to the
-        // metadata window comparison.
-        source = manifest(files(file("file.txt", 100, 1000L, "abc")));
-        target = manifest(files(file("file.txt", 100, 2000L, null)));
-
-        changed = FileChangeDetector.getChangedFiles(source, target);
-        assertTrue(
-                changed.isEmpty(),
-                "With a missing checksum, metadata within window should mean unchanged");
-    }
-
-    @Test
-    void getChangedFiles_detectsMetadataChangeWhenChecksumIsMissing() {
-        // Same size, but the mtime difference reaches past MODIFY_WINDOW_MS.
-        FileChangeDetector.FileManifest source =
-                manifest(files(file("file.txt", 100, 1000L, null)));
-        FileChangeDetector.FileManifest target =
-                manifest(files(file("file.txt", 100, 5000L, null)));
-
-        List<FileChangeDetector.FileInfo> changed =
-                FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(1, changed.size(), "Beyond MODIFY_WINDOW_MS should detect change");
-
-        // A different size is visible on its own, even with both mtimes inside the window.
-        source = manifest(files(file("file.txt", 100, 1000L, null)));
-        target = manifest(files(file("file.txt", 200, 1500L, null)));
-
-        changed = FileChangeDetector.getChangedFiles(source, target);
-        assertEquals(1, changed.size(), "Different size should always detect change");
+    private static Stream<Arguments> getChangedFilesScenarios() {
+        return Stream.of(
+                // Present only in the source manifest.
+                arguments(
+                        manifest(files(file("new.txt", 100, 1000L, "abc"))),
+                        manifest(files()),
+                        List.of("new.txt")),
+                // Same MD5 should mean no change, even with differing metadata.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, "abc123"))),
+                        manifest(files(file("file.txt", 200, 5000L, "abc123"))),
+                        List.of()),
+                // Same size, mtime difference within MODIFY_WINDOW_MS, but proven-different
+                // MD5s: the checksum must win over the metadata quick check, otherwise a quick
+                // post-sync re-edit (or FAT 2-second granularity) is skipped silently.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, "abc"))),
+                        manifest(files(file("file.txt", 100, 2000L, "def"))),
+                        List.of("file.txt")),
+                // Neither side hashed (quick-mode binaries on both ends): same size with the
+                // mtime difference inside MODIFY_WINDOW_MS means unchanged.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, null))),
+                        manifest(files(file("file.txt", 100, 2000L, null))),
+                        List.of()),
+                // Only one side hashed (e.g. the other file was unreadable): fall back to the
+                // metadata window comparison.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, "abc"))),
+                        manifest(files(file("file.txt", 100, 2000L, null))),
+                        List.of()),
+                // Same size, but the mtime difference reaches past MODIFY_WINDOW_MS: change.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, null))),
+                        manifest(files(file("file.txt", 100, 5000L, null))),
+                        List.of("file.txt")),
+                // A different size is visible on its own, even with both mtimes inside the
+                // window.
+                arguments(
+                        manifest(files(file("file.txt", 100, 1000L, null))),
+                        manifest(files(file("file.txt", 200, 1500L, null))),
+                        List.of("file.txt")));
     }
 
     @Test

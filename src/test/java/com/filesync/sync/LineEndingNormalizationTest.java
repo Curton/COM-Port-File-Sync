@@ -3,6 +3,7 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.io.File;
 import java.io.IOException;
@@ -12,8 +13,13 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Tests for line-ending (CRLF/LF) normalization in file hashing and manifest comparison, plus
@@ -25,30 +31,26 @@ class LineEndingNormalizationTest {
 
     // ========== calculateMD5 normalization ==========
 
-    @Test
-    void calculateMd5_treatsCrlfAndLfAsEqual() throws IOException {
+    @ParameterizedTest
+    @MethodSource("equivalentLineEndingVariants")
+    void calculateMd5_treatsCrAndCrLfAsLf(String lfText, String variantText) throws IOException {
         Path lfFile = tempDir.resolve("lf.txt");
-        Path crlfFile = tempDir.resolve("crlf.txt");
-        Files.write(lfFile, "line1\nline2\nline3\n".getBytes(StandardCharsets.UTF_8));
-        Files.write(crlfFile, "line1\r\nline2\r\nline3\r\n".getBytes(StandardCharsets.UTF_8));
-
-        String lfHash = FileChangeDetector.calculateMD5(lfFile.toFile());
-        String crlfHash = FileChangeDetector.calculateMD5(crlfFile.toFile());
-
-        assertEquals(lfHash, crlfHash, "CRLF and LF variants of the same text must hash equally");
-    }
-
-    @Test
-    void calculateMd5_treatsLoneCrAsLf() throws IOException {
-        Path lfFile = tempDir.resolve("lf.txt");
-        Path crFile = tempDir.resolve("cr.txt");
-        Files.write(lfFile, "line1\nline2\n".getBytes(StandardCharsets.UTF_8));
-        Files.write(crFile, "line1\rline2\r".getBytes(StandardCharsets.UTF_8));
+        Path variantFile = tempDir.resolve("variant.txt");
+        Files.write(lfFile, lfText.getBytes(StandardCharsets.UTF_8));
+        Files.write(variantFile, variantText.getBytes(StandardCharsets.UTF_8));
 
         assertEquals(
                 FileChangeDetector.calculateMD5(lfFile.toFile()),
-                FileChangeDetector.calculateMD5(crFile.toFile()),
-                "Lone CR (old Mac line ending) must normalize to LF");
+                FileChangeDetector.calculateMD5(variantFile.toFile()),
+                "CR/CRLF variants of the same text must hash equally");
+    }
+
+    private static Stream<Arguments> equivalentLineEndingVariants() {
+        return Stream.of(
+                // CRLF pairs must normalize to a single LF.
+                arguments("line1\nline2\nline3\n", "line1\r\nline2\r\nline3\r\n"),
+                // Lone CR (old Mac line ending) must normalize to LF too.
+                arguments("line1\nline2\n", "line1\rline2\r"));
     }
 
     @Test
@@ -220,14 +222,11 @@ class LineEndingNormalizationTest {
                 "reused hash should equal the real normalized hash");
     }
 
-    @Test
-    void persistedManifest_withoutSchemaVersionIsDiscarded() throws IOException {
-        assertStaleCacheDiscarded("");
-    }
-
-    @Test
-    void persistedManifest_withMismatchedVersionIsDiscarded() throws IOException {
-        assertStaleCacheDiscarded(",\"schemaVersion\":1");
+    @ParameterizedTest
+    @ValueSource(strings = {"", ",\"schemaVersion\":1"})
+    void persistedManifest_staleSchemaVersionIsDiscarded(String versionFragment)
+            throws IOException {
+        assertStaleCacheDiscarded(versionFragment);
     }
 
     /**

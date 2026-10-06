@@ -46,10 +46,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 /** Unit tests for SyncCoordinator to improve code coverage. */
@@ -199,18 +204,6 @@ class SyncCoordinatorTest {
      * heartbeats and connection-loss detection for the rest of the session.
      */
     @Test
-    void handleIncomingFileData_clearsSyncingFlagOnSuccess() throws IOException {
-        SyncCoordinator coordinator = createCoordinatorAt(syncFolder);
-        syncing.set(true);
-
-        coordinator.handleIncomingFileData(
-                new SyncProtocol.Message(
-                        SyncProtocol.CMD_FILE_DATA, new String[] {"a.txt", "5", "false", "0"}));
-
-        assertFalse(syncing.get(), "a completed single-file receive must clear syncing");
-    }
-
-    @Test
     void handleIncomingFileDelta_clearsSyncingFlagOnSuccess() throws IOException {
         SyncCoordinator coordinator = createCoordinatorAt(syncFolder);
         syncing.set(true);
@@ -250,17 +243,6 @@ class SyncCoordinatorTest {
     }
 
     @Test
-    void cancelOngoingSync_setsCancelRequested() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.cancelOngoingSync();
-
-        // The cancelRequested flag is internal, but we verify the method doesn't throw
-        assertNotNull(coordinator);
-    }
-
-    @Test
     void cancelOngoingSync_doesNotThrowWhenNotSyncing() {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
@@ -274,7 +256,7 @@ class SyncCoordinatorTest {
     // ========== Easy tests: handleSyncComplete ==========
 
     @Test
-    void handleSyncComplete_clearsSyncingFlag() {
+    void handleSyncComplete_clearsSyncingFlag_postsEvent_touchesHeartbeat_andResetsXmodem() {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
         syncing.set(true);
@@ -282,35 +264,8 @@ class SyncCoordinatorTest {
         coordinator.handleSyncComplete();
 
         assertFalse(syncing.get());
-    }
-
-    @Test
-    void handleSyncComplete_postsSyncCompleteEvent() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.handleSyncComplete();
-
         verify(mockEventBus).post(isA(SyncEvent.SyncCompleteEvent.class));
-    }
-
-    @Test
-    void handleSyncComplete_touchesHeartbeat() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.handleSyncComplete();
-
         assertEquals(1, heartbeatTouches.get());
-    }
-
-    @Test
-    void handleSyncComplete_resetsXmodemInProgress() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-
-        coordinator.handleSyncComplete();
-
         verify(mockProtocol).resetXmodemInProgress();
     }
 
@@ -356,51 +311,46 @@ class SyncCoordinatorTest {
 
     // ========== Medium tests: startSyncWithPlan validation ==========
 
-    @Test
-    void startSyncWithPlan_postsError_whenNotSender() {
+    @ParameterizedTest
+    @MethodSource("startSyncWithPlan_postsErrorForEachGuard")
+    void startSyncWithPlan_postsErrorForEachGuard(
+            boolean isSender,
+            boolean connectionAlive,
+            boolean roleNegotiated,
+            boolean syncingAlready,
+            String expectedMsg) {
         SyncCoordinator coordinator =
-                createCoordinator(() -> false, () -> true, () -> true, null, null, null);
+                createCoordinator(
+                        () -> isSender,
+                        () -> connectionAlive,
+                        () -> roleNegotiated,
+                        null,
+                        null,
+                        null);
+        syncing.set(syncingAlready);
 
         coordinator.startSyncWithPlan(null);
 
         verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
-        assertEquals(
-                "Cannot initiate sync as receiver. Change direction first.", getLastErrorMessage());
+        assertEquals(expectedMsg, getLastErrorMessage());
     }
 
-    @Test
-    void startSyncWithPlan_postsError_whenDisconnected() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> false, () -> true, null, null, null);
-
-        coordinator.startSyncWithPlan(null);
-
-        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
-        assertEquals("Cannot initiate sync while disconnected", getLastErrorMessage());
-    }
-
-    @Test
-    void startSyncWithPlan_postsError_whenRoleNotNegotiated() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> false, null, null, null);
-
-        coordinator.startSyncWithPlan(null);
-
-        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
-        assertEquals(
-                "Cannot initiate sync until role negotiation completes", getLastErrorMessage());
-    }
-
-    @Test
-    void startSyncWithPlan_postsError_whenSyncAlreadyInProgress() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        syncing.set(true);
-
-        coordinator.startSyncWithPlan(null);
-
-        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
-        assertEquals("Sync already in progress", getLastErrorMessage());
+    static Stream<Arguments> startSyncWithPlan_postsErrorForEachGuard() {
+        return Stream.of(
+                Arguments.of(
+                        false,
+                        true,
+                        true,
+                        false,
+                        "Cannot initiate sync as receiver. Change direction first."),
+                Arguments.of(true, false, true, false, "Cannot initiate sync while disconnected"),
+                Arguments.of(
+                        true,
+                        true,
+                        false,
+                        false,
+                        "Cannot initiate sync until role negotiation completes"),
+                Arguments.of(true, true, true, true, "Sync already in progress"));
     }
 
     @Test
@@ -425,19 +375,20 @@ class SyncCoordinatorTest {
 
     // ========== Medium tests: handleMkdir ==========
 
-    @Test
-    void handleMkdir_createsDirectory_whenFolderNotExists() throws IOException {
+    @ParameterizedTest
+    @ValueSource(strings = {"newSubDir", "newDir", "parent/child/grandchild"})
+    void handleMkdir_createsDirectory_flushesSharedText_andLogs(String relativePath)
+            throws IOException {
         SyncCoordinator coordinator =
                 createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        Path subDir = tempDir.resolve("newSubDir");
-        String relativePath = "newSubDir";
 
         coordinator.handleMkdir(relativePath);
 
-        assertTrue(Files.exists(subDir));
+        assertTrue(Files.exists(tempDir.resolve(relativePath)));
         // handleMkdir posts 2 LogEvents: "Creating directory" + "Directory created"
         verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
         verify(mockEventBus, never()).post(isA(SyncEvent.ErrorEvent.class));
+        assertEquals(1, syncBoundaryCalls.get());
     }
 
     @Test
@@ -482,29 +433,6 @@ class SyncCoordinatorTest {
 
         // Should log an error when sync folder is null
         verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.ErrorEvent.class));
-    }
-
-    @Test
-    void handleMkdir_callsFlushSharedText() {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        String relativePath = "newDir";
-
-        coordinator.handleMkdir(relativePath);
-
-        assertEquals(1, syncBoundaryCalls.get());
-    }
-
-    @Test
-    void handleMkdir_createsNestedDirectories() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(() -> true, () -> true, () -> true, null, null, null);
-        String relativePath = "parent/child/grandchild";
-
-        coordinator.handleMkdir(relativePath);
-
-        Path nestedPath = tempDir.resolve("parent").resolve("child").resolve("grandchild");
-        assertTrue(Files.exists(nestedPath));
     }
 
     // ========== Medium tests: handleRmdir ==========
@@ -653,31 +581,21 @@ class SyncCoordinatorTest {
      * Regression: {@code RMDIR ..} used to delete the parent of the sync folder (recursively), and
      * {@code RMDIR ""} used to delete the sync folder itself.
      */
-    @Test
-    void handleRmdir_refusesToDeleteTheParentOfTheSyncFolder() throws IOException {
+    @ParameterizedTest
+    @ValueSource(strings = {"..", ""})
+    void handleRmdir_refusesToDeleteTheSyncFolderOrItsParent(String hostilePath)
+            throws IOException {
         Path outer = tempDir.resolve("outer");
         Path nestedSyncFolder = outer.resolve("syncFolder");
         Files.createDirectories(nestedSyncFolder);
         Path sentinel = outer.resolve("sentinel.txt");
         Files.writeString(sentinel, "must survive");
-        SyncCoordinator coordinator = createCoordinatorAt(nestedSyncFolder.toFile());
-
-        coordinator.handleRmdir("..");
-
-        assertTrue(Files.exists(sentinel), "sentinel outside the sync folder must survive");
-        assertTrue(Files.exists(nestedSyncFolder), "sync folder itself must survive");
-        verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
-    }
-
-    @Test
-    void handleRmdir_refusesToDeleteTheSyncFolderItself() throws IOException {
-        Path nestedSyncFolder = tempDir.resolve("syncFolder");
-        Files.createDirectories(nestedSyncFolder);
         Files.writeString(nestedSyncFolder.resolve("keep.txt"), "must survive");
         SyncCoordinator coordinator = createCoordinatorAt(nestedSyncFolder.toFile());
 
-        coordinator.handleRmdir("");
+        coordinator.handleRmdir(hostilePath);
 
+        assertTrue(Files.exists(sentinel), "sentinel outside the sync folder must survive");
         assertTrue(Files.exists(nestedSyncFolder), "sync folder itself must survive");
         verify(mockEventBus).post(isA(SyncEvent.ErrorEvent.class));
     }
@@ -1025,6 +943,7 @@ class SyncCoordinatorTest {
         when(mockMsg.getParamAsInt(1)).thenReturn(100);
         when(mockMsg.getParamAsBoolean(2)).thenReturn(false);
         when(mockMsg.getParams()).thenReturn(new String[] {"test.txt", "100", "false", "0"});
+        syncing.set(true);
 
         coordinator.handleIncomingFileData(mockMsg);
 
@@ -1039,6 +958,7 @@ class SyncCoordinatorTest {
                         anyLong(),
                         nullable(String.class));
         verify(pendingWriteService).markWritten("test.txt");
+        assertFalse(syncing.get(), "a completed single-file receive must clear syncing");
     }
 
     @Test
@@ -1196,23 +1116,6 @@ class SyncCoordinatorTest {
     }
 
     // ========== Complex tests: createSyncPreviewPlan ==========
-
-    @Test
-    void createSyncPreviewPlan_generatesManifest() throws IOException {
-        SyncCoordinator coordinator =
-                createCoordinator(
-                        () -> true, () -> true, () -> true, null, () -> false, () -> true);
-        Path testFile = tempDir.resolve("previewTest.txt");
-        Files.writeString(testFile, "content");
-        stubManifestExchangeForPreview();
-
-        SyncPreviewPlan plan = coordinator.createSyncPreviewPlan();
-
-        assertNotNull(plan);
-        // createSyncPreviewPlan posts 3 LogEvents: "Generating...", "Requesting...", "Remote
-        // manifest..."
-        verify(mockEventBus, atLeastOnce()).post(isA(SyncEvent.LogEvent.class));
-    }
 
     @Test
     void createSyncPreviewPlan_postsManifestProgressAndWaitingMarker() throws IOException {

@@ -5,11 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-import com.filesync.sync.CompressionUtil;
 import com.filesync.sync.TextDiffUtil;
 import java.nio.charset.StandardCharsets;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Verifies the file change preview model: text detection, availability reporting, and diffing. */
 class FileDiffPreviewModelTest {
@@ -36,21 +40,48 @@ class FileDiffPreviewModelTest {
         assertEquals("hello\n", model.getSourceText());
     }
 
-    @Test
-    void unknownExtensionWithReadableContentIsPreviewedAsText() {
-        // No extension hint at all: the content heuristic must still classify it as text.
+    @ParameterizedTest
+    @MethodSource("contentClassificationSamples")
+    void contentClassificationDecidesTextPreview(
+            String path, byte[] sourceContent, byte[] baseContent, boolean expectedIsText) {
+        // The text/binary verdict is decided purely by the path plus the readable bytes: reasons,
+        // availability flags and truncation only shape the explanatory text, not isText().
         FileDiffPreviewModel model =
                 FileDiffPreviewModel.of(
-                        "Makefile",
+                        path,
                         SyncPreviewOperationType.MODIFIED,
-                        utf8("all:\n\techo hi\n"),
+                        sourceContent,
                         null,
-                        utf8("all:\n\techo hi\n\techo bye\n"),
+                        baseContent,
                         true,
                         null,
                         false);
 
-        assertTrue(model.isText());
+        assertEquals(expectedIsText, model.isText());
+    }
+
+    private static Stream<Arguments> contentClassificationSamples() {
+        return Stream.of(
+                // No extension hint at all: the content heuristic must still classify it as text.
+                arguments(
+                        "Makefile",
+                        utf8("all:\n\techo hi\n"),
+                        utf8("all:\n\techo hi\n\techo bye\n"),
+                        true),
+                // A .txt file full of null bytes must not be rendered as text: content wins over
+                // the extension.
+                arguments(
+                        "corrupt.txt",
+                        new byte[] {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04},
+                        new byte[] {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04},
+                        false),
+                // Nothing to read and no extension to go on: show the placeholder rather than
+                // mojibake.
+                arguments("unknownfile", null, null, false),
+                // The extension alone is enough to attempt a text preview even when bytes are
+                // missing, so the user sees the "could not be read" explanation instead of a
+                // binary placeholder.
+                arguments("notes.txt", null, null, true));
     }
 
     @Test
@@ -69,61 +100,6 @@ class FileDiffPreviewModelTest {
 
         assertFalse(model.isText());
         assertNull(model.getSourceText());
-    }
-
-    @Test
-    void binaryContentWithTextExtensionIsStillTreatedAsBinary() {
-        // A .txt file full of null bytes must not be rendered as text: content wins over extension.
-        byte[] binary = new byte[] {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04};
-        assertTrue(CompressionUtil.isLikelyBinaryContent(binary));
-
-        FileDiffPreviewModel model =
-                FileDiffPreviewModel.of(
-                        "corrupt.txt",
-                        SyncPreviewOperationType.MODIFIED,
-                        binary,
-                        null,
-                        binary,
-                        true,
-                        null,
-                        false);
-
-        assertFalse(model.isText());
-    }
-
-    @Test
-    void missingContentWithNoExtensionHintFallsBackToBinary() {
-        // Nothing to read and no extension to go on: show the placeholder rather than mojibake.
-        FileDiffPreviewModel model =
-                FileDiffPreviewModel.of(
-                        "unknownfile",
-                        SyncPreviewOperationType.MODIFIED,
-                        null,
-                        "unreadable",
-                        null,
-                        true,
-                        "peer unreachable",
-                        false);
-
-        assertFalse(model.isText());
-    }
-
-    @Test
-    void textExtensionWithNoContentStillPreviewedAsText() {
-        // The extension alone is enough to attempt a text preview even when bytes are missing, so
-        // the user sees the "could not be read" explanation instead of a binary placeholder.
-        FileDiffPreviewModel model =
-                FileDiffPreviewModel.of(
-                        "notes.txt",
-                        SyncPreviewOperationType.MODIFIED,
-                        null,
-                        "locked",
-                        null,
-                        true,
-                        "peer unreachable",
-                        false);
-
-        assertTrue(model.isText());
     }
 
     @Test

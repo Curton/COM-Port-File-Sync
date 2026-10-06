@@ -3,35 +3,35 @@ package com.filesync.lab.link;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** The link parameters must translate into real serial timing, not into the raw baud number. */
 class WireModelTest {
 
-    @Test
-    void eightNoneOneCarriesOneTenthOfTheBaud() {
-        WireModel model = new WireModel().baud(115_200);
-        assertEquals(11_520.0, model.bytesPerSecond(), 0.001);
-        // One bit takes 1e9/115200 ns, one byte takes 10 of those.
-        assertEquals(86_805.56, model.nanosPerByte(), 0.01);
+    @ParameterizedTest
+    @MethodSource
+    void rateFollowsBaudAndFraming(
+            int baud,
+            int dataBits,
+            boolean parity,
+            int stopBits,
+            double expectedBytesPerSecond,
+            double expectedNanosPerByte) {
+        WireModel model = new WireModel().baud(baud).framing(dataBits, parity, stopBits);
+        assertEquals(expectedBytesPerSecond, model.bytesPerSecond(), 0.01);
+        assertEquals(expectedNanosPerByte, model.nanosPerByte(), 0.01);
     }
 
-    @Test
-    void slowBaudIsHonoured() {
-        WireModel model = new WireModel().baud(9600);
-        assertEquals(960.0, model.bytesPerSecond(), 0.001);
-        // A 1 KiB block at 9600 baud needs about 1.07 s on the wire.
-        assertEquals(1066.67, 1024 / model.bytesPerSecond() * 1000, 1);
-    }
-
-    @Test
-    void parityAndStopBitsChangeTheBytePeriod() {
-        WireModel sevenEvenOne = new WireModel().baud(9600).framing(7, true, 1);
-        assertEquals(1 + 7 + 1 + 1, 10);
-        assertEquals(960.0, sevenEvenOne.bytesPerSecond(), 0.001);
-
-        WireModel eightNoneTwo = new WireModel().baud(9600).framing(8, false, 2);
-        assertEquals(9600 / 11.0, eightNoneTwo.bytesPerSecond(), 0.001);
+    static Stream<Arguments> rateFollowsBaudAndFraming() {
+        return Stream.of(
+                Arguments.of(115_200, 8, false, 1, 11_520.0, 86_805.56),
+                Arguments.of(9600, 8, false, 1, 960.0, 1041666.67),
+                Arguments.of(9600, 7, true, 1, 960.0, 1041666.67),
+                Arguments.of(9600, 8, false, 2, 872.73, 1145833.33));
     }
 
     @Test

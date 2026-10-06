@@ -3,6 +3,8 @@ package com.filesync.sync;
 import static org.junit.jupiter.api.Assertions.*;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SyncEventTest {
 
@@ -12,56 +14,32 @@ class SyncEventTest {
         assertEquals(16, SyncEventType.values().length);
     }
 
-    @Test
-    void connectionEventStoresConnectedState() {
-        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(true);
-        assertTrue(event.isConnected());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void connectionEventStoresConnectedState(boolean connected) {
+        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(connected);
+        assertEquals(connected, event.isConnected());
         assertEquals(SyncEventType.CONNECTION_STATUS, event.getType());
     }
 
-    @Test
-    void connectionEventStoresDisconnectedState() {
-        SyncEvent.ConnectionEvent event = new SyncEvent.ConnectionEvent(false);
-        assertFalse(event.isConnected());
-        assertEquals(SyncEventType.CONNECTION_STATUS, event.getType());
-    }
-
-    @Test
-    void directionEventStoresSenderState() {
-        SyncEvent.DirectionEvent event = new SyncEvent.DirectionEvent(true);
-        assertTrue(event.isSender());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void directionEventStoresSenderState(boolean sender) {
+        SyncEvent.DirectionEvent event = new SyncEvent.DirectionEvent(sender);
+        assertEquals(sender, event.isSender());
         assertEquals(SyncEventType.DIRECTION_CHANGED, event.getType());
     }
 
     @Test
-    void directionEventStoresReceiverState() {
-        SyncEvent.DirectionEvent event = new SyncEvent.DirectionEvent(false);
-        assertFalse(event.isSender());
-        assertEquals(SyncEventType.DIRECTION_CHANGED, event.getType());
-    }
-
-    @Test
-    void syncStartedEventHasCorrectType() {
-        SyncEvent.SyncStartedEvent event = new SyncEvent.SyncStartedEvent();
-        assertEquals(SyncEventType.SYNC_STARTED, event.getType());
-    }
-
-    @Test
-    void syncCompleteEventHasCorrectType() {
-        SyncEvent.SyncCompleteEvent event = new SyncEvent.SyncCompleteEvent();
-        assertEquals(SyncEventType.SYNC_COMPLETE, event.getType());
-    }
-
-    @Test
-    void syncCancelledEventHasCorrectType() {
-        SyncEvent.SyncCancelledEvent event = new SyncEvent.SyncCancelledEvent();
-        assertEquals(SyncEventType.SYNC_CANCELLED, event.getType());
-    }
-
-    @Test
-    void transferCompleteEventHasCorrectType() {
-        SyncEvent.TransferCompleteEvent event = new SyncEvent.TransferCompleteEvent();
-        assertEquals(SyncEventType.TRANSFER_COMPLETE, event.getType());
+    void markerEventsHaveCorrectTypes() {
+        assertEquals(SyncEventType.SYNC_STARTED, new SyncEvent.SyncStartedEvent().getType());
+        assertEquals(SyncEventType.SYNC_COMPLETE, new SyncEvent.SyncCompleteEvent().getType());
+        assertEquals(SyncEventType.SYNC_CANCELLED, new SyncEvent.SyncCancelledEvent().getType());
+        assertEquals(
+                SyncEventType.TRANSFER_COMPLETE, new SyncEvent.TransferCompleteEvent().getType());
+        assertEquals(
+                SyncEventType.SYNC_CONTROL_REFRESH,
+                new SyncEvent.SyncControlRefreshEvent().getType());
     }
 
     @Test
@@ -85,23 +63,14 @@ class SyncEventTest {
     }
 
     @Test
-    void syncControlRefreshEventHasCorrectType() {
-        SyncEvent.SyncControlRefreshEvent event = new SyncEvent.SyncControlRefreshEvent();
-        assertEquals(SyncEventType.SYNC_CONTROL_REFRESH, event.getType());
-    }
+    void logAndErrorEventsStoreMessage() {
+        SyncEvent.LogEvent logEvent = new SyncEvent.LogEvent("Test log message");
+        assertEquals("Test log message", logEvent.getMessage());
+        assertEquals(SyncEventType.LOG, logEvent.getType());
 
-    @Test
-    void logEventStoresMessage() {
-        SyncEvent.LogEvent event = new SyncEvent.LogEvent("Test log message");
-        assertEquals("Test log message", event.getMessage());
-        assertEquals(SyncEventType.LOG, event.getType());
-    }
-
-    @Test
-    void errorEventStoresMessage() {
-        SyncEvent.ErrorEvent event = new SyncEvent.ErrorEvent("Test error message");
-        assertEquals("Test error message", event.getMessage());
-        assertEquals(SyncEventType.ERROR, event.getType());
+        SyncEvent.ErrorEvent errorEvent = new SyncEvent.ErrorEvent("Test error message");
+        assertEquals("Test error message", errorEvent.getMessage());
+        assertEquals(SyncEventType.ERROR, errorEvent.getType());
     }
 
     @Test

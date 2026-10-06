@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.io.File;
 import java.io.IOException;
@@ -17,8 +18,12 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Unit tests for {@link GitStatusUtil}. */
 class GitStatusUtilTest {
@@ -32,40 +37,22 @@ class GitStatusUtilTest {
         assertTrue(GitStatusUtil.parseGitStatusShort("   \n\n").isEmpty());
     }
 
-    @Test
-    void parseModifiedFile() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort(" M src/Main.java\n");
-        assertEquals(Set.of("src/Main.java"), paths);
+    @ParameterizedTest
+    @MethodSource("statusLineCases")
+    void parseStatusLineReportsExpectedPaths(String line, Set<String> expectedPaths) {
+        assertEquals(expectedPaths, GitStatusUtil.parseGitStatusShort(line));
     }
 
-    @Test
-    void parseStagedAdd() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort("A  new.txt\n");
-        assertEquals(Set.of("new.txt"), paths);
-    }
-
-    @Test
-    void parseUntracked() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort("?? untracked.txt\n");
-        assertEquals(Set.of("untracked.txt"), paths);
-    }
-
-    @Test
-    void parseDeleted() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort(" D gone.txt\n");
-        assertEquals(Set.of("gone.txt"), paths);
-    }
-
-    @Test
-    void parseRenameReturnsBothPaths() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort("R  old.txt -> new.txt\n");
-        assertEquals(Set.of("old.txt", "new.txt"), paths);
-    }
-
-    @Test
-    void parseCopyReturnsBothPaths() {
-        Set<String> paths = GitStatusUtil.parseGitStatusShort("C  orig.txt -> copy.txt\n");
-        assertEquals(Set.of("orig.txt", "copy.txt"), paths);
+    private static Stream<Arguments> statusLineCases() {
+        return Stream.of(
+                // Leading status columns (including the space before M/D) must be preserved.
+                arguments(" M src/Main.java\n", Set.of("src/Main.java")),
+                arguments("A  new.txt\n", Set.of("new.txt")),
+                arguments("?? untracked.txt\n", Set.of("untracked.txt")),
+                arguments(" D gone.txt\n", Set.of("gone.txt")),
+                // Rename/copy entries contribute BOTH sides of the arrow.
+                arguments("R  old.txt -> new.txt\n", Set.of("old.txt", "new.txt")),
+                arguments("C  orig.txt -> copy.txt\n", Set.of("orig.txt", "copy.txt")));
     }
 
     @Test
@@ -161,42 +148,31 @@ class GitStatusUtilTest {
 
     // ---- git executable fallback: probed when plain "git" cannot be launched ----
 
-    @Test
-    void isProgramUnavailableDetectsMissingDeniedAndPolicyBlocked() {
-        assertTrue(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "Cannot run program \"git\": CreateProcess error=2, "
-                                        + "系统找不到指定的文件。")));
-        assertTrue(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "Cannot run program \"git\": error=2, No such file or directory")));
-        // Corporate machines block the PATH-resolved git.exe via group policy (seen in the field).
-        assertTrue(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "Cannot run program \"git\" (in directory \"D:\\x\"): "
-                                        + "CreateProcess error=1260, 组策略阻止了这个程序。")));
-        assertTrue(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "Cannot run program \"git\": CreateProcess error=5, 拒绝访问。")));
+    @ParameterizedTest
+    @MethodSource("programUnavailableMessages")
+    void isProgramUnavailable_classifiesLaunchFailures(String message, boolean expected) {
+        assertEquals(expected, GitStatusUtil.isProgramUnavailable(new IOException(message)));
     }
 
-    @Test
-    void isProgramUnavailableRejectsOtherFailures() {
-        // git ran but failed on its own, or an error unrelated to the executable itself - the
-        // message must pass through untouched and no fallback probing may run.
-        assertFalse(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "fatal: not a git repository (or any of the parent directories): .git")));
-        assertFalse(
-                GitStatusUtil.isProgramUnavailable(
-                        new IOException(
-                                "Cannot run program \"git\": CreateProcess error=267, 目录名称无效。")));
-        assertFalse(GitStatusUtil.isProgramUnavailable(new IOException((String) null)));
+    private static Stream<Arguments> programUnavailableMessages() {
+        return Stream.of(
+                // The "git" executable itself cannot be launched: missing, denied, or blocked.
+                arguments("Cannot run program \"git\": CreateProcess error=2, 系统找不到指定的文件。", true),
+                arguments("Cannot run program \"git\": error=2, No such file or directory", true),
+                // Corporate machines block the PATH-resolved git.exe via group policy (seen in the
+                // field).
+                arguments(
+                        "Cannot run program \"git\" (in directory \"D:\\x\"): "
+                                + "CreateProcess error=1260, 组策略阻止了这个程序。",
+                        true),
+                arguments("Cannot run program \"git\": CreateProcess error=5, 拒绝访问。", true),
+                // git ran but failed on its own, or an error unrelated to the executable itself -
+                // the message must pass through untouched and no fallback probing may run.
+                arguments(
+                        "fatal: not a git repository (or any of the parent directories): .git",
+                        false),
+                arguments("Cannot run program \"git\": CreateProcess error=267, 目录名称无效。", false),
+                arguments(null, false));
     }
 
     @Test

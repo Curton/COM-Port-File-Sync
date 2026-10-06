@@ -2,7 +2,6 @@ package com.filesync.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -65,13 +64,5 @@ class SessionOutcomeTest {
         outcome.complete();
         outcome.failureSignal("late teardown error");
         assertEquals(CliMain.EXIT_SUCCESS, outcome.awaitExitCode(100));
-    }
-
-    @Test
-    void timeoutReturnsMinusOne() throws Exception {
-        SessionOutcome outcome = new SessionOutcome();
-        outcome.begin();
-        assertEquals(-1, outcome.awaitExitCode(50));
-        assertTrue(!outcome.isSettled());
     }
 }

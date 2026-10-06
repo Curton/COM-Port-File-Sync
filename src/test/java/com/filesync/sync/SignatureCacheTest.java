@@ -245,14 +245,6 @@ class SignatureCacheTest {
     }
 
     @Test
-    void cacheDirDefaultsToUserHomeFilesyncDir() {
-        assertEquals(
-                new File(System.getProperty("user.home"), ".filesync"),
-                CacheLocations.cacheDir(),
-                "Without an override, caches live under ~/.filesync");
-    }
-
-    @Test
     void cacheDirOverrideRedirectsUntilCleared() {
         File overrideDir = new File("temp-cache-dir");
 

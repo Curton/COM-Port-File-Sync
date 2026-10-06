@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,7 +53,7 @@ class SyncPreviewRendererChangePreviewTest {
     // --- Which rows have something to compare against ----------------------------------------
 
     @Test
-    void newAndDeleteRowsHaveNoPreviousVersionToFetch() {
+    void rowsHaveAPreviousVersionToFetchExactlyForCompareOperations() {
         assertFalse(
                 new SyncPreviewRow(SyncPreviewOperationType.NEW, "n.txt", "1 B", 1L)
                         .hasBaseVersion());
@@ -67,10 +66,6 @@ class SyncPreviewRendererChangePreviewTest {
         assertFalse(
                 new SyncPreviewRow(SyncPreviewOperationType.CREATE_DIR, "d", "-", 0L)
                         .hasBaseVersion());
-    }
-
-    @Test
-    void modifiedAppendAndConflictRowsHaveAPreviousVersion() {
         assertTrue(
                 new SyncPreviewRow(SyncPreviewOperationType.MODIFIED, "m.txt", "1 B", 1L)
                         .hasBaseVersion());
@@ -232,21 +227,5 @@ class SyncPreviewRendererChangePreviewTest {
         byte[] content = renderer.readLocalPreviewContent("empty.txt");
         assertNotNull(content);
         assertEquals(0, content.length);
-    }
-
-    @Test
-    void directoryOperationsDoNotAttemptAFetch() {
-        SyncPreviewRow row =
-                new SyncPreviewRow(SyncPreviewOperationType.CREATE_DIR, "newdir", "-", 0L);
-        assertFalse(row.hasBaseVersion());
-    }
-
-    @Test
-    void previewForUnconfiguredFolderReportsUnavailable() {
-        SyncPreviewRenderer renderer = new SyncPreviewRenderer(null);
-        renderer.setPreviewSyncFolder(new File(System.getProperty("java.io.tmpdir")));
-
-        // The file does not exist in the temp folder, so the local read must fail cleanly.
-        assertNull(renderer.readLocalPreviewContent("definitely-missing-file-xyz.txt"));
     }
 }

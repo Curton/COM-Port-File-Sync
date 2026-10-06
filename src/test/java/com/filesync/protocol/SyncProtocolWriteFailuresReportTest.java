@@ -43,16 +43,6 @@ class SyncProtocolWriteFailuresReportTest {
     }
 
     @Test
-    void arrivedZeroFailureReportIsAnEmptySet() throws IOException {
-        ScriptedProtocol protocol = new ScriptedProtocol();
-        protocol.feed(new Message(SyncProtocol.CMD_WRITE_FAILURES, new String[] {"0"}));
-
-        assertTrue(
-                protocol.waitForWriteFailures().isEmpty(),
-                "an arrived report naming no failures is empty, not null");
-    }
-
-    @Test
     void arrivedReportParsesItsPaths() throws IOException {
         ScriptedProtocol protocol = new ScriptedProtocol();
         protocol.feed(

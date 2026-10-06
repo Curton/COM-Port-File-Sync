@@ -9,7 +9,11 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Frame-level tampering: frames are recognised, rules fire in order, everything else passes. */
 class FrameTapTest {
@@ -92,22 +96,21 @@ class FrameTapTest {
         assertEquals("[[SYNC:ACK]]\n", new String(passed.get(1), StandardCharsets.ISO_8859_1));
     }
 
-    @Test
-    void frameSplitAcrossChunksIsRecognised() {
+    @ParameterizedTest
+    @MethodSource
+    void frameSplitAcrossChunksIsRecognised(
+            String firstChunk, String secondChunk, String expectedFrame) {
         FrameTap tap = new FrameTap(noRules, trace, Trace.Dir.APP_TO_PEER, new WireStats());
-        process("[[SYNC:HEART", tap);
+        process(firstChunk, tap);
         assertEquals(List.of(), passedText());
-        process("BEAT]]\n", tap);
-        assertEquals(List.of("[[SYNC:HEARTBEAT]]\n"), passedText());
+        process(secondChunk, tap);
+        assertEquals(List.of(expectedFrame), passedText());
     }
 
-    @Test
-    void frameSplitBetweenEndMarkerAndNewlineIsRecognised() {
-        FrameTap tap = new FrameTap(noRules, trace, Trace.Dir.APP_TO_PEER, new WireStats());
-        process("[[SYNC:ACK]]", tap);
-        assertEquals(List.of(), passedText());
-        process("\n", tap);
-        assertEquals(List.of("[[SYNC:ACK]]\n"), passedText());
+    static Stream<Arguments> frameSplitAcrossChunksIsRecognised() {
+        return Stream.of(
+                Arguments.of("[[SYNC:HEART", "BEAT]]\n", "[[SYNC:HEARTBEAT]]\n"),
+                Arguments.of("[[SYNC:ACK]]", "\n", "[[SYNC:ACK]]\n"));
     }
 
     @Test

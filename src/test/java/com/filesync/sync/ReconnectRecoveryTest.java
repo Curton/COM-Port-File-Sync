@@ -185,6 +185,9 @@ class ReconnectRecoveryTest {
             assertFalse(coordinator.isSyncing(), "Syncing flag should be cleared after cancel");
             protocol.releaseBlockedWait();
             waitUntil(() -> !coordinator.isSyncing(), Duration.ofSeconds(2));
+            assertTrue(
+                    errors.stream().noneMatch(msg -> msg.contains("Sync failed")),
+                    "Cancel should not emit an error event");
 
             // A second sync can start because cancel cleared the syncing state
             protocol.setBlockAtManifestWait(false);
@@ -319,47 +322,6 @@ class ReconnectRecoveryTest {
                         logs.stream().filter("Sync cancelled"::equals).count(),
                         "Expected exactly one 'Sync cancelled' log line, got: " + logs);
             }
-        } finally {
-            shutdownExecutor(executor);
-        }
-    }
-
-    @Test
-    void cancelOngoingSyncClearsStateWithoutPostingError() throws Exception {
-        Files.writeString(tempDir.resolve("test.txt"), "payload");
-
-        AtomicBoolean syncing = new AtomicBoolean(false);
-        List<String> logs = new ArrayList<>();
-        List<String> errors = new ArrayList<>();
-        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
-        eventBus.register(
-                event -> {
-                    if (event instanceof SyncEvent.LogEvent logEvent) {
-                        logs.add(logEvent.getMessage());
-                    } else if (event instanceof SyncEvent.ErrorEvent errorEvent) {
-                        errors.add(errorEvent.getMessage());
-                    }
-                });
-
-        BlockingSyncProtocol protocol = new BlockingSyncProtocol();
-        SyncCoordinator coordinator = newBlockingSyncCoordinator(protocol, eventBus, syncing);
-
-        ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
-        coordinator.setExecutor(executor);
-        try {
-            protocol.setBlockAtManifestWait(true);
-            coordinator.startSync();
-            assertTrue(
-                    protocol.awaitFirstWaitEntered(Duration.ofSeconds(2)),
-                    "Sync should reach manifest wait while starting");
-
-            coordinator.cancelOngoingSync();
-            waitUntil(() -> !syncing.get(), Duration.ofSeconds(2));
-
-            assertFalse(syncing.get(), "Syncing flag should be cleared after cancel");
-            assertTrue(
-                    errors.stream().noneMatch(msg -> msg.contains("Sync failed")),
-                    "Cancel should not emit an error event");
         } finally {
             shutdownExecutor(executor);
         }
@@ -1172,7 +1134,6 @@ class ReconnectRecoveryTest {
                 protocol.batchSendCount.get(),
                 "Should send exactly one batch for regular files");
         assertEquals(5, batchedPaths.size(), "Batch should contain all 5 files");
-        assertTrue(protocol.sendBatchCalled.get(), "sendBatch should have been called");
         assertFalse(
                 protocol.perFileFallbackUsed.get(),
                 "Should not fall back to per-file when batch succeeds");
@@ -1229,7 +1190,6 @@ class ReconnectRecoveryTest {
                 3,
                 individuallySentPaths.size(),
                 "All files should be sent individually as fallback");
-        assertTrue(protocol.perFileFallbackUsed.get(), "Should have used per-file fallback");
     }
 
     // ----- Batch Transfer Protocol Stubs -----

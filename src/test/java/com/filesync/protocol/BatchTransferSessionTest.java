@@ -1,10 +1,11 @@
 package com.filesync.protocol;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.filesync.sync.FileChangeDetector;
 import java.io.File;
@@ -15,8 +16,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Tests for BatchTransferSession binary batch encoding and decoding. */
 class BatchTransferSessionTest {
@@ -44,28 +49,80 @@ class BatchTransferSessionTest {
         assertEquals(0, count, "Entry count should be 0 for empty list");
     }
 
-    @Test
-    void buildBatchSingleFileRoundTrip() throws IOException {
-        File testFile = tempDir.resolve("example.txt").toFile();
-        Files.writeString(testFile.toPath(), "Hello, World!");
+    @ParameterizedTest
+    @MethodSource("singleFileBatchCases")
+    void singleFileBatchRoundTrips(
+            String relPath, byte[] content, int maxBatchSize, boolean assertLastModified)
+            throws IOException {
+        File srcFile = tempDir.resolve("src").toFile();
+        Files.write(srcFile.toPath(), content);
 
         List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {testFile, "example.txt"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
+        files.add(new Object[] {srcFile, relPath});
+        byte[] batch = BatchTransferSession.buildBatch(files, maxBatchSize);
 
+        // The extract dir is not pre-created: the decoder must create missing parent directories
+        // (including the extract dir itself) via mkdirs().
         File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
 
         int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
         assertEquals(1, written, "Should have written 1 file");
 
-        File extracted = new File(extractDir, "example.txt");
-        assertTrue(extracted.exists(), "Extracted file should exist");
-        assertEquals("Hello, World!", Files.readString(extracted.toPath()), "Content should match");
-        assertEquals(
-                testFile.lastModified(),
-                extracted.lastModified(),
-                "Last modified should be preserved");
+        File extracted = new File(extractDir, relPath);
+        assertTrue(extracted.exists(), relPath + " should exist after decode");
+        assertArrayEquals(
+                content, Files.readAllBytes(extracted.toPath()), relPath + " content should match");
+        if (assertLastModified) {
+            assertEquals(
+                    srcFile.lastModified(),
+                    extracted.lastModified(),
+                    "Last modified should be preserved");
+        }
+    }
+
+    private static Stream<Arguments> singleFileBatchCases() {
+        StringBuilder large = new StringBuilder();
+        for (int i = 0; i < 1000; i++) {
+            large.append("Line ").append(i).append(": Some test content for large file\n");
+        }
+        byte[] binary = new byte[256];
+        for (int i = 0; i < 256; i++) {
+            binary[i] = (byte) i;
+        }
+        return Stream.of(
+                // buildBatchSingleFileRoundTrip: also asserted lastModified preservation.
+                arguments(
+                        "example.txt",
+                        "Hello, World!".getBytes(StandardCharsets.UTF_8),
+                        65536,
+                        true),
+                // decodeBatchCreatesMissingParentDirectories
+                arguments(
+                        "subdir/nested/deep.txt",
+                        "deep content".getBytes(StandardCharsets.UTF_8),
+                        65536,
+                        false),
+                // buildBatchWithLargeFile
+                arguments(
+                        "large.bin",
+                        large.toString().getBytes(StandardCharsets.UTF_8),
+                        65536,
+                        false),
+                // buildBatchWithBinaryContent
+                arguments("binary.bin", binary, 65536, false),
+                // buildBatchWithZeroMaxBatchSizeUsesDefault
+                arguments("test.txt", "content".getBytes(StandardCharsets.UTF_8), 0, false),
+                // buildBatchWithUnicodeFilenames
+                arguments(
+                        "文件.txt", "unicode content".getBytes(StandardCharsets.UTF_8), 65536, false),
+                // buildBatchWithSpecialCharactersInPath
+                arguments(
+                        "path with spaces/file&special#chars.txt",
+                        "special path content".getBytes(StandardCharsets.UTF_8),
+                        65536,
+                        false),
+                // buildBatchWithEmptyFile
+                arguments("empty.txt", new byte[0], 65536, false));
     }
 
     @Test
@@ -106,140 +163,139 @@ class BatchTransferSessionTest {
         }
     }
 
-    @Test
-    void decodeBatchCreatesMissingParentDirectories() throws IOException {
-        File dir = tempDir.resolve("input2").toFile();
-        dir.mkdirs();
-
-        File nestedFile = new File(dir, "subdir/nested/deep.txt");
-        nestedFile.getParentFile().mkdirs();
-        Files.writeString(nestedFile.toPath(), "deep content");
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {nestedFile, "subdir/nested/deep.txt"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted2").toFile();
-        // Do NOT call extractDir.mkdirs() here - parent directories should not exist
-        // so that decodeAndWriteBatch must create them via mkdirs()
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, "subdir/nested/deep.txt");
-        assertTrue(extracted.exists(), "Nested file should exist after decode");
-        assertTrue(
-                extracted.getParentFile().exists(), "Parent directories should have been created");
-        assertEquals("deep content", Files.readString(extracted.toPath()));
-    }
-
-    @Test
-    void buildBatchWithLargeFile() throws IOException {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 1000; i++) {
-            sb.append("Line ").append(i).append(": Some test content for large file\n");
-        }
-        String largeContent = sb.toString();
-
-        File largeFile = tempDir.resolve("large.bin").toFile();
-        Files.writeString(largeFile.toPath(), largeContent);
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {largeFile, "large.bin"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, "large.bin");
-        assertEquals(
-                largeContent,
-                Files.readString(extracted.toPath()),
-                "Large file content should match");
-    }
-
-    @Test
-    void buildBatchWithBinaryContent() throws IOException {
-        byte[] binaryData = new byte[256];
-        for (int i = 0; i < 256; i++) {
-            binaryData[i] = (byte) i;
-        }
-
-        File binaryFile = tempDir.resolve("binary.bin").toFile();
-        Files.write(binaryFile.toPath(), binaryData);
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {binaryFile, "binary.bin"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, "binary.bin");
-        byte[] recovered = Files.readAllBytes(extracted.toPath());
-        assertEquals(256, recovered.length, "Binary file size should be preserved");
-        for (int i = 0; i < 256; i++) {
-            assertEquals((byte) i, recovered[i], "Binary byte at index " + i + " should match");
-        }
-    }
-
-    @Test
-    void decodeBatchInvalidMagicThrowsException() {
-        byte[] badBatch = new byte[] {0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01};
-
+    @ParameterizedTest
+    @MethodSource("malformedBatchCases")
+    void decodeBatchRejectsMalformedBatches(byte[] batch, String expectedMessageFragment) {
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
 
         IOException thrown =
                 assertThrows(
                         IOException.class,
-                        () ->
-                                BatchTransferSession.decodeAndWriteBatch(
-                                        extractDir, badBatch, 0, null));
-        assertTrue(thrown.getMessage().contains("bad magic"), "Should report bad magic bytes");
-    }
-
-    @Test
-    void decodeBatchUnsupportedVersionThrowsException() {
-        byte[] badBatch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00};
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () ->
-                                BatchTransferSession.decodeAndWriteBatch(
-                                        extractDir, badBatch, 0, null));
+                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
         assertTrue(
-                thrown.getMessage().contains("Unsupported batch version"),
-                "Should report unsupported version");
+                thrown.getMessage().contains(expectedMessageFragment),
+                "Should report: " + expectedMessageFragment + ", got: " + thrown.getMessage());
     }
 
-    @Test
-    void buildBatchWithZeroMaxBatchSizeUsesDefault() throws IOException {
-        File testFile = tempDir.resolve("test.txt").toFile();
-        Files.writeString(testFile.toPath(), "content");
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {testFile, "test.txt"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 0);
-
-        assertNotNull(batch, "Should return a valid batch even with 0 maxBatchSize");
-        assertTrue(batch.length > 0, "Batch should contain data");
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
+    private static Stream<Arguments> malformedBatchCases() {
+        return Stream.of(
+                // decodeBatchInvalidMagicThrowsException
+                arguments(
+                        new byte[] {0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01},
+                        "bad magic"),
+                // decodeBatchUnsupportedVersionThrowsException
+                arguments(
+                        new byte[] {0x42, 0x54, 0x48, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00},
+                        "Unsupported batch version"),
+                // decodeBatchWithTruncatedDataThrowsException
+                arguments(
+                        new byte[] {0x42, 0x54, 0x48, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01},
+                        "Unexpected end of batch stream"),
+                // decodeBatchRejectsHugeEntryDataLength: LEN = Integer.MAX_VALUE
+                arguments(
+                        new byte[] {
+                            0x42,
+                            0x54,
+                            0x48,
+                            0x00, // magic
+                            0x02, // version
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x01, // count = 1
+                            0x00,
+                            0x01, // path len = 1
+                            (byte) 'a', // path
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00, // lastModified
+                            0x00, // flags
+                            (byte) 0x7F,
+                            (byte) 0xFF,
+                            (byte) 0xFF,
+                            (byte) 0xFF // dataLen
+                        },
+                        "Invalid data length"),
+                // decodeBatchRejectsNegativeEntryDataLength: LEN = Integer.MIN_VALUE
+                arguments(
+                        new byte[] {
+                            0x42,
+                            0x54,
+                            0x48,
+                            0x00, // magic
+                            0x02, // version
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x01, // count = 1
+                            0x00,
+                            0x01, // path len = 1
+                            (byte) 'a', // path
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x00, // lastModified
+                            0x00, // flags
+                            (byte) 0x80,
+                            0x00,
+                            0x00,
+                            0x00 // dataLen
+                        },
+                        "Invalid data length"),
+                // decodeBatchRejectsEntryCountOverMax: count = 257 (max is 256)
+                arguments(
+                        new byte[] {
+                            0x42,
+                            0x54,
+                            0x48,
+                            0x00, // magic
+                            0x02, // version
+                            0x00,
+                            0x00,
+                            0x01,
+                            0x01 // count = 257
+                        },
+                        "Invalid batch entry count"),
+                // decodeBatchRejectsNegativeEntryCount: count = -1
+                arguments(
+                        new byte[] {
+                            0x42,
+                            0x54,
+                            0x48,
+                            0x00, // magic
+                            0x02, // version
+                            (byte) 0xFF,
+                            (byte) 0xFF,
+                            (byte) 0xFF,
+                            (byte) 0xFF // count = -1
+                        },
+                        "Invalid batch entry count"),
+                // decodeBatchRejectsHugePathLength: pathLen = 65535, no path bytes follow
+                arguments(
+                        new byte[] {
+                            0x42,
+                            0x54,
+                            0x48,
+                            0x00, // magic
+                            0x02, // version
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x01, // count = 1
+                            (byte) 0xFF,
+                            (byte) 0xFF // path len = 65535
+                        },
+                        "Invalid path length"));
     }
 
     @Test
@@ -263,297 +319,31 @@ class BatchTransferSessionTest {
                 () -> BatchTransferSession.buildBatch(files, 65536));
     }
 
-    @Test
-    void buildBatchWithUnicodeFilenames() throws IOException {
-        File dir = tempDir.resolve("input").toFile();
-        dir.mkdirs();
-
-        String[] unicodeNames = {"文件.txt", "файл.txt", "αρχείο.txt", "emoji_\uD83D\uDE00.txt"};
-        File testFile = new File(dir, unicodeNames[0]);
-        Files.writeString(testFile.toPath(), "unicode content");
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {testFile, unicodeNames[0]});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, unicodeNames[0]);
-        assertTrue(extracted.exists(), "File with unicode name should exist");
-        assertEquals("unicode content", Files.readString(extracted.toPath()));
-    }
-
-    @Test
-    void buildBatchWithSpecialCharactersInPath() throws IOException {
-        File dir = tempDir.resolve("input").toFile();
-        dir.mkdirs();
-
-        File testFile = new File(dir, "path with spaces/file&special#chars.txt");
-        testFile.getParentFile().mkdirs();
-        Files.writeString(testFile.toPath(), "special path content");
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {testFile, "path with spaces/file&special#chars.txt"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, "path with spaces/file&special#chars.txt");
-        assertTrue(extracted.exists(), "File with special chars in path should exist");
-        assertEquals("special path content", Files.readString(extracted.toPath()));
-    }
-
-    @Test
-    void buildBatchWithEmptyFile() throws IOException {
-        File emptyFile = tempDir.resolve("empty.txt").toFile();
-        Files.writeString(emptyFile.toPath(), "");
-
-        List<Object[]> files = new ArrayList<>();
-        files.add(new Object[] {emptyFile, "empty.txt"});
-        byte[] batch = BatchTransferSession.buildBatch(files, 65536);
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Should have written 1 file");
-
-        File extracted = new File(extractDir, "empty.txt");
-        assertTrue(extracted.exists(), "Empty file should exist");
-        assertEquals(0, extracted.length(), "Empty file should have 0 length");
-    }
-
-    @Test
-    void decodeBatchWithTruncatedDataThrowsException() {
-        byte[] batch = new byte[] {0x42, 0x54, 0x48, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01};
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Unexpected end of batch stream"),
-                "Should report truncated data");
-    }
-
-    @Test
-    void decodeBatchRejectsHugeEntryDataLength() {
-        // Magic(4) + Version(1) + Count(4) = 9 bytes header, then 1 entry with bogus huge LEN.
-        // LEN is set to Integer.MAX_VALUE which would OOM if accepted.
-        byte[] batch =
-                new byte[] {
-                    0x42,
-                    0x54,
-                    0x48,
-                    0x00, // magic
-                    0x02, // version
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x01, // count = 1
-                    0x00,
-                    0x01, // path len = 1
-                    (byte) 'a', // path
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00, // lastModified
-                    0x00, // flags
-                    (byte) 0x7F,
-                    (byte) 0xFF,
-                    (byte) 0xFF,
-                    (byte) 0xFF // dataLen = Integer.MAX_VALUE
-                };
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Invalid data length"),
-                "Should reject oversized data length, got: " + thrown.getMessage());
-    }
-
-    @Test
-    void decodeBatchRejectsNegativeEntryDataLength() {
-        byte[] batch =
-                new byte[] {
-                    0x42,
-                    0x54,
-                    0x48,
-                    0x00, // magic
-                    0x02, // version
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x01, // count = 1
-                    0x00,
-                    0x01, // path len = 1
-                    (byte) 'a', // path
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x00, // lastModified
-                    0x00, // flags
-                    (byte) 0x80,
-                    0x00,
-                    0x00,
-                    0x00 // dataLen = Integer.MIN_VALUE
-                };
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Invalid data length"),
-                "Should reject negative data length, got: " + thrown.getMessage());
-    }
-
-    @Test
-    void decodeBatchRejectsEntryCountOverMax() {
-        // count = 257 (one over MAX_ENTRIES_PER_BATCH = 256)
-        byte[] batch =
-                new byte[] {
-                    0x42,
-                    0x54,
-                    0x48,
-                    0x00, // magic
-                    0x02, // version
-                    0x00,
-                    0x00,
-                    0x01,
-                    0x01 // count = 257
-                };
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Invalid batch entry count"),
-                "Should reject entry count over max, got: " + thrown.getMessage());
-    }
-
-    @Test
-    void decodeBatchRejectsNegativeEntryCount() {
-        byte[] batch =
-                new byte[] {
-                    0x42,
-                    0x54,
-                    0x48,
-                    0x00, // magic
-                    0x02, // version
-                    (byte) 0xFF,
-                    (byte) 0xFF,
-                    (byte) 0xFF,
-                    (byte) 0xFF // count = -1
-                };
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Invalid batch entry count"),
-                "Should reject negative entry count, got: " + thrown.getMessage());
-    }
-
-    @Test
-    void decodeBatchRejectsHugePathLength() {
-        // pathLen = 65535 (max of unsigned 2-byte) but no actual path bytes follow
-        byte[] batch =
-                new byte[] {
-                    0x42,
-                    0x54,
-                    0x48,
-                    0x00, // magic
-                    0x02, // version
-                    0x00,
-                    0x00,
-                    0x00,
-                    0x01, // count = 1
-                    (byte) 0xFF,
-                    (byte) 0xFF // path len = 65535
-                };
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null));
-        assertTrue(
-                thrown.getMessage().contains("Invalid path length"),
-                "Should reject oversized path length, got: " + thrown.getMessage());
-    }
-
     // ========== Path containment ==========
 
     /**
      * A substring test for {@code ".."} rejects legitimate names such as {@code notes..txt}, which
      * aborts the whole batch transfer and fails the sync for a file that is perfectly safe.
-     */
-    @Test
-    void decodeBatchAllowsPathsContainingDoubleDotsInsideAName() throws IOException {
-        byte[] batch =
-                buildBatch(
-                        new String[] {"notes..txt", "dir..name/data.txt"}, new String[] {"A", "B"});
-
-        File extractDir = tempDir.resolve("extracted").toFile();
-        extractDir.mkdirs();
-
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 2, null);
-        assertEquals(2, written, "A '..' inside a name is not a traversal and must be extracted");
-        assertEquals("A", Files.readString(new File(extractDir, "notes..txt").toPath()));
-        assertEquals("B", Files.readString(new File(extractDir, "dir..name/data.txt").toPath()));
-    }
-
-    /**
      * Backslash-separated paths are what the manifest walk produces on Windows, so the containment
      * check must normalize separators before rejecting anything.
      */
     @Test
-    void decodeBatchAcceptsBackslashSeparatedRelativePaths() throws IOException {
-        byte[] batch = buildBatch(new String[] {"sub\\nested\\file.txt"}, new String[] {"A"});
+    void decodeBatchAcceptsDoubleDotNamesAndBackslashSeparatedPaths() throws IOException {
+        byte[] batch =
+                buildBatch(
+                        new String[] {"notes..txt", "dir..name/data.txt", "sub\\nested\\file.txt"},
+                        new String[] {"A", "B", "A"});
 
         File extractDir = tempDir.resolve("extracted").toFile();
         extractDir.mkdirs();
 
-        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 0, null);
-        assertEquals(1, written, "Windows-style relative paths must be accepted");
+        int written = BatchTransferSession.decodeAndWriteBatch(extractDir, batch, 3, null);
+        assertEquals(
+                3,
+                written,
+                "A '..' inside a name is not a traversal and Windows-style relative paths must be accepted");
+        assertEquals("A", Files.readString(new File(extractDir, "notes..txt").toPath()));
+        assertEquals("B", Files.readString(new File(extractDir, "dir..name/data.txt").toPath()));
         assertEquals("A", Files.readString(new File(extractDir, "sub\\nested\\file.txt").toPath()));
     }
 

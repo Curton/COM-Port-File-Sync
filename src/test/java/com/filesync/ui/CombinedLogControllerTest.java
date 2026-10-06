@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test;
 class CombinedLogControllerTest {
 
     @Test
-    void saveCombinedLogItem_rendersTextCentered() {
+    void saveCombinedLogItemAndPopupMenuAreStyledToHugTheText() {
         SettingsManager settings = new SettingsManager(true);
         FileSyncManager syncManager = new FileSyncManager(mock(SerialPortManager.class), settings);
         MainFrameComponents components = new MainFrameComponents();
@@ -39,27 +39,6 @@ class CombinedLogControllerTest {
         assertTrue(
                 item.getUI() instanceof BasicMenuItemUI,
                 "The menu entry must use the paintText-overriding UI that centers the text");
-    }
-
-    @Test
-    void popupMenu_sizedToTextAndThinBordered() {
-        SettingsManager settings = new SettingsManager(true);
-        FileSyncManager syncManager = new FileSyncManager(mock(SerialPortManager.class), settings);
-        MainFrameComponents components = new MainFrameComponents();
-        LogController logController = new LogController(components.getLogTextArea());
-        FolderController folderController =
-                new FolderController(
-                        components,
-                        settings,
-                        syncManager,
-                        new MainFrameState(),
-                        logController,
-                        () -> {});
-        CombinedLogController controller =
-                new CombinedLogController(
-                        components, syncManager, folderController, settings, logController);
-
-        JMenuItem item = controller.getSaveCombinedLogItem();
         FontMetrics fm = item.getFontMetrics(item.getFont());
         // The entry must hug its text instead of reserving the Windows icon column.
         assertEquals(

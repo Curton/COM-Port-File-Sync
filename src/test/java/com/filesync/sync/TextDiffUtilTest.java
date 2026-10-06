@@ -1,107 +1,67 @@
 package com.filesync.sync;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.filesync.sync.TextDiffUtil.DiffHunk;
 import com.filesync.sync.TextDiffUtil.DiffLine;
 import com.filesync.sync.TextDiffUtil.DiffLineType;
 import com.filesync.sync.TextDiffUtil.DiffResult;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /** Unit tests for TextDiffUtil. */
 class TextDiffUtilTest {
 
-    @Test
-    void testIdenticalTexts() {
-        String text = "line1\nline2\nline3";
-        DiffResult result = TextDiffUtil.computeDiff(text, text);
-        assertFalse(result.hasChanges());
-        assertEquals(0, result.getAddedCount());
-        assertEquals(0, result.getRemovedCount());
-        assertEquals(3, result.getUnchangedCount());
-        assertTrue(result.getHunks().isEmpty());
-    }
-
-    @Test
-    void testEmptyTexts() {
-        DiffResult result = TextDiffUtil.computeDiff("", "");
-        assertFalse(result.hasChanges());
-        assertTrue(result.getHunks().isEmpty());
-    }
-
-    @Test
-    void testNullTexts() {
-        DiffResult result = TextDiffUtil.computeDiff(null, null);
-        assertFalse(result.hasChanges());
-        assertTrue(result.getHunks().isEmpty());
-    }
-
-    @Test
-    void testAddedLines() {
-        DiffResult result = TextDiffUtil.computeDiff("line1\nline2", "line1\nline2\nline3");
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getAddedCount());
-        assertEquals(0, result.getRemovedCount());
-
-        result = TextDiffUtil.computeDiff("", "new line");
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getAddedCount());
-    }
-
-    @Test
-    void testRemovedLines() {
-        DiffResult result = TextDiffUtil.computeDiff("line1\nline2\nline3", "line1\nline3");
-        assertTrue(result.hasChanges());
-        assertEquals(0, result.getAddedCount());
-        assertEquals(1, result.getRemovedCount());
-
-        result = TextDiffUtil.computeDiff("old line", "");
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getRemovedCount());
-    }
-
-    @Test
-    void testModifiedLines() {
-        String local = "line1\nold\nline3";
-        String remote = "line1\nnew\nline3";
+    @ParameterizedTest
+    @MethodSource("diffCountCases")
+    void computeDiff_counts(String local, String remote, int added, int removed, int unchanged) {
         DiffResult result = TextDiffUtil.computeDiff(local, remote);
-        assertTrue(result.hasChanges());
-        assertEquals(1, result.getAddedCount());
-        assertEquals(1, result.getRemovedCount());
+
+        assertEquals(added, result.getAddedCount(), "added count");
+        assertEquals(removed, result.getRemovedCount(), "removed count");
+        assertEquals(unchanged, result.getUnchangedCount(), "unchanged count");
+        assertEquals(added + removed > 0, result.hasChanges(), "hasChanges verdict");
+        if (added + removed == 0) {
+            assertTrue(result.getHunks().isEmpty(), "no changes: hunks must be empty");
+        }
+    }
+
+    private static Stream<Arguments> diffCountCases() {
+        return Stream.of(
+                // Identical texts: three shared lines, no changes at all.
+                arguments("line1\nline2\nline3", "line1\nline2\nline3", 0, 0, 3),
+                // Empty and null inputs.
+                arguments("", "", 0, 0, 0),
+                arguments(null, null, 0, 0, 0),
+                // Pure additions.
+                arguments("line1\nline2", "line1\nline2\nline3", 1, 0, 2),
+                arguments("", "new line", 1, 0, 0),
+                // Pure removals.
+                arguments("line1\nline2\nline3", "line1\nline3", 0, 1, 2),
+                arguments("old line", "", 0, 1, 0),
+                // A modified line counts as one removal plus one addition.
+                arguments("line1\nold\nline3", "line1\nnew\nline3", 1, 1, 2),
+                // Multiple scattered changes.
+                arguments("a\nb\nc\nd\ne", "a\nx\nc\ny\ne", 2, 2, 3),
+                // Completely different texts share no unchanged line.
+                arguments("aaa\nbbb\nccc", "xxx\nyyy\nzzz", 3, 3, 0));
     }
 
     @Test
-    void testMultipleChanges() {
-        String local = "a\nb\nc\nd\ne";
-        String remote = "a\nx\nc\ny\ne";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
-        assertEquals(2, result.getAddedCount());
-        assertEquals(2, result.getRemovedCount());
-    }
-
-    @Test
-    void testHunkCreation() {
+    void hunkGrouping_byContextGap() {
+        // Changes at lines 2 and 8 should be in separate hunks with context of 2.
         String local = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
         String remote = "a\nB\nc\nd\ne\nf\ng\nH\ni\nj";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote, 2);
-        // Changes at lines 2 and 8 should be in separate hunks with context of 2
-        assertTrue(result.getHunks().size() >= 1);
-    }
+        DiffResult separated = TextDiffUtil.computeDiff(local, remote, 2);
+        assertTrue(separated.getHunks().size() >= 1);
 
-    @Test
-    void testHunkMerging() {
-        String local = "a\nb\nc\nd\ne";
-        String remote = "A\nB\nC\nD\nE";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote, 1);
-        // All changes are close together, should be in one hunk
-        assertEquals(1, result.getHunks().size());
-    }
-
-    @Test
-    void testHasMeaningfulDifferences_ContentChange() {
-        String local = "hello world";
-        String remote = "hello there";
-        assertTrue(TextDiffUtil.hasMeaningfulDifferences(local, remote));
+        // All changes are close together, so a context of 1 merges them into one hunk.
+        DiffResult merged = TextDiffUtil.computeDiff("a\nb\nc\nd\ne", "A\nB\nC\nD\nE", 1);
+        assertEquals(1, merged.getHunks().size());
     }
 
     @Test
@@ -119,8 +79,11 @@ class TextDiffUtilTest {
             {"hello\r\nworld\r\n", "hello\r\nworld\r\n", false}, // identical CRLF text
             {"hello  \r\nworld\r\n", "hello\r\nworld\r\n", false},
             {"hello\nworld", "hello\n   \nworld", false}, // added lines are whitespace-only
-            // A real content change must still be detected.
+            // Real content changes - including a one-sided null - must still be detected.
             {"hello\nworld", "hello\n   \nreal change\nworld", true},
+            {"hello world", "hello there", true},
+            {null, "hello", true},
+            {"hello", null, true},
         };
         for (Object[] c : cases) {
             assertEquals(
@@ -130,30 +93,25 @@ class TextDiffUtilTest {
         }
     }
 
-    @Test
-    void testNormalizeForComparison_TrailingWhitespace() {
-        String text = "hello   \nworld\t\t\n";
-        String normalized = TextDiffUtil.normalizeForComparison(text);
-        assertEquals("hello\nworld\n", normalized);
+    @ParameterizedTest
+    @MethodSource("normalizeForComparisonCases")
+    void testNormalizeForComparison(String text, String expected) {
+        assertEquals(expected, TextDiffUtil.normalizeForComparison(text));
+    }
+
+    private static Stream<Arguments> normalizeForComparisonCases() {
+        return Stream.of(
+                // Trailing whitespace (spaces and tabs) is stripped from each line.
+                arguments("hello   \nworld\t\t\n", "hello\nworld\n"),
+                // Multiple blank lines collapse away.
+                arguments("hello\n\n\n\nworld", "hello\nworld\n"),
+                arguments(null, ""));
     }
 
     @Test
-    void testNormalizeForComparison_MultipleBlankLines() {
-        String text = "hello\n\n\n\nworld";
-        String normalized = TextDiffUtil.normalizeForComparison(text);
-        assertEquals("hello\nworld\n", normalized);
-    }
-
-    @Test
-    void testNormalizeForComparison_Null() {
-        String normalized = TextDiffUtil.normalizeForComparison(null);
-        assertEquals("", normalized);
-    }
-
-    @Test
-    void testDiffLineTypes() {
-        String local = "removed\nunchanged";
-        String remote = "added\nunchanged";
+    void testDiffLineTypesAndLineNumbers() {
+        String local = "line1\nline2\nline3";
+        String remote = "line1\nmodified\nline3";
         DiffResult result = TextDiffUtil.computeDiff(local, remote);
 
         boolean foundAdded = false;
@@ -162,10 +120,18 @@ class TextDiffUtilTest {
 
         for (DiffHunk hunk : result.getHunks()) {
             for (DiffLine line : hunk.getLines()) {
-                switch (line.getType()) {
-                    case ADDED -> foundAdded = true;
-                    case REMOVED -> foundRemoved = true;
-                    case UNCHANGED -> foundUnchanged = true;
+                if (line.getType() == DiffLineType.ADDED) {
+                    foundAdded = true;
+                    assertEquals(-1, line.getLocalLineNumber());
+                    assertTrue(line.getRemoteLineNumber() > 0);
+                } else if (line.getType() == DiffLineType.REMOVED) {
+                    foundRemoved = true;
+                    assertTrue(line.getLocalLineNumber() > 0);
+                    assertEquals(-1, line.getRemoteLineNumber());
+                } else if (line.getType() == DiffLineType.UNCHANGED) {
+                    foundUnchanged = true;
+                    assertTrue(line.getLocalLineNumber() > 0);
+                    assertTrue(line.getRemoteLineNumber() > 0);
                 }
             }
         }
@@ -173,28 +139,6 @@ class TextDiffUtilTest {
         assertTrue(foundAdded, "Should have added lines");
         assertTrue(foundRemoved, "Should have removed lines");
         assertTrue(foundUnchanged, "Should have unchanged lines");
-    }
-
-    @Test
-    void testLineNumbers() {
-        String local = "line1\nline2\nline3";
-        String remote = "line1\nmodified\nline3";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
-
-        for (DiffHunk hunk : result.getHunks()) {
-            for (DiffLine line : hunk.getLines()) {
-                if (line.getType() == DiffLineType.UNCHANGED) {
-                    assertTrue(line.getLocalLineNumber() > 0);
-                    assertTrue(line.getRemoteLineNumber() > 0);
-                } else if (line.getType() == DiffLineType.REMOVED) {
-                    assertTrue(line.getLocalLineNumber() > 0);
-                    assertEquals(-1, line.getRemoteLineNumber());
-                } else if (line.getType() == DiffLineType.ADDED) {
-                    assertEquals(-1, line.getLocalLineNumber());
-                    assertTrue(line.getRemoteLineNumber() > 0);
-                }
-            }
-        }
     }
 
     @Test
@@ -207,16 +151,6 @@ class TextDiffUtilTest {
         DiffHunk hunk = result.getHunks().get(0);
         assertEquals(1, hunk.getLocalLineCount());
         assertEquals(1, hunk.getRemoteLineCount());
-    }
-
-    @Test
-    void testCompletelyDifferentTexts() {
-        String local = "aaa\nbbb\nccc";
-        String remote = "xxx\nyyy\nzzz";
-        DiffResult result = TextDiffUtil.computeDiff(local, remote);
-        assertTrue(result.hasChanges());
-        assertEquals(3, result.getAddedCount());
-        assertEquals(3, result.getRemovedCount());
     }
 
     // ========== large conflicting texts stay bounded ==========
@@ -291,12 +225,6 @@ class TextDiffUtilTest {
     }
 
     // ========== hasMeaningfulDifferences streaming pre-check ==========
-
-    @Test
-    void hasMeaningfulDifferences_oneNull() {
-        assertTrue(TextDiffUtil.hasMeaningfulDifferences(null, "hello"));
-        assertTrue(TextDiffUtil.hasMeaningfulDifferences("hello", null));
-    }
 
     @Test
     void hasMeaningfulDifferences_largeIdenticalTexts() {

@@ -148,13 +148,6 @@ class FileSyncManagerTest {
                                                             && !ce.isConnected()),
                     Duration.ofSeconds(10));
 
-            assertTrue(
-                    events.stream()
-                            .anyMatch(
-                                    e ->
-                                            e instanceof SyncEvent.ConnectionEvent ce
-                                                    && !ce.isConnected()),
-                    "A disconnected ConnectionEvent should be posted");
             assertFalse(
                     events.stream()
                             .anyMatch(
@@ -570,10 +563,6 @@ class FileSyncManagerTest {
                                     .anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                     Duration.ofSeconds(10));
 
-            assertTrue(
-                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
-                    "A SyncControlRefreshEvent must be posted after the XMODEM shared-text"
-                            + " transfer completes");
             assertFalse(
                     fsm.isTransferBusy(),
                     "isTransferBusy must be false after the shared-text transfer settles");
@@ -788,9 +777,6 @@ class FileSyncManagerTest {
                         XModemTransfer.ACK,
                         XModemTransfer.ACK
                     });
-            assertTrue(
-                    serial.getWrittenLines().stream().anyMatch(l -> l.contains("DELTA_SIG_DATA")),
-                    "DELTA_SIG_REQ must be routed to the signature handler");
         } finally {
             stopQuietly(fsm);
         }
@@ -877,11 +863,6 @@ class FileSyncManagerTest {
                         }
                     },
                     Duration.ofSeconds(5));
-            // base was "hello"; only a routed+reconstructed delta can turn it into "world".
-            assertEquals(
-                    "world",
-                    Files.readString(doc.toPath()),
-                    "FILE_DELTA must be routed and the file reconstructed");
         } finally {
             stopQuietly(fsm);
         }

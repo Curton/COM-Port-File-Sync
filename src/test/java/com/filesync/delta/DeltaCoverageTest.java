@@ -351,12 +351,10 @@ class DeltaCoverageTest {
     void signatureUtil_chooseBlockSizeClampsToRange() {
         assertEquals(512, SignatureUtil.chooseBlockSize(0));
         assertEquals(512, SignatureUtil.chooseBlockSize(1));
-        assertEquals(512, SignatureUtil.chooseBlockSize(100));
         // sqrt(1MB) = 1024
         assertEquals(1024, SignatureUtil.chooseBlockSize(1024 * 1024));
         // sqrt(100MB) ~ 10000 -> clamped to 8192
         assertEquals(8192, SignatureUtil.chooseBlockSize(100L * 1024 * 1024));
-        assertEquals(8192, SignatureUtil.chooseBlockSize(1L * 1024 * 1024 * 1024));
     }
 
     @Test

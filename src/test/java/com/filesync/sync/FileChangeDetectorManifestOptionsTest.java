@@ -84,13 +84,11 @@ class FileChangeDetectorManifestOptionsTest {
         callback.onFileProcessed("test.txt");
         callback.onFileProcessed("test.txt", 10, 100);
         callback.onComplete(new FileChangeDetector.FileManifest());
-    }
 
-    @Test
-    void manifestProgressCallbackOnFileProcessedDelegatesToSingleArgVersion() {
+        // The 3-arg convenience overload delegates to the single-arg version.
         List<String> processedFiles = new ArrayList<>();
 
-        FileChangeDetector.ManifestProgressCallback callback =
+        FileChangeDetector.ManifestProgressCallback recording =
                 new FileChangeDetector.ManifestProgressCallback() {
                     @Override
                     public void onFileProcessed(String fileName) {
@@ -98,7 +96,7 @@ class FileChangeDetectorManifestOptionsTest {
                     }
                 };
 
-        callback.onFileProcessed("file1.txt", 1, 10);
+        recording.onFileProcessed("file1.txt", 1, 10);
 
         assertEquals(1, processedFiles.size());
         assertEquals("file1.txt", processedFiles.get(0));
@@ -113,12 +111,6 @@ class FileChangeDetectorManifestOptionsTest {
         assertEquals(1024L, info.getSize());
         assertEquals(12345L, info.getLastModified());
         assertEquals("md5hash", info.getMd5());
-    }
-
-    @Test
-    void fileInfoToStringContainsPath() {
-        FileChangeDetector.FileInfo info =
-                new FileChangeDetector.FileInfo("test.txt", 1024L, 12345L, "md5hash");
 
         String str = info.toString();
         assertTrue(str.contains("test.txt"));
@@ -127,33 +119,26 @@ class FileChangeDetectorManifestOptionsTest {
     }
 
     @Test
-    void fileManifestDefaultConstructorCreatesEmptyManifest() {
+    void fileManifestConstructors() {
         FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest();
 
         assertTrue(manifest.getFiles().isEmpty());
         assertTrue(manifest.getEmptyDirectories().isEmpty());
         assertEquals(0, manifest.getFileCount());
         assertEquals(0, manifest.getEmptyDirectoryCount());
-    }
 
-    @Test
-    void fileManifestConstructorWithFiles() {
         java.util.Map<String, FileChangeDetector.FileInfo> files = new java.util.HashMap<>();
         files.put("test.txt", new FileChangeDetector.FileInfo("test.txt", 100L, 0L, "md5"));
 
-        FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest(files);
+        manifest = new FileChangeDetector.FileManifest(files);
 
         assertEquals(1, manifest.getFileCount());
         assertTrue(manifest.getEmptyDirectories().isEmpty());
-    }
 
-    @Test
-    void fileManifestConstructorWithFilesAndDirectories() {
-        java.util.Map<String, FileChangeDetector.FileInfo> files = new java.util.HashMap<>();
         java.util.Set<String> dirs = new java.util.HashSet<>();
         dirs.add("empty-dir");
 
-        FileChangeDetector.FileManifest manifest = new FileChangeDetector.FileManifest(files, dirs);
+        manifest = new FileChangeDetector.FileManifest(new java.util.HashMap<>(), dirs);
 
         assertEquals(0, manifest.getFileCount());
         assertEquals(1, manifest.getEmptyDirectoryCount());

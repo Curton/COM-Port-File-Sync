@@ -13,6 +13,7 @@ import com.filesync.serial.XModemTransfer;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -42,6 +43,10 @@ class SyncProtocolXmodemContentTest {
         byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
         serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
         SyncProtocol protocol = new SyncProtocol(serial);
+        List<String> writeFailures = new ArrayList<>();
+        List<String> confirmations = new ArrayList<>();
+        protocol.setWriteFailedHandler(writeFailures::add);
+        protocol.setTransferConfirmedHandler((path, md5, size) -> confirmations.add(path));
 
         File extractDir = tempDir.toFile();
         // A directory at the target path makes FileOutputStream fail on every platform, which is
@@ -69,6 +74,13 @@ class SyncProtocolXmodemContentTest {
         assertFalse(
                 protocol.isXmodemInProgress(),
                 "xmodemInProgress must be reset after a write failure");
+        // A locked target must be reported through the write-failed handler (path only) and must
+        // never be confirmed as transferred.
+        assertEquals(
+                List.of("locked.txt"),
+                writeFailures,
+                "the write failure must be reported through the write-failed handler");
+        assertTrue(confirmations.isEmpty(), "a failed write confirms nothing");
     }
 
     @Test
@@ -97,12 +109,11 @@ class SyncProtocolXmodemContentTest {
         serial.enqueueLine("[[SYNC:ACK]]");
         SyncProtocol protocol = new SyncProtocol(serial);
 
-        byte[] data = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-
-        IOException thrown =
-                assertThrows(
-                        IOException.class,
-                        () -> protocol.sendFileContentViaXmodem(data, data.length));
+        // The XMODEM send itself fails on the stub; only the announcement frame matters here. The
+        // announced size (70000) deliberately differs from the buffer length (8) so the frame
+        // proves the size parameter - not the actual payload length - is what gets announced.
+        assertThrows(
+                IOException.class, () -> protocol.sendFileContentViaXmodem(new byte[8], 70000));
 
         // The error must propagate (from the simulated read failure during handshake), and the
         // announcement command must have been written before the failure.
@@ -112,20 +123,6 @@ class SyncProtocolXmodemContentTest {
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("FILE_CONTENT_XFER")),
                 "sendFileContentViaXmodem should announce the transfer before sending");
-        assertTrue(thrown.getMessage() != null, "Failure should carry a message");
-    }
-
-    @Test
-    void sendFileContentViaXmodem_announcesSizeAsSoleFirstParameter() throws IOException {
-        FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
-        // The ACK waited for between the FILE_CONTENT_XFER announcement and the XMODEM send.
-        serial.enqueueLine("[[SYNC:ACK]]");
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        // The XMODEM send itself fails on the stub; only the announcement frame matters here.
-        assertThrows(
-                IOException.class, () -> protocol.sendFileContentViaXmodem(new byte[8], 70000));
-
         // FileSyncManager.fetchRemoteFileContent parses the size from parameter index 0, so the
         // announcement must carry it as the sole first parameter. A frame like
         // "[[SYNC:FILE_CONTENT_XFER:<path>:70000]]" would break the requester.
@@ -139,8 +136,7 @@ class SyncProtocolXmodemContentTest {
         FailingXmodemSerialPort serial = new FailingXmodemSerialPort();
         SyncProtocol protocol = new SyncProtocol(serial);
 
-        IOException thrown =
-                assertThrows(IOException.class, () -> protocol.receiveFileContentViaXmodem(64));
+        assertThrows(IOException.class, () -> protocol.receiveFileContentViaXmodem(64));
 
         // sendAck() is written (writeLine, overridden), then xmodem.receive attempts the handshake
         // whose first action (write 'C') fails because the stub has no real output stream.
@@ -150,42 +146,25 @@ class SyncProtocolXmodemContentTest {
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("ACK")),
                 "receiveFileContentViaXmodem should send an ACK before receiving");
-        assertTrue(thrown.getMessage() != null, "Failure should carry a message");
     }
 
     // ========== Remote log transfer entry points ==========
 
     @Test
-    void logReqCommand_writesLogReqFrame() throws IOException {
+    void sendLogCommands_writeExactFrames() throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         SyncProtocol protocol = new SyncProtocol(serial);
 
         protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
+        protocol.sendLogMarkerRequest();
+        protocol.sendLogData("QUJD");
 
         assertTrue(
                 serial.getWrittenLines().contains("[[SYNC:LOG_REQ]]"),
                 "the LOG_REQ command must be written as a bare LOG_REQ frame");
-    }
-
-    @Test
-    void sendLogMarkerRequest_writesMarkerReqFrame() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        protocol.sendLogMarkerRequest();
-
         assertTrue(
                 serial.getWrittenLines().contains("[[SYNC:LOG_MARKER_REQ]]"),
                 "sendLogMarkerRequest must write a bare LOG_MARKER_REQ frame");
-    }
-
-    @Test
-    void sendLogData_writesBase64Param() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        protocol.sendLogData("QUJD");
-
         assertTrue(
                 serial.getWrittenLines().contains("[[SYNC:LOG_DATA:QUJD]]"),
                 "sendLogData must carry the base64 log as the sole parameter");
@@ -229,8 +208,7 @@ class SyncProtocolXmodemContentTest {
 
         byte[] data = "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
-        IOException thrown =
-                assertThrows(IOException.class, () -> protocol.sendLogViaXmodem(data, data.length));
+        assertThrows(IOException.class, () -> protocol.sendLogViaXmodem(data, data.length));
 
         assertFalse(
                 protocol.isXmodemInProgress(),
@@ -238,7 +216,6 @@ class SyncProtocolXmodemContentTest {
         assertTrue(
                 serial.getWrittenLines().stream().anyMatch(l -> l.contains("LOG_XFER")),
                 "sendLogViaXmodem should announce the transfer before sending");
-        assertTrue(thrown.getMessage() != null, "Failure should carry a message");
     }
 
     @Test

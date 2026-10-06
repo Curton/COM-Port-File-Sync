@@ -16,6 +16,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Tests for the remote-log fetch flow in {@link FileSyncManager}: the sender-side {@code
@@ -130,23 +134,21 @@ class RemoteLogFetchTest {
         }
     }
 
-    @Test
-    void fetchRemoteLogText_inlineLogData_returnsDecodedText() throws Exception {
+    @ParameterizedTest
+    @MethodSource
+    void fetchRemoteLogText_inlineLogDataVariants(String frame, String expected) throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         try {
             startConnected(fsm, serial);
-            String remoteLog = "[10:00:00] hello remote\n[10:00:01] second line\n";
-            String encoded =
-                    Base64.getEncoder().encodeToString(remoteLog.getBytes(StandardCharsets.UTF_8));
-            Thread feeder = feederAfterLogReq(serial, "[[SYNC:LOG_DATA:" + encoded + "]]");
+            Thread feeder = feederAfterLogReq(serial, frame);
             feeder.start();
 
             String result = fsm.fetchRemoteLogText();
             feeder.join(5_000);
 
             assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertEquals(remoteLog, result, "Base64 LOG_DATA should be decoded back to text");
+            assertEquals(expected, result, "LOG_DATA handling must match the frame variant");
             assertTrue(
                     serial.getWrittenLines().contains("[[SYNC:LOG_REQ]]"),
                     "Fetch must send a LOG_REQ command");
@@ -155,43 +157,14 @@ class RemoteLogFetchTest {
         }
     }
 
-    @Test
-    void fetchRemoteLogText_emptyLogData_returnsEmptyString() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        try {
-            startConnected(fsm, serial);
-            Thread feeder = feederAfterLogReq(serial, "[[SYNC:LOG_DATA:]]");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertEquals(
-                    "", result, "An empty log (no bytes) must yield an empty string, not null");
-        } finally {
-            stopQuietly(fsm);
-        }
-    }
-
-    @Test
-    void fetchRemoteLogText_logDataWithoutParam_returnsNull() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        try {
-            startConnected(fsm, serial);
-            Thread feeder = feederAfterLogReq(serial, "[[SYNC:LOG_DATA]]");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertNull(result, "Missing base64 param must be treated as unavailable");
-        } finally {
-            stopQuietly(fsm);
-        }
+    static List<Arguments> fetchRemoteLogText_inlineLogDataVariants() {
+        String remoteLog = "[10:00:00] hello remote\n[10:00:01] second line\n";
+        String encoded =
+                Base64.getEncoder().encodeToString(remoteLog.getBytes(StandardCharsets.UTF_8));
+        return List.of(
+                Arguments.of("[[SYNC:LOG_DATA:" + encoded + "]]", remoteLog),
+                Arguments.of("[[SYNC:LOG_DATA:]]", ""),
+                Arguments.of("[[SYNC:LOG_DATA]]", null));
     }
 
     @Test
@@ -251,15 +224,17 @@ class RemoteLogFetchTest {
         }
     }
 
-    @Test
-    void fetchRemoteLogText_error_postsErrorEventAndReturnsNull() throws Exception {
+    @ParameterizedTest
+    @MethodSource
+    void fetchRemoteLogText_error_postsErrorEventAndReturnsNull(
+            String frame, String expectedFragment) throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         List<SyncEvent> events = new CopyOnWriteArrayList<>();
         fsm.getEventBus().register(events::add);
         try {
             startConnected(fsm, serial);
-            Thread feeder = feederAfterLogReq(serial, "[[SYNC:ERROR:remote exploded]]");
+            Thread feeder = feederAfterLogReq(serial, frame);
             feeder.start();
 
             String result = fsm.fetchRemoteLogText();
@@ -274,123 +249,60 @@ class RemoteLogFetchTest {
                                             e instanceof SyncEvent.ErrorEvent ee
                                                     && ee.getMessage()
                                                             .contains(
-                                                                    "Failed to fetch remote log:"
-                                                                            + " Remote error during"
-                                                                            + " log request: remote"
-                                                                            + " exploded")),
+                                                                    "Failed to fetch remote log: "
+                                                                            + expectedFragment)),
                     "A fetch failure must be reported as an ErrorEvent");
         } finally {
             stopQuietly(fsm);
         }
     }
 
-    @Test
-    void fetchRemoteLogText_errorWithoutParam_reportsUnknownAndReturnsNull() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        List<SyncEvent> events = new CopyOnWriteArrayList<>();
-        fsm.getEventBus().register(events::add);
-        try {
-            startConnected(fsm, serial);
-            Thread feeder = feederAfterLogReq(serial, "[[SYNC:ERROR]]");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertNull(result, "Remote ERROR must abort the fetch with null");
-            assertTrue(
-                    events.stream()
-                            .anyMatch(
-                                    e ->
-                                            e instanceof SyncEvent.ErrorEvent ee
-                                                    && ee.getMessage()
-                                                            .contains(
-                                                                    "Remote error during log"
-                                                                            + " request:"
-                                                                            + " unknown")),
-                    "A parameter-less ERROR must fall back to the 'unknown' message");
-        } finally {
-            stopQuietly(fsm);
-        }
+    static List<Arguments> fetchRemoteLogText_error_postsErrorEventAndReturnsNull() {
+        return List.of(
+                Arguments.of(
+                        "[[SYNC:ERROR:remote exploded]]",
+                        "Remote error during log request: remote exploded"),
+                // A parameter-less ERROR falls back to the 'unknown' message.
+                Arguments.of("[[SYNC:ERROR]]", "Remote error during log request: unknown"));
     }
 
-    @Test
-    void fetchRemoteLogText_heartbeat_answersWithAckAndContinues() throws Exception {
+    @ParameterizedTest
+    @MethodSource
+    void fetchRemoteLogText_midExchangeNoise_continues(
+            String noiseFrame, String expectedText, boolean expectHeartbeatAck) throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         try {
             startConnected(fsm, serial);
             String encoded =
                     Base64.getEncoder()
-                            .encodeToString("after-heartbeat".getBytes(StandardCharsets.UTF_8));
+                            .encodeToString(expectedText.getBytes(StandardCharsets.UTF_8));
             Thread feeder =
-                    feederAfterLogReq(
-                            serial, "[[SYNC:HEARTBEAT]]", "[[SYNC:LOG_DATA:" + encoded + "]]");
+                    feederAfterLogReq(serial, noiseFrame, "[[SYNC:LOG_DATA:" + encoded + "]]");
             feeder.start();
 
             String result = fsm.fetchRemoteLogText();
             feeder.join(5_000);
 
             assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertEquals("after-heartbeat", result, "Fetch must survive a mid-exchange HEARTBEAT");
-            assertTrue(
-                    serial.getWrittenLines().contains("[[SYNC:HEARTBEAT_ACK]]"),
-                    "A mid-exchange HEARTBEAT must be acknowledged");
+            assertEquals(
+                    expectedText, result, "Fetch must survive mid-exchange noise: " + noiseFrame);
+            if (expectHeartbeatAck) {
+                assertTrue(
+                        serial.getWrittenLines().contains("[[SYNC:HEARTBEAT_ACK]]"),
+                        "A mid-exchange HEARTBEAT must be acknowledged");
+            }
         } finally {
             stopQuietly(fsm);
         }
     }
 
-    @Test
-    void fetchRemoteLogText_heartbeatAck_continues() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        try {
-            startConnected(fsm, serial);
-            String encoded =
-                    Base64.getEncoder()
-                            .encodeToString("after-heartbeat-ack".getBytes(StandardCharsets.UTF_8));
-            Thread feeder =
-                    feederAfterLogReq(
-                            serial, "[[SYNC:HEARTBEAT_ACK]]", "[[SYNC:LOG_DATA:" + encoded + "]]");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertEquals("after-heartbeat-ack", result, "HEARTBEAT_ACK must not abort the fetch");
-        } finally {
-            stopQuietly(fsm);
-        }
-    }
-
-    @Test
-    void fetchRemoteLogText_unknownMessage_isStashedAndFetchContinues() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        try {
-            startConnected(fsm, serial);
-            String encoded =
-                    Base64.getEncoder()
-                            .encodeToString("after-unknown".getBytes(StandardCharsets.UTF_8));
-            Thread feeder =
-                    feederAfterLogReq(
-                            serial,
-                            "[[SYNC:SHARED_TEXT:stale]]",
-                            "[[SYNC:LOG_DATA:" + encoded + "]]");
-            feeder.start();
-
-            String result = fsm.fetchRemoteLogText();
-            feeder.join(5_000);
-
-            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
-            assertEquals("after-unknown", result, "Unknown messages must be stashed, not fatal");
-        } finally {
-            stopQuietly(fsm);
-        }
+    static List<Arguments> fetchRemoteLogText_midExchangeNoise_continues() {
+        return List.of(
+                Arguments.of("[[SYNC:HEARTBEAT]]", "after-heartbeat", true),
+                Arguments.of("[[SYNC:HEARTBEAT_ACK]]", "after-heartbeat-ack", false),
+                // Unknown messages must be stashed, not fatal.
+                Arguments.of("[[SYNC:SHARED_TEXT:stale]]", "after-unknown", false));
     }
 
     @Test
@@ -528,27 +440,15 @@ class RemoteLogFetchTest {
         }
     }
 
-    @Test
-    void handleLogRequest_withoutProvider_sendsEmptyLogData() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void handleLogRequest_withoutUsableLog_sendsEmptyLogData(boolean providerReturnsNull)
+            throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        try {
-            fsm.startListening("TEST");
-            serial.feedLine("[[SYNC:LOG_REQ]]");
-
-            waitUntil(
-                    () -> serial.getWrittenLines().contains("[[SYNC:LOG_DATA:]]"),
-                    Duration.ofSeconds(5));
-        } finally {
-            stopQuietly(fsm);
+        if (providerReturnsNull) {
+            fsm.setLogTextProvider(() -> null);
         }
-    }
-
-    @Test
-    void handleLogRequest_providerReturnsNull_sendsEmptyLogData() throws Exception {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
-        fsm.setLogTextProvider(() -> null);
         try {
             fsm.startListening("TEST");
             serial.feedLine("[[SYNC:LOG_REQ]]");

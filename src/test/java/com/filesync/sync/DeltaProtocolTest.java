@@ -14,9 +14,13 @@ import com.filesync.serial.XModemTransfer;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Integration tests for {@link SyncProtocol#receiveFileDelta}: a scripted single-block XMODEM
@@ -44,29 +48,38 @@ class DeltaProtocolTest {
         return DeltaEncoder.encode(source, SignatureUtil.compute("big.bin", base, BLOCK));
     }
 
-    @Test
-    void receiveFileDelta_appliesDeltaAndWritesFile() throws IOException {
+    @ParameterizedTest
+    @MethodSource
+    void receiveFileDelta_appliesDeltaAndWritesFile(
+            boolean compressed, long lastModified, long seed) throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         SyncProtocol protocol = new SyncProtocol(serial);
 
-        byte[] base = randomBytes(BLOCK * 2, 1); // 2 full blocks
+        byte[] base = randomBytes(BLOCK * 2, seed); // 2 full blocks
         byte[] source = base.clone();
-        source[10] = (byte) ~source[10]; // modify a few bytes inside block 0
-        source[11] = (byte) ~source[11];
+        if (compressed) {
+            for (int i = 0; i < 8; i++) source[BLOCK + i] = (byte) ~source[BLOCK + i];
+        } else {
+            source[10] = (byte) ~source[10]; // modify a few bytes inside block 0
+            source[11] = (byte) ~source[11];
+        }
 
         byte[] delta = buildDelta(base, source);
-        assertTrue(delta.length <= 128, "delta should fit one XMODEM block for this test");
+        byte[] payload = compressed ? CompressionUtil.compress(delta) : delta;
+        assertTrue(
+                payload.length <= 128,
+                (compressed ? "compressed delta" : "delta") + " should fit one XMODEM block");
 
         Path existing = tempDir.resolve("big.bin");
         Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(delta));
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
 
         protocol.receiveFileDelta(
                 tempDir.toFile(),
                 "big.bin",
-                delta.length,
-                false,
-                12345L,
+                payload.length,
+                compressed,
+                lastModified,
                 source.length,
                 HashUtil.md5Hex(source),
                 null);
@@ -75,34 +88,8 @@ class DeltaProtocolTest {
                 source, Files.readAllBytes(existing), "file must match the sender's source");
     }
 
-    @Test
-    void receiveFileDelta_compressedDeltaRoundTrip() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        byte[] base = randomBytes(BLOCK * 2, 2);
-        byte[] source = base.clone();
-        for (int i = 0; i < 8; i++) source[BLOCK + i] = (byte) ~source[BLOCK + i];
-
-        byte[] delta = buildDelta(base, source);
-        byte[] compressed = CompressionUtil.compress(delta);
-        assertTrue(compressed.length <= 128, "compressed delta should fit one XMODEM block");
-
-        Path existing = tempDir.resolve("big.bin");
-        Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(compressed));
-
-        protocol.receiveFileDelta(
-                tempDir.toFile(),
-                "big.bin",
-                compressed.length,
-                true,
-                0L,
-                source.length,
-                HashUtil.md5Hex(source),
-                null);
-
-        assertArrayEquals(source, Files.readAllBytes(existing));
+    static List<Arguments> receiveFileDelta_appliesDeltaAndWritesFile() {
+        return List.of(Arguments.of(false, 12345L, 1L), Arguments.of(true, 0L, 2L));
     }
 
     @Test
@@ -314,25 +301,29 @@ class DeltaProtocolTest {
         return full;
     }
 
-    @Test
-    void receiveFileAppend_appliesTailAndWritesFile() throws IOException {
+    @ParameterizedTest
+    @MethodSource
+    void receiveFileAppend_appliesTailAndWritesFile(
+            byte[] base, byte[] tail, boolean compressed, long lastModified) throws IOException {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
         SyncProtocol protocol = new SyncProtocol(serial);
 
-        byte[] base = randomBytes(200, 20);
-        byte[] tail = randomBytes(30, 21);
         byte[] full = concat(base, tail);
+        byte[] payload = compressed ? CompressionUtil.compress(tail) : tail;
+        assertTrue(
+                payload.length <= 128,
+                (compressed ? "compressed tail" : "tail") + " should fit one XMODEM block");
 
         Path existing = tempDir.resolve("app.log");
         Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(tail));
+        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
 
         protocol.receiveFileAppend(
                 tempDir.toFile(),
                 "app.log",
-                tail.length,
-                false,
-                12345L,
+                payload.length,
+                compressed,
+                lastModified,
                 base.length,
                 full.length,
                 HashUtil.md5Hex(full),
@@ -341,33 +332,17 @@ class DeltaProtocolTest {
         assertArrayEquals(full, Files.readAllBytes(existing), "file must be base + tail");
     }
 
-    @Test
-    void receiveFileAppend_compressedTailRoundTrip() throws IOException {
-        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
-        SyncProtocol protocol = new SyncProtocol(serial);
-
-        byte[] base = randomBytes(200, 22);
-        byte[] tail = "another log line\n".repeat(6).getBytes();
-        byte[] full = concat(base, tail);
-        byte[] compressedTail = CompressionUtil.compress(tail);
-        assertTrue(compressedTail.length <= 128, "compressed tail should fit one XMODEM block");
-
-        Path existing = tempDir.resolve("app.log");
-        Files.write(existing, base);
-        serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(compressedTail));
-
-        protocol.receiveFileAppend(
-                tempDir.toFile(),
-                "app.log",
-                compressedTail.length,
-                true,
-                0L,
-                base.length,
-                full.length,
-                HashUtil.md5Hex(full),
-                null);
-
-        assertArrayEquals(full, Files.readAllBytes(existing));
+    static List<Arguments> receiveFileAppend_appliesTailAndWritesFile() {
+        byte[] randomBase = new byte[200];
+        new Random(20).nextBytes(randomBase);
+        byte[] randomTail = new byte[30];
+        new Random(21).nextBytes(randomTail);
+        byte[] textBase = new byte[200];
+        new Random(22).nextBytes(textBase);
+        byte[] textTail = "another log line\n".repeat(6).getBytes();
+        return List.of(
+                Arguments.of(randomBase, randomTail, false, 12345L),
+                Arguments.of(textBase, textTail, true, 0L));
     }
 
     @Test

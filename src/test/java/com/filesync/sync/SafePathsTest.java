@@ -9,89 +9,48 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Tests for the shared remote-path containment check. */
 class SafePathsTest {
 
     @TempDir Path tempDir;
 
-    @Test
-    void resolvesNestedRelativePathInsideBase() throws IOException {
-        File base = tempDir.resolve("sync").toFile();
-        base.mkdirs();
-
-        File resolved = SafePaths.resolveWithin(base, "sub/dir/file.txt");
-
-        assertEquals(
-                new File(base, "sub/dir/file.txt").getCanonicalFile(),
-                resolved,
-                "A plain relative path must resolve inside the base");
-    }
-
-    @Test
-    void normalizesBackslashSeparators() throws IOException {
-        File base = tempDir.resolve("sync").toFile();
-        base.mkdirs();
-
-        // The manifest walk produces backslash-separated paths on Windows.
-        File resolved = SafePaths.resolveWithin(base, "sub\\dir\\file.txt");
-
-        assertEquals(
-                new File(base, "sub/dir/file.txt").getCanonicalFile(),
-                resolved,
-                "Separator style must not change where the path resolves");
-    }
-
-    @Test
-    void allowsNamesThatContainDoubleDots() throws IOException {
+    @ParameterizedTest
+    @ValueSource(
+            strings = {"sub/dir/file.txt", "sub\\dir\\file.txt", "notes..txt", "v1..2/data.csv"})
+    void resolvesRelativePathInsideBase(String path) throws IOException {
         File base = tempDir.resolve("sync").toFile();
         base.mkdirs();
 
         assertEquals(
-                new File(base, "notes..txt").getCanonicalFile(),
-                SafePaths.resolveWithin(base, "notes..txt"),
-                "'..' inside a name is not a traversal");
-        assertEquals(
-                new File(base, "v1..2/data.csv").getCanonicalFile(),
-                SafePaths.resolveWithin(base, "v1..2/data.csv"),
-                "'..' inside a directory name is not a traversal either");
+                new File(base, path.replace('\\', '/')).getCanonicalFile(),
+                SafePaths.resolveWithin(base, path),
+                "A relative path must resolve inside the base");
     }
 
-    @Test
-    void rejectsEmptyAndNullPaths() {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(
+            strings = {
+                "/etc/passwd",
+                "\\evil.txt",
+                "C:\\evil.txt",
+                "C:evil.txt",
+                "\\\\srv\\share\\x",
+                "file.txt:stream",
+                ".",
+                "..",
+                "sub/..",
+                "sub/../x",
+                "sub/./x"
+            })
+    void rejectsPathsOutsideTheBase(String path) {
         File base = tempDir.resolve("sync").toFile();
 
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, ""));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, null));
-    }
-
-    @Test
-    void rejectsAbsolutePaths() {
-        File base = tempDir.resolve("sync").toFile();
-
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "/etc/passwd"));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "\\evil.txt"));
-    }
-
-    @Test
-    void rejectsDriveQualifiedAndStreamForms() {
-        File base = tempDir.resolve("sync").toFile();
-
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "C:\\evil.txt"));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "C:evil.txt"));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "\\\\srv\\share\\x"));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "file.txt:stream"));
-    }
-
-    @Test
-    void rejectsDotAndDotDotSegments() {
-        File base = tempDir.resolve("sync").toFile();
-
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "."));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, ".."));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "sub/.."));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "sub/../x"));
-        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, "sub/./x"));
+        assertThrows(IOException.class, () -> SafePaths.resolveWithin(base, path));
     }
 
     @Test
