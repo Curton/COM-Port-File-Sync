@@ -316,6 +316,45 @@ class TwoEndedRegressionTest {
 
     @Test
     @Timeout(240)
+    void droppedFolderArrivesUnpackedUnderDownloads() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        File folder = new File(root, "link-lab-drop-folder-" + Long.toHexString(System.nanoTime()));
+        File nested = new File(folder, "nested");
+        assertTrue(nested.mkdirs());
+        byte[] payload = randomBytes(50_000);
+        Files.write(new File(folder, "top.bin").toPath(), payload);
+        Files.write(
+                new File(nested, "deep.bin").toPath(), "deep".getBytes(StandardCharsets.UTF_8));
+
+        Thread dropper =
+                new Thread(() -> sender.manager().sendDropFiles(List.of(folder)), "e2e-dropper");
+        dropper.start();
+
+        await(
+                "drop folder saved on the receiver side",
+                () -> !receiver.receivedFiles().isEmpty(),
+                AWAIT_MS);
+        File received = new File(receiver.receivedFiles().get(0));
+        try {
+            assertTrue(received.isDirectory(), "the packed drop arrives as an unpacked folder");
+            assertEquals(
+                    folder.getName(),
+                    received.getName(),
+                    "a lone folder drop unpacks under its own name");
+            assertArrayEquals(payload, Files.readAllBytes(new File(received, "top.bin").toPath()));
+            assertEquals(
+                    "deep",
+                    Files.readString(new File(received, "nested/deep.bin").toPath()),
+                    "the nested structure survives the round trip");
+        } finally {
+            com.filesync.sync.DropArchiveUtil.deleteRecursively(received);
+        }
+        dropper.join(10_000);
+    }
+
+    @Test
+    @Timeout(240)
     void linkCycleLosesAndRecoversTheSession() throws Exception {
         RemotePeer firstReceiver = receiver();
         byte[] before = randomBytes(4_000);

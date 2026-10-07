@@ -51,6 +51,7 @@ class FileDropServiceTest {
 
     private static final class StubDropProtocol extends SyncProtocol {
         private final List<File> sent = new ArrayList<>();
+        private final List<Boolean> unpackFlags = new ArrayList<>();
         private IOException sendFailure;
 
         private StubDropProtocol() {
@@ -58,11 +59,13 @@ class FileDropServiceTest {
         }
 
         @Override
-        public void sendDropFile(File file) throws IOException {
+        public void sendDropFile(File file, boolean unpackAfterReceive) throws IOException {
+            // Record before a simulated failure so tests can still inspect the temp archive path.
+            sent.add(file);
+            unpackFlags.add(unpackAfterReceive);
             if (sendFailure != null) {
                 throw sendFailure;
             }
-            sent.add(file);
         }
     }
 
@@ -181,5 +184,89 @@ class FileDropServiceTest {
         service.sendDropFile(file);
 
         assertEquals(1, protocol.sent.size(), "the drop transfer itself is unaffected");
+    }
+
+    @Test
+    void sendDropFilesPacksTheSelectionIntoOneArchiveTransfer() throws Exception {
+        StubDropProtocol protocol = new StubDropProtocol();
+        RecordingBus bus = new RecordingBus();
+        AtomicInteger flushes = new AtomicInteger();
+        FileDropService service = service(protocol, bus, flushes);
+        File folder = tempDir.resolve("photos-" + System.nanoTime()).toFile();
+        File nested = new File(folder, "nested");
+        assertTrue(nested.mkdirs());
+        Files.writeString(new File(nested, "pic.bin").toPath(), "bytes");
+        File loose = newDropFile();
+
+        service.sendDropFiles(List.of(folder, loose));
+
+        assertEquals(1, protocol.sent.size(), "the whole selection is one archive transfer");
+        File archive = protocol.sent.get(0);
+        assertEquals(List.of(true), protocol.unpackFlags, "archive drops ask the peer to unpack");
+        assertTrue(
+                archive.getName().startsWith("dropped-files-"),
+                "a multi-item archive is timestamped, got: " + archive.getName());
+        assertTrue(archive.getName().endsWith(".zip"));
+        assertTrue(
+                bus.logs.stream().anyMatch(msg -> msg.contains("Dropped items sent")),
+                "the packed send is logged, got: " + bus.logs);
+        assertEquals(1, bus.transferCompleteCount);
+        assertEquals(1, flushes.get(), "a finished archive drop flushes the queued text too");
+        assertFalse(archive.exists(), "the temp archive is cleaned up after the send");
+        assertFalse(service.isTransferInProgress());
+    }
+
+    @Test
+    void sendDropFilesNamesALoneFolderArchiveAfterTheFolder() throws Exception {
+        StubDropProtocol protocol = new StubDropProtocol();
+        FileDropService service = service(protocol, new RecordingBus(), new AtomicInteger());
+        File folder = tempDir.resolve("holiday").toFile();
+        assertTrue(folder.mkdirs());
+        Files.writeString(new File(folder, "a.txt").toPath(), "a");
+
+        service.sendDropFiles(List.of(folder));
+
+        assertEquals("holiday.zip", protocol.sent.get(0).getName());
+        assertEquals(List.of(true), protocol.unpackFlags);
+    }
+
+    @Test
+    void sendDropFilesCleansUpTheTempArchiveAndFlushesWhenTheSendFails() throws Exception {
+        StubDropProtocol protocol = new StubDropProtocol();
+        protocol.sendFailure = new IOException("port gone");
+        RecordingBus bus = new RecordingBus();
+        AtomicInteger flushes = new AtomicInteger();
+        FileDropService service = service(protocol, bus, flushes);
+        File folder = tempDir.resolve("stuck").toFile();
+        assertTrue(folder.mkdirs());
+        Files.writeString(new File(folder, "a.txt").toPath(), "a");
+
+        service.sendDropFiles(List.of(folder));
+
+        assertEquals(1, flushes.get(), "the flush runs in the finally, success or not");
+        assertTrue(
+                bus.errors.stream().anyMatch(msg -> msg.contains("Failed to send dropped items")),
+                "the failure surfaces as an error, got: " + bus.errors);
+        assertEquals(0, bus.transferCompleteCount);
+        assertFalse(protocol.sent.get(0).exists(), "the temp archive is removed on failure too");
+        assertFalse(service.isTransferInProgress());
+    }
+
+    @Test
+    void sendDropFilesTreatsAPeerCancelAsBenignAndStillFlushes() throws Exception {
+        StubDropProtocol protocol = new StubDropProtocol();
+        protocol.sendFailure = new TransferCancelledException("Transfer cancelled by receiver");
+        RecordingBus bus = new RecordingBus();
+        AtomicInteger flushes = new AtomicInteger();
+        FileDropService service = service(protocol, bus, flushes);
+        File folder = tempDir.resolve("cancelled").toFile();
+        assertTrue(folder.mkdirs());
+
+        service.sendDropFiles(List.of(folder));
+
+        assertEquals(1, flushes.get());
+        assertTrue(bus.errors.isEmpty(), "a peer cancel is expected, not an error");
+        assertTrue(bus.logs.contains("Transfer cancelled by receiver"));
+        assertFalse(protocol.sent.get(0).exists());
     }
 }

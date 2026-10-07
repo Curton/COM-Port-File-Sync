@@ -233,10 +233,13 @@ public interface SyncEvent {
     final class DropFileReceivedEvent implements SyncEvent {
         private final String fileName;
         private final String filePath;
+        private final boolean unpackedArchive;
 
-        public DropFileReceivedEvent(String fileName, String filePath) {
+        /** {@code unpackedArchive} marks a drop that arrived as an archive and was extracted. */
+        public DropFileReceivedEvent(String fileName, String filePath, boolean unpackedArchive) {
             this.fileName = fileName;
             this.filePath = filePath;
+            this.unpackedArchive = unpackedArchive;
         }
 
         public String getFileName() {
@@ -245,6 +248,10 @@ public interface SyncEvent {
 
         public String getFilePath() {
             return filePath;
+        }
+
+        public boolean isUnpackedArchive() {
+            return unpackedArchive;
         }
 
         @Override

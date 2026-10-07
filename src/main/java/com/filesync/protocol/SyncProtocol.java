@@ -1421,8 +1421,12 @@ public class SyncProtocol {
         return wasCompressed;
     }
 
-    /** Send a single dropped file to the peer. */
-    public void sendDropFile(File file) throws IOException {
+    /**
+     * Send a single dropped file to the peer. {@code unpackAfterReceive} marks packed drop
+     * archives: the receiver extracts them into a folder instead of leaving the archive in
+     * Downloads.
+     */
+    public void sendDropFile(File file, boolean unpackAfterReceive) throws IOException {
         if (file == null) {
             throw new IOException("Cannot send a null file");
         }
@@ -1438,7 +1442,8 @@ public class SyncProtocol {
                 CMD_DROP_FILE,
                 fileName,
                 String.valueOf(compressedData.getData().length),
-                String.valueOf(compressedData.isCompressed()));
+                String.valueOf(compressedData.isCompressed()),
+                String.valueOf(unpackAfterReceive));
         waitForCommand(CMD_ACK);
 
         sendXmodemPayload(

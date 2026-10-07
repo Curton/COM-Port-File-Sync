@@ -4,6 +4,7 @@ import com.filesync.sync.FileSyncManager;
 import java.awt.datatransfer.DataFlavor;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import javax.swing.JComponent;
 import javax.swing.SwingUtilities;
@@ -47,7 +48,7 @@ public class DragDropController {
                     public boolean importData(TransferSupport support) {
                         clearDropHint();
                         if (!canImport(support)) {
-                            logController.log("Please drop one file to send.");
+                            logController.log("Please drop files or folders to send.");
                             return false;
                         }
 
@@ -74,28 +75,46 @@ public class DragDropController {
             logController.log("No dropped files found");
             return false;
         }
-        if (droppedFiles.size() != 1) {
-            logController.log("Only one file is supported for drag-and-drop");
-            return false;
-        }
 
-        File droppedFile = droppedFiles.get(0);
-        if (droppedFile == null || !droppedFile.isFile()) {
-            logController.log("Only files can be dropped (folders are not supported)");
+        List<File> validItems = new ArrayList<>();
+        for (File item : droppedFiles) {
+            if (item != null && item.exists() && (item.isFile() || item.isDirectory())) {
+                validItems.add(item);
+            } else {
+                logController.log(
+                        "Skipping dropped item (not a file or folder): "
+                                + (item == null ? "unknown" : item.getName()));
+            }
+        }
+        if (validItems.isEmpty()) {
+            logController.log("No droppable files or folders found");
             return false;
         }
 
         if (!state.isConnected() || !syncManager.isConnectionAlive()) {
-            logController.log("Cannot send dropped file: not connected");
+            logController.log("Cannot send dropped items: not connected");
             return false;
         }
         if (syncManager.isTransferBusy()) {
-            logController.log("Cannot send dropped file while a transfer is in progress");
+            logController.log("Cannot send dropped items while a transfer is in progress");
             return false;
         }
 
-        new Thread(() -> syncManager.sendDropFile(droppedFile), "DroppedFileSender").start();
-        logController.log("Sending dropped file: " + droppedFile.getAbsolutePath());
+        if (validItems.size() == 1 && validItems.get(0).isFile()) {
+            File droppedFile = validItems.get(0);
+            new Thread(() -> syncManager.sendDropFile(droppedFile), "DroppedFileSender").start();
+            logController.log("Sending dropped file: " + droppedFile.getAbsolutePath());
+            return true;
+        }
+
+        // Several items, or at least one folder: one packed archive transfer; the peer unpacks
+        // it into a folder under its Downloads directory.
+        List<File> itemsToSend = List.copyOf(validItems);
+        new Thread(() -> syncManager.sendDropFiles(itemsToSend), "DroppedFileSender").start();
+        logController.log(
+                "Sending "
+                        + itemsToSend.size()
+                        + " dropped item(s) (folders are packed into an archive)");
         return true;
     }
 
@@ -106,7 +125,9 @@ public class DragDropController {
                         if (progressBarTextBeforeDrop == null) {
                             progressBarTextBeforeDrop = components.getProgressBar().getString();
                         }
-                        components.getProgressBar().setString("Drop a file to send to remote");
+                        components
+                                .getProgressBar()
+                                .setString("Drop files or folders to send to remote");
                     } else {
                         clearDropHint();
                     }

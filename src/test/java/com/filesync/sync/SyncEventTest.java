@@ -84,10 +84,15 @@ class SyncEventTest {
     @Test
     void dropFileReceivedEventStoresValues() {
         SyncEvent.DropFileReceivedEvent event =
-                new SyncEvent.DropFileReceivedEvent("file.txt", "/path/to/file.txt");
+                new SyncEvent.DropFileReceivedEvent("file.txt", "/path/to/file.txt", false);
         assertEquals("file.txt", event.getFileName());
         assertEquals("/path/to/file.txt", event.getFilePath());
+        assertFalse(event.isUnpackedArchive());
         assertEquals(SyncEventType.DROP_FILE_RECEIVED, event.getType());
+
+        SyncEvent.DropFileReceivedEvent unpacked =
+                new SyncEvent.DropFileReceivedEvent("photos", "/path/to/photos", true);
+        assertTrue(unpacked.isUnpackedArchive());
     }
 
     @Test

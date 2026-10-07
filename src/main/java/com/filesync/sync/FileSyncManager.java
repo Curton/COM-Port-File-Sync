@@ -460,6 +460,11 @@ public class FileSyncManager {
         fileDropService.sendDropFile(file);
     }
 
+    /** Sends a multi-item drop selection (files and/or folders) as one packed archive transfer. */
+    public void sendDropFiles(List<File> items) {
+        fileDropService.sendDropFiles(items);
+    }
+
     /** Retry writing the given pending files (user chose "Retry" in the pending-write dialog). */
     public void retryPendingWrites(List<String> relativePaths) {
         pendingFileWriteService.retry(relativePaths);

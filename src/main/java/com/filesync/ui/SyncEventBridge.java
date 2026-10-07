@@ -95,7 +95,9 @@ public class SyncEventBridge {
                 SwingUtilities.invokeLater(
                         () ->
                                 logController.log(
-                                        "Received dropped file: "
+                                        (dropFileEvent.isUnpackedArchive()
+                                                        ? "Received dropped folder: "
+                                                        : "Received dropped file: ")
                                                 + dropFileEvent.getFileName()
                                                 + " -> "
                                                 + dropFileEvent.getFilePath()));

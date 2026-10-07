@@ -31,6 +31,22 @@ class SyncProtocolMessageParsingTest {
     }
 
     @Test
+    void dropFileMessageCarriesTheUnpackFlagAsFourthParameter() {
+        SyncProtocol.Message unpacking =
+                SyncProtocol.parseMessage("[[SYNC:DROP_FILE:photos.zip:1024:false:true]]");
+        assertNotNull(unpacking);
+        assertEquals(SyncProtocol.CMD_DROP_FILE, unpacking.getCommand());
+        assertEquals("photos.zip", unpacking.getParam(0));
+        assertTrue(unpacking.getParamAsBoolean(3), "the unpack flag is the fourth parameter");
+
+        // A malformed frame missing the flag still parses; the default reads as "plain file".
+        SyncProtocol.Message plain =
+                SyncProtocol.parseMessage("[[SYNC:DROP_FILE:notes.txt:64:false]]");
+        assertNotNull(plain);
+        assertFalse(plain.getParamAsBoolean(3), "a missing unpack flag defaults to false");
+    }
+
+    @Test
     void parseMessageUnescapesBackslashAndColonInPayload() {
         SyncProtocol.Message message = SyncProtocol.parseMessage("[[SYNC:FILE_REQ:dir\\:name]]");
         assertNotNull(message);

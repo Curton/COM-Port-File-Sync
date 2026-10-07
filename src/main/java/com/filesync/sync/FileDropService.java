@@ -7,6 +7,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -85,7 +87,7 @@ public class FileDropService {
         }
 
         try {
-            protocol.sendDropFile(file);
+            protocol.sendDropFile(file, false);
             eventBus.post(new SyncEvent.LogEvent("Dropped file sent: " + file.getName()));
             // TRANSFER_COMPLETE also refreshes the sync controls and arms the Ready revert,
             // so the progress bar does not stay on the last block after a successful drop.
@@ -104,6 +106,80 @@ public class FileDropService {
             transferInProgress.set(false);
             if (sharedTextFlushCallback != null) {
                 sharedTextFlushCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Sends a multi-item drop selection (files and/or folders) as one archive transfer. A lone
+     * folder is named after itself and packed by its contents; anything else goes out as a
+     * timestamped multi-item archive. The receiver unpacks either into a folder under Downloads.
+     */
+    public void sendDropFiles(List<File> items) {
+        if (items == null || items.isEmpty()) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent("Dropped items transfer failed: nothing to send"));
+            return;
+        }
+        if (!runningSupplier.getAsBoolean() || !connectionAliveSupplier.getAsBoolean()) {
+            eventBus.post(new SyncEvent.ErrorEvent("Dropped items transfer failed: not connected"));
+            return;
+        }
+        if (syncingSupplier.getAsBoolean() || transferBusySupplier.getAsBoolean()) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent(
+                            "Dropped items transfer blocked while a transfer is in progress"));
+            return;
+        }
+
+        // Claim before packing: once the busy flag is up no sync session can open, so the packed
+        // archive cannot lose the line between its creation and its announce.
+        boolean claimed;
+        synchronized (protocol) {
+            claimed = transferInProgress.compareAndSet(false, true);
+        }
+        if (!claimed) {
+            eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer is already running"));
+            return;
+        }
+
+        File tempDir = null;
+        try {
+            tempDir = Files.createTempDirectory("com-file-sync-drop-").toFile();
+            boolean singleFolder = items.size() == 1 && items.get(0).isDirectory();
+            String baseName =
+                    singleFolder
+                            ? sanitizeFileName(items.get(0).getName())
+                            : DropArchiveUtil.multiItemArchiveBaseName();
+            File archive = new File(tempDir, baseName + ".zip");
+            DropArchiveUtil.writeDropArchive(items, archive);
+            protocol.sendDropFile(archive, true);
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Dropped items sent: "
+                                    + items.size()
+                                    + " item(s) packed as "
+                                    + baseName
+                                    + ".zip"));
+            eventBus.post(new SyncEvent.TransferCompleteEvent());
+        } catch (TransferCancelledException e) {
+            logPeerCancel(e);
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+        } catch (IOException e) {
+            // After teardown the late failure report would only confuse the next session's log.
+            if (runningSupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.ErrorEvent(
+                                "Failed to send dropped items: " + e.getMessage()));
+            }
+            eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+        } finally {
+            transferInProgress.set(false);
+            if (sharedTextFlushCallback != null) {
+                sharedTextFlushCallback.run();
+            }
+            if (tempDir != null) {
+                DropArchiveUtil.deleteRecursively(tempDir);
             }
         }
     }
@@ -143,6 +219,7 @@ public class FileDropService {
             }
         }
         boolean compressed = msg.getParamAsBoolean(2);
+        boolean unpack = msg.getParamAsBoolean(3);
         if (fileName == null || fileName.trim().isEmpty()) {
             eventBus.post(
                     new SyncEvent.ErrorEvent("Dropped file transfer failed: missing file name"));
@@ -172,12 +249,16 @@ public class FileDropService {
             protocol.sendAck();
             File savedFile =
                     protocol.receiveDropFile(downloadsDir, fileName, expectedSize, compressed);
-            eventBus.post(
-                    new SyncEvent.DropFileReceivedEvent(
-                            savedFile.getName(), savedFile.getAbsolutePath()));
-            eventBus.post(
-                    new SyncEvent.LogEvent(
-                            "Dropped file received: " + savedFile.getAbsolutePath()));
+            if (unpack) {
+                receiveDroppedArchive(savedFile, downloadsDir);
+            } else {
+                eventBus.post(
+                        new SyncEvent.DropFileReceivedEvent(
+                                savedFile.getName(), savedFile.getAbsolutePath(), false));
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Dropped file received: " + savedFile.getAbsolutePath()));
+            }
             eventBus.post(new SyncEvent.TransferCompleteEvent());
         } catch (TransferCancelledException e) {
             logPeerCancel(e);
@@ -201,6 +282,35 @@ public class FileDropService {
     /** A peer cancel is an expected outcome; log it benignly instead of raising an error. */
     private void logPeerCancel(TransferCancelledException e) {
         eventBus.post(new SyncEvent.LogEvent(e.getMessage()));
+    }
+
+    /**
+     * Unpacks a received drop archive into a folder under Downloads and removes the archive. A
+     * failed extraction is reported but keeps the archive in place so the user can open it by hand;
+     * the wire transfer itself already succeeded, so the outcome stays non-fatal.
+     */
+    private void receiveDroppedArchive(File savedArchive, File downloadsDir) {
+        try {
+            File folder = DropArchiveUtil.extractArchive(savedArchive, downloadsDir);
+            if (!savedArchive.delete()) {
+                eventBus.post(
+                        new SyncEvent.LogEvent(
+                                "Could not remove the received archive: "
+                                        + savedArchive.getAbsolutePath()));
+            }
+            eventBus.post(
+                    new SyncEvent.DropFileReceivedEvent(
+                            folder.getName(), folder.getAbsolutePath(), true));
+            eventBus.post(
+                    new SyncEvent.LogEvent("Dropped folder received: " + folder.getAbsolutePath()));
+        } catch (IOException e) {
+            eventBus.post(
+                    new SyncEvent.ErrorEvent(
+                            "Failed to unpack the dropped archive (kept at "
+                                    + savedArchive.getAbsolutePath()
+                                    + "): "
+                                    + e.getMessage()));
+        }
     }
 
     public boolean isTransferInProgress() {
