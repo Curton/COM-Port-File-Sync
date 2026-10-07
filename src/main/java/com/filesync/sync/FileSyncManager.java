@@ -126,7 +126,7 @@ public class FileSyncManager {
                         running::get,
                         connectionAlive::get,
                         syncing::get,
-                        protocol::isXmodemInProgress,
+                        this::isSharedTextTransferBusy,
                         roleNegotiationService::isRoleNegotiated);
         // Queued shared text can only be sent once negotiation completes; flush it at that point
         // (negotiation completion runs on the listener thread, which already sends on the serial
@@ -292,6 +292,18 @@ public class FileSyncManager {
         return syncCoordinator.isSyncing()
                 || protocol.isXmodemInProgress()
                 || fileDropService.isTransferInProgress();
+    }
+
+    /**
+     * True while the serial line is owned by a transfer in any phase: raw XMODEM block exchange, or
+     * a drop transfer's pre-block window (file read, compression, announce, ACK wait). Shared text
+     * must queue behind this gate — the between-block hooks on both ends deliver it in the gaps —
+     * instead of writing a frame that can land inside the peer's transfer handshake, where it would
+     * be drained as stale bytes and silently lost. Deliberately excludes {@code syncing}: the
+     * coordinator's between-operation boundaries are safe flush points for queued text.
+     */
+    private boolean isSharedTextTransferBusy() {
+        return protocol.isXmodemInProgress() || fileDropService.isTransferInProgress();
     }
 
     public boolean isConnectionAlive() {

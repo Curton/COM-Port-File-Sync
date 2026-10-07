@@ -71,7 +71,15 @@ public class FileDropService {
             return;
         }
 
-        if (!transferInProgress.compareAndSet(false, true)) {
+        // The claim shares SyncProtocol's monitor with SharedTextService's flush gate: the busy
+        // check plus wire write on the other thread become one atomic step against this claim, so
+        // a text frame can never land inside the announce/handshake window where the peer drains
+        // it as stale bytes.
+        boolean claimed;
+        synchronized (protocol) {
+            claimed = transferInProgress.compareAndSet(false, true);
+        }
+        if (!claimed) {
             eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer is already running"));
             return;
         }
@@ -149,7 +157,13 @@ public class FileDropService {
             return;
         }
 
-        if (!transferInProgress.compareAndSet(false, true)) {
+        // Same monitor discipline as sendDropFile: a local text flush racing this claim must
+        // either finish writing before the session takes the line or see the busy flag and queue.
+        boolean claimed;
+        synchronized (protocol) {
+            claimed = transferInProgress.compareAndSet(false, true);
+        }
+        if (!claimed) {
             eventBus.post(new SyncEvent.ErrorEvent("Dropped file transfer is already running"));
             return;
         }

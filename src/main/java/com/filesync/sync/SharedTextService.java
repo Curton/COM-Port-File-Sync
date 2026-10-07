@@ -76,28 +76,39 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                                 "Shared text queued - will send when sync finishes"));
                 return;
             }
-            if (transferBusySupplier.getAsBoolean()) {
-                eventBus.post(
-                        new SyncEvent.LogEvent("Shared text queued - will send in transfer gaps"));
-                return;
-            }
-            try {
-                protocol.sendSharedText(textToSend.timestamp, textToSend.text);
-                eventBus.post(new SyncEvent.LogEvent("Shared text sent"));
-                if (pendingSharedText.compareAndSet(textToSend, null)) {
+            // The busy check and the wire write are one atomic step against a transfer claiming
+            // the line: FileDropService takes this same monitor around its transfer gate, so a
+            // frame that passed the check is fully on the wire before a drop announce goes out,
+            // and a frame checked after the claim sees the busy flag and queues instead. Without
+            // this, a frame could land inside the peer's transfer handshake, where it is drained
+            // as stale bytes and the text is silently lost.
+            synchronized (protocol) {
+                if (transferBusySupplier.getAsBoolean()) {
+                    eventBus.post(
+                            new SyncEvent.LogEvent(
+                                    "Shared text queued - will send in transfer gaps"));
                     return;
                 }
-            } catch (TransferCancelledException e) {
-                logPeerCancel(e);
-                return;
-            } catch (IOException e) {
-                eventBus.post(
-                        new SyncEvent.ErrorEvent("Failed to send shared text: " + e.getMessage()));
-                return;
-            } finally {
-                // Oversized payloads go out via XMODEM, whose progress events disable the sync
-                // controls; refresh once the send settles so the buttons do not stay gray.
-                eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+                try {
+                    protocol.sendSharedText(textToSend.timestamp, textToSend.text);
+                    eventBus.post(new SyncEvent.LogEvent("Shared text sent"));
+                    if (pendingSharedText.compareAndSet(textToSend, null)) {
+                        return;
+                    }
+                } catch (TransferCancelledException e) {
+                    logPeerCancel(e);
+                    return;
+                } catch (IOException e) {
+                    eventBus.post(
+                            new SyncEvent.ErrorEvent(
+                                    "Failed to send shared text: " + e.getMessage()));
+                    return;
+                } finally {
+                    // Oversized payloads go out via XMODEM, whose progress events disable the
+                    // sync controls; refresh once the send settles so the buttons do not stay
+                    // gray.
+                    eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+                }
             }
         }
     }

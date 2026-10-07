@@ -57,6 +57,7 @@ public class XModemTransfer {
     private final SerialPortManager serialPort;
     private TransferProgressListener progressListener;
     private BlockBoundaryHook blockBoundaryHook;
+    private ReceiveBoundaryHook receiveBoundaryHook;
     private Consumer<String> interleavedFrameHandler;
 
     /**
@@ -100,6 +101,10 @@ public class XModemTransfer {
 
     public void setBlockBoundaryHook(BlockBoundaryHook hook) {
         this.blockBoundaryHook = hook;
+    }
+
+    public void setReceiveBoundaryHook(ReceiveBoundaryHook hook) {
+        this.receiveBoundaryHook = hook;
     }
 
     public void setInterleavedFrameHandler(Consumer<String> handler) {
@@ -441,6 +446,12 @@ public class XModemTransfer {
                     totalBytesTransferred += blockSize;
                     reportProgress(
                             expectedBlockNumber - 1, expectedTotalBlocks, totalBytesTransferred);
+                    // Block boundary on the receive side: this side just ACKed, and the sender
+                    // will not write the next header until it has processed that ACK, so the
+                    // reverse direction is idle. Let a queued shared text jump the queue here.
+                    if (receiveBoundaryHook != null) {
+                        receiveBoundaryHook.sendBetweenReceivedBlocks();
+                    }
                 } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
                     // Duplicate block, ACK but don't save
                     serialPort.write(ACK);
@@ -509,17 +520,19 @@ public class XModemTransfer {
         long startTime = System.currentTimeMillis();
         // The receiver sends its 'C' immediately after the command ACK, so the 'C' has usually
         // already arrived by now; discarding it would stall the session until the receiver's
-        // next re-send cycle. Drain stale bytes but keep an early 'C'.
+        // next re-send cycle. Drain stale bytes but keep an early 'C'. A receiver-originated
+        // frame that raced the announce is consumed whole instead of being drained as noise.
         while (serialPort.available() > 0) {
             assertSessionCurrent();
-            if ((serialPort.read() & 0xFF) == C) {
+            int b = readBufferedByteConsumingFrames();
+            if (b == C) {
                 return true;
             }
         }
 
         while (System.currentTimeMillis() - startTime < HANDSHAKE_TIMEOUT_MS) {
             assertSessionCurrent();
-            int b = readByteWithTimeout(1000);
+            int b = readResponseByteConsumingFrames(1000);
             if (b == C) {
                 return true;
             }
@@ -548,8 +561,8 @@ public class XModemTransfer {
             while (System.currentTimeMillis() < quietUntil) {
                 assertSessionCurrent();
                 if (serialPort.available() > 0) {
-                    int b = serialPort.read() & 0xFF;
-                    if (b != C && b != NAK) {
+                    int b = readBufferedByteConsumingFrames();
+                    if (b >= 0 && b != C && b != NAK) {
                         // Unexpected byte, stop draining
                         return;
                     }
@@ -561,11 +574,12 @@ public class XModemTransfer {
             Thread.currentThread().interrupt();
         }
 
-        // Drain any 'C' or NAK chars that arrived as the window closed
+        // Drain any 'C' or NAK chars that arrived as the window closed. Receiver-originated
+        // frames are consumed whole so their bracket prefix cannot poison the block ACK reads.
         while (serialPort.available() > 0) {
             assertSessionCurrent();
-            int b = serialPort.read() & 0xFF;
-            if (b != C && b != NAK) {
+            int b = readBufferedByteConsumingFrames();
+            if (b >= 0 && b != C && b != NAK) {
                 // Unexpected byte, stop draining
                 break;
             }
@@ -614,17 +628,19 @@ public class XModemTransfer {
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
             assertSessionCurrent();
-            // Clear any stale 'C' chars before sending (especially on retry)
+            // Clear any stale 'C' chars before sending (especially on retry). A queued
+            // receiver-originated frame is consumed whole: nibbling only its first byte here
+            // would leave a de-bracketed line that desynchronizes every later response read.
             while (serialPort.available() > 0) {
-                int stale = serialPort.read() & 0xFF;
-                if (stale != C && stale != NAK) {
+                int stale = readBufferedByteConsumingFrames();
+                if (stale >= 0 && stale != C && stale != NAK) {
                     break; // Unexpected byte, stop draining
                 }
             }
 
             serialPort.write(packet);
 
-            int response = readByteWithTimeout(TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -640,7 +656,7 @@ public class XModemTransfer {
     private boolean sendEOT() throws IOException {
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
             serialPort.write(EOT);
-            int response = readByteWithTimeout(TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -662,7 +678,7 @@ public class XModemTransfer {
     public boolean sendInterleavedFrame(byte[] frame) throws IOException {
         for (int attempt = 0; attempt < MAX_INTERLEAVE_RETRIES; attempt++) {
             serialPort.write(frame);
-            int response = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(INTERLEAVE_ACK_TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -771,6 +787,64 @@ public class XModemTransfer {
             }
         }
         return -1;
+    }
+
+    /**
+     * Read one buffered byte, consuming a whole interleaved frame when the byte begins one ("[["
+     * prefix). Returns the byte the caller should process, or -1 when the buffer ran dry (the frame
+     * case loops internally until a non-frame byte or an empty buffer). A lone '[' is noise: when a
+     * follower byte was already readable, the '[' is dropped and the follower returned so no real
+     * handshake/response byte is lost to the bracket.
+     */
+    private int readBufferedByteConsumingFrames() throws IOException {
+        while (serialPort.available() > 0) {
+            assertSessionCurrent();
+            int b = serialPort.read() & 0xFF;
+            if (b != (FRAME_START_BYTE & 0xFF)) {
+                return b;
+            }
+            if (serialPort.available() <= 0) {
+                return b; // Nothing behind the '[' yet; report it as the drained byte
+            }
+            int second = serialPort.read() & 0xFF;
+            if (second != (FRAME_START_BYTE & 0xFF)) {
+                return second;
+            }
+            consumeInterleavedFrameAfterSecondBracket();
+        }
+        return -1;
+    }
+
+    /**
+     * Read the peer's next single-byte response (ACK/NAK/CAN/'C'), transparently consuming any
+     * interleaved frame the peer's receive loop wrote between our data blocks. Receiver-originated
+     * frames are fire-and-forget — consumed and dispatched via the interleaved-frame handler, never
+     * acknowledged — so this keeps reading until a non-frame byte arrives and returns that. A lone
+     * '[' (line noise, not a frame start) is returned as an unexpected response byte and its peeked
+     * follower is pushed back, mirroring the receive loop's header-position handling.
+     */
+    private int readResponseByteConsumingFrames(int timeoutMs) throws IOException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (true) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                return -1;
+            }
+            int b = readByteWithTimeout((int) remaining);
+            if (b != (FRAME_START_BYTE & 0xFF)) {
+                return b;
+            }
+            int second =
+                    readByteWithTimeout((int) Math.max(1, deadline - System.currentTimeMillis()));
+            if (second != (FRAME_START_BYTE & 0xFF)) {
+                if (second >= 0) {
+                    pushedBackByte = second;
+                }
+                return b;
+            }
+            consumeInterleavedFrameAfterSecondBracket();
+            // Frame consumed; keep waiting for the actual response byte.
+        }
     }
 
     /** Calculate CRC-16-CCITT */
@@ -930,6 +1004,19 @@ public class XModemTransfer {
      */
     public interface BlockBoundaryHook {
         InterleaveResult sendBetweenBlocks() throws IOException;
+    }
+
+    /**
+     * Hook invoked between two data blocks of a receive session, right after this side ACKed a
+     * block and before it waits for the next block header — the reverse direction is idle then.
+     * Lets the receiving side interleave a short frame (e.g. a queued shared text) of its own.
+     *
+     * <p>Any frame the hook writes is fire-and-forget: the sender's response reads consume and
+     * dispatch it without acknowledging, so the hook must not block waiting for a reply — the next
+     * block header can arrive at any moment.
+     */
+    public interface ReceiveBoundaryHook {
+        void sendBetweenReceivedBlocks() throws IOException;
     }
 
     /** Progress listener interface for transfer status updates */

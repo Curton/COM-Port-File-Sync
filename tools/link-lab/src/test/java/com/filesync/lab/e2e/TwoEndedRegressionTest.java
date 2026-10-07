@@ -236,6 +236,86 @@ class TwoEndedRegressionTest {
 
     @Test
     @Timeout(240)
+    void sharedTextFromTheDropSenderRidesTheTransferGapsFromTheStart() throws Exception {
+        // Text sent the moment the drop starts — during the file read/compress/announce window —
+        // must queue behind the transfer gate and land between blocks, not race the announce and
+        // get drained as stale bytes by the receiver's session setup.
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] payload = randomBytes(300_000);
+        String fileName = "link-lab-drop-" + Long.toHexString(System.nanoTime()) + ".bin";
+        File dropped = new File(root, fileName);
+        Files.write(dropped.toPath(), payload);
+
+        Thread dropper = new Thread(() -> sender.manager().sendDropFile(dropped), "e2e-dropper");
+        dropper.start();
+        sender.sendSharedText("queued while the drop was starting");
+
+        await(
+                "shared text delivered mid-transfer",
+                () -> receiver.receivedTexts().contains("queued while the drop was starting"),
+                AWAIT_MS);
+        assertTrue(
+                receiver.receivedFiles().isEmpty(),
+                "the text must land while the dropped file is still transferring");
+
+        await(
+                "drop file saved on the receiver side",
+                () -> !receiver.receivedFiles().isEmpty(),
+                AWAIT_MS);
+        File saved = new File(receiver.receivedFiles().get(0));
+        try {
+            assertArrayEquals(payload, Files.readAllBytes(saved.toPath()));
+        } finally {
+            Files.deleteIfExists(saved.toPath());
+        }
+        dropper.join(10_000);
+    }
+
+    @Test
+    @Timeout(240)
+    void sharedTextFromTheDropReceiverInterleavesIntoTheIncomingTransfer() throws Exception {
+        // The receiving end's listener is parked inside the XMODEM receive loop for the whole
+        // drop, so a text queued there can only reach the sender through the receive-side block
+        // boundary hook — the reverse-direction interleave.
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        byte[] payload = randomBytes(300_000);
+        String fileName = "link-lab-drop-" + Long.toHexString(System.nanoTime()) + ".bin";
+        File dropped = new File(root, fileName);
+        Files.write(dropped.toPath(), payload);
+
+        senderProgressEvents.set(0);
+        Thread dropper = new Thread(() -> sender.manager().sendDropFile(dropped), "e2e-dropper");
+        dropper.start();
+        await("drop transfer in flight", () -> senderProgressEvents.get() > 0, AWAIT_MS);
+        receiver.sendSharedText("from the receiving end while blocks are flying");
+
+        await(
+                "shared text delivered to the sender",
+                () ->
+                        sender.receivedTexts()
+                                .contains("from the receiving end while blocks are flying"),
+                AWAIT_MS);
+        assertTrue(
+                receiver.receivedFiles().isEmpty(),
+                "the text jumped the queue: the dropped file was still transferring when it landed");
+
+        await(
+                "drop file saved on the receiver side",
+                () -> !receiver.receivedFiles().isEmpty(),
+                AWAIT_MS);
+        File saved = new File(receiver.receivedFiles().get(0));
+        try {
+            assertArrayEquals(payload, Files.readAllBytes(saved.toPath()));
+        } finally {
+            Files.deleteIfExists(saved.toPath());
+        }
+        dropper.join(10_000);
+    }
+
+    @Test
+    @Timeout(240)
     void linkCycleLosesAndRecoversTheSession() throws Exception {
         RemotePeer firstReceiver = receiver();
         byte[] before = randomBytes(4_000);
@@ -327,8 +407,7 @@ class TwoEndedRegressionTest {
         // (1) No stale transfer-busy state may survive into the fresh session on either end.
         await(
                 "both ends transfer-idle after the reconnect",
-                () ->
-                        !app.manager().isTransferBusy() && !peer.manager().isTransferBusy(),
+                () -> !app.manager().isTransferBusy() && !peer.manager().isTransferBusy(),
                 15_000);
 
         // (2) A full sync on the re-negotiated roles must complete: drop any partial file the

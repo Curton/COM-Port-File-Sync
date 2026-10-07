@@ -258,7 +258,7 @@ The app's README features map to concrete lab sessions:
 | Batch of small files | 200 small files in the peer workspace, `sync` — one `BATCH_DATA` per ~32 KiB |
 | Cancel mid-transfer | start a sync on a slow link, app: Cancel; console: `cancel` — verify both sides return to idle |
 | Reconnect | `disconnect`, then `connect COM11`; repeat a sync |
-| Shared text during transfer | console `text hello`, then `sync` — inline text is interleaved between XMODEM blocks |
+| Shared text during transfer | console `text hello`, then `sync` — inline text is interleaved between XMODEM blocks from the sending end; text queued on the receiving end rides the same gaps in the reverse direction |
 | Noisy link | `--loss 1 --corrupt 0.05 --noise 20000 30` or the dirty-link scenario |
 | Slow link | `--baud 9600 --latency 20`; note the app's 10 s XMODEM block timeout is exercised for real |
 | Conflict resolution | same file modified on both sides; app: Sync Preview → conflict dialog; console `content <path>` fetches the app's copy |
@@ -312,6 +312,8 @@ decides, and the tests follow whichever side won, so the election stays under te
 | `dropFileIsReceivedAndSaved` | drop-file receive: registry folder resolution, sanitising, collision rename |
 | `remoteFolderContextAndChangeNotification` | remote-folder exchange + folder-change notification |
 | `sharedTextIsInterleavedIntoALiveFileTransfer` | shared text queued mid-transfer, dispatched between XMODEM blocks |
+| `sharedTextFromTheDropSenderRidesTheTransferGapsFromTheStart` | text queued at drop start (pre-block window) rides the block gaps and lands mid-transfer |
+| `sharedTextFromTheDropReceiverInterleavesIntoTheIncomingTransfer` | reverse-direction interleave: text queued on the receiving end reaches the sender between blocks |
 | `linkCycleLosesAndRecoversTheSession` | unplug → loss detection → re-plug → re-negotiation → resumed sync |
 | `syncSurvivesALossyWire` | 40 kB payload carried through a wire that really flips bits, with retries |
 | `aDroppedControlFrameIsRecoveredByReconnectingAndRetrying` | dropped `ACK` (tamper rule) → wedged exchange → disconnect/reconnect/retry |

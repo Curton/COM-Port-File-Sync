@@ -382,6 +382,114 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
+    void receiveIntoRunsReceiveBoundaryHookAfterEachAcknowledgedBlock() throws IOException {
+        // 4200 bytes = one 4K block + one 128-byte block: the receive-side hook must fire after
+        // each good block's ACK, in the gap where the reverse direction is idle, and must not
+        // fire again for the EOT.
+        byte[] payload = new byte[4200];
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] = (byte) (i * 31);
+        }
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(buildMultiBlockFrame(payload));
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        AtomicInteger hookCalls = new AtomicInteger();
+        transfer.setReceiveBoundaryHook(hookCalls::incrementAndGet);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "the hook must not disturb the payload");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertEquals(2, hookCalls.get(), "the hook runs after each good block, never for EOT");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendConsumesReceiverOriginatedFrameAtTheHandshakeDrain() throws IOException {
+        // A frame the peer's receive loop wrote races the sender's post-handshake drain; it must
+        // be consumed whole and dispatched there, not nibbled byte by byte into the ACK budget.
+        byte[] payload = new byte[4200];
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] = (byte) (i * 31);
+        }
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.write(XModemTransfer.C);
+        input.writeBytes(INTERLEAVE_FRAME);
+        for (int i = 0; i < 6; i++) {
+            input.write(XModemTransfer.ACK);
+        }
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(input.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> receivedLines = new ArrayList<>();
+        transfer.setInterleavedFrameHandler(receivedLines::add);
+
+        assertTrue(transfer.send(payload), "a peer frame must not fail the session");
+
+        assertEquals(
+                List.of("[[SYNC:SHARED_TEXT:123:QUJD]]"),
+                receivedLines,
+                "the peer's frame is dispatched exactly once");
+        assertEquals(2, countDataPackets(serialPort.getWrites()), "no block may be re-sent");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendConsumesReceiverOriginatedFrameAtTheBlockAckPosition() throws IOException {
+        // The frame lands between the block write and its ACK; the response read must dispatch it
+        // and keep waiting for the real ACK instead of counting the bracket as garbage.
+        byte[] payload = new byte[4200];
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] = (byte) (i * 31);
+        }
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.write(XModemTransfer.C);
+        input.write(XModemTransfer.ACK); // drainExtraHandshakeChars quiet drain
+        input.write(XModemTransfer.ACK); // block 1 stale-char drain
+        input.writeBytes(INTERLEAVE_FRAME); // races the block-1 ACK
+        input.write(XModemTransfer.ACK); // acknowledges block 1
+        input.write(XModemTransfer.ACK); // block 2 stale-char drain
+        input.write(XModemTransfer.ACK); // acknowledges block 2
+        input.write(XModemTransfer.ACK); // acknowledges the EOT
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(input.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> receivedLines = new ArrayList<>();
+        transfer.setInterleavedFrameHandler(receivedLines::add);
+
+        assertTrue(transfer.send(payload), "a peer frame must not fail the session");
+
+        assertEquals(
+                List.of("[[SYNC:SHARED_TEXT:123:QUJD]]"),
+                receivedLines,
+                "the peer's frame is dispatched exactly once");
+        assertEquals(2, countDataPackets(serialPort.getWrites()), "no block may be re-sent");
+    }
+
+    @Test
+    void sendInterleavedFrameConsumesReceiverOriginatedFrameBeforeItsOwnAck() throws IOException {
+        // Both ends interleave around the same boundary: the peer's fire-and-forget frame arrives
+        // while this side waits for the bare ACK of its own interleaved frame.
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(INTERLEAVE_FRAME);
+        input.write(XModemTransfer.ACK);
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(input.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> receivedLines = new ArrayList<>();
+        transfer.setInterleavedFrameHandler(receivedLines::add);
+
+        assertTrue(transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+
+        assertEquals(
+                List.of("[[SYNC:SHARED_TEXT:123:QUJD]]"),
+                receivedLines,
+                "the peer's frame is consumed and dispatched, not misread as the ACK");
+    }
+
+    @Test
+    @Timeout(20)
     void receiveIntoConsumesInterleavedFrameBetweenBlocksAndKeepsSession() throws IOException {
         byte[] payload = new byte[4200];
         for (int i = 0; i < payload.length; i++) {

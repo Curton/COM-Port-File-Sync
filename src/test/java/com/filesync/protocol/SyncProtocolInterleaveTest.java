@@ -1,6 +1,7 @@
 package com.filesync.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -114,6 +115,72 @@ class SyncProtocolInterleaveTest {
         assertEquals(
                 XModemTransfer.InterleaveResult.SENT,
                 protocol.flushPendingSharedTextBetweenBlocks());
+    }
+
+    @Test
+    void receiveBoundaryFlushWritesFramedLineAndClearsTheSlot() throws IOException {
+        // Fire-and-forget mirror of the send-side hook: no ACK wait, the pending slot is cleared
+        // as soon as the frame is on the wire.
+        RecordingSerialPortManager port = new RecordingSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(port);
+        AtomicReference<PendingText> pending =
+                new AtomicReference<>(new StubPendingText(123L, "hello"));
+        protocol.setInterleavableTextSource(
+                new StubSource(pending::get, expected -> pending.compareAndSet(expected, null)));
+
+        protocol.flushPendingSharedTextAtReceiveBoundary();
+
+        assertNull(pending.get(), "the fire-and-forget frame clears the pending slot right away");
+        assertEquals(1, port.getByteWrites().size());
+        assertArrayEquals(
+                "[[SYNC:SHARED_TEXT:123:aGVsbG8=]]\n"
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                port.getByteWrites().get(0),
+                "the wire bytes match the send-side interleaved frame exactly");
+    }
+
+    @Test
+    void receiveBoundaryFlushSkipsTextBeyondTheInlineBudget() throws IOException {
+        RecordingSerialPortManager port = new RecordingSerialPortManager();
+        port.setBaudRate(1200); // inline budget = 120 B/s * 5 s minus framing
+        SyncProtocol protocol = new SyncProtocol(port);
+        AtomicReference<PendingText> pending =
+                new AtomicReference<>(new StubPendingText(7L, "x".repeat(700)));
+        protocol.setInterleavableTextSource(
+                new StubSource(pending::get, expected -> pending.compareAndSet(expected, null)));
+
+        protocol.flushPendingSharedTextAtReceiveBoundary();
+
+        assertNotNull(pending.get(), "an oversized text stays queued for the regular flush points");
+        assertEquals(0, port.getByteWrites().size(), "nothing may be written for the skip");
+    }
+
+    @Test
+    void receiveBoundaryFlushWritesNothingWithoutSourceOrPendingText() throws IOException {
+        RecordingSerialPortManager port = new RecordingSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(port);
+
+        protocol.flushPendingSharedTextAtReceiveBoundary();
+
+        protocol.setInterleavableTextSource(new StubSource(null));
+        protocol.flushPendingSharedTextAtReceiveBoundary();
+
+        assertEquals(0, port.getByteWrites().size());
+    }
+
+    @Test
+    void receiveBoundaryFlushContainsASourceThatThrows() {
+        SyncProtocol protocol = new SyncProtocol(new RecordingSerialPortManager());
+        protocol.setInterleavableTextSource(
+                new StubSource(
+                        () -> {
+                            throw new IllegalStateException("peek blew up");
+                        },
+                        expected -> false));
+
+        assertDoesNotThrow(
+                protocol::flushPendingSharedTextAtReceiveBoundary,
+                "the receive session must survive a bad flush attempt");
     }
 
     private static final class StubPendingText implements PendingText {

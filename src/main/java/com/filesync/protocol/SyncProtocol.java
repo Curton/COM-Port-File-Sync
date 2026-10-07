@@ -161,6 +161,7 @@ public class SyncProtocol {
         this.xmodem = new XModemTransfer(serialPort);
         this.timeoutMs = DEFAULT_TIMEOUT_MS;
         this.xmodem.setBlockBoundaryHook(this::flushPendingSharedTextBetweenBlocks);
+        this.xmodem.setReceiveBoundaryHook(this::flushPendingSharedTextAtReceiveBoundary);
         this.xmodem.setInterleavedFrameHandler(this::dispatchInterleavedFrameLine);
     }
 
@@ -252,11 +253,14 @@ public class SyncProtocol {
     }
 
     /**
-     * Set the handler for framed commands the peer interleaves between the data blocks of an XMODEM
-     * session it is receiving. The handler runs on whichever thread is parked inside the XMODEM
-     * receive loop (the listener thread), so only cheap commands that never touch the serial stream
-     * (inline SHARED_TEXT) may be dispatched; that loop owns the port while the session is open.
-     * Exceptions the handler throws are swallowed so a bad frame cannot abort the file session.
+     * Set the handler for framed commands the peer interleaves between data blocks of an XMODEM
+     * session: written by the peer's receive loop between our outbound blocks (consumed by our send
+     * loop's response reads), or by the peer's send loop between the blocks we are receiving
+     * (consumed at the block-header position of our receive loop). The handler therefore runs on
+     * whichever thread is parked inside either XMODEM loop, so only cheap commands that never touch
+     * the serial stream (inline SHARED_TEXT) may be dispatched; the loop that owns the port keeps
+     * running the session. Exceptions the handler throws are swallowed so a bad frame cannot abort
+     * the file session.
      */
     public void setInterleavedFrameHandler(java.util.function.Consumer<Message> handler) {
         this.interleavedFrameHandler = handler;
@@ -2364,6 +2368,45 @@ public class SyncProtocol {
         // A newer text may have replaced the pending slot mid-send; the CAS keeps that one queued.
         interleavableTextSource.clearIfCurrent(pending);
         return XModemTransfer.InterleaveResult.SENT;
+    }
+
+    /**
+     * Receive-boundary hook: flush one queued shared text as a fire-and-forget inline frame right
+     * after this side ACKed a data block, while the sender is idle between its own blocks. The
+     * sender's response reads consume and dispatch the frame without acknowledging it, so the
+     * receive loop must not wait for any reply — the next block header can arrive at any moment.
+     *
+     * <p>Failures are contained so a bad flush costs at most the frame; the text stays queued for
+     * the regular flush points and the file session continues.
+     */
+    void flushPendingSharedTextAtReceiveBoundary() throws IOException {
+        try {
+            if (interleaveSuppressed.get() || interleavableTextSource == null) {
+                return;
+            }
+            PendingText pending = interleavableTextSource.peek();
+            if (pending == null) {
+                return;
+            }
+            // Base64 never shrinks, so an over-long plain text can skip the encode entirely.
+            if (pending.text() == null
+                    || pending.text().length() > getSharedTextInlineEncodedLimit()) {
+                // Oversized text cannot ride the gap; it stays queued for the regular flush
+                // points, which send it via XMODEM once the line is free.
+                return;
+            }
+            String encoded = encodeText(pending.text());
+            if (!shouldSendSharedTextInline(encoded)) {
+                return;
+            }
+            serialPort.writeLine(
+                    buildCommand(CMD_SHARED_TEXT, String.valueOf(pending.timestamp()), encoded));
+            // Fire-and-forget: nothing acknowledges this frame, so clear the slot right away. A
+            // newer text that replaced the slot mid-send stays pending for the next flush point.
+            interleavableTextSource.clearIfCurrent(pending);
+        } catch (RuntimeException e) {
+            // Contained on purpose: the receive session must survive a bad text flush.
+        }
     }
 
     /**
