@@ -9,21 +9,34 @@ public class SyncEventBridge {
     private final SyncController syncController;
     private final LogController logController;
     private final SharedTextController sharedTextController;
+    private final FolderController folderController;
 
     public SyncEventBridge(
             SyncController syncController,
             LogController logController,
-            SharedTextController sharedTextController) {
+            SharedTextController sharedTextController,
+            FolderController folderController) {
         this.syncController = syncController;
         this.logController = logController;
         this.sharedTextController = sharedTextController;
+        this.folderController = folderController;
     }
 
+    /**
+     * Marshals every event to the event dispatch thread before dispatch: events are published from
+     * worker threads (listener loop, sync and drop workers, heartbeat ticks), so this single wrap
+     * owns EDT marshaling for the whole bridge and the controller handlers it routes to are
+     * EDT-by-contract. LogController.log keeps its own invokeLater because it also serves callers
+     * outside this bridge from worker threads; the resulting extra EDT hop is harmless.
+     */
     public void handleSyncEvent(SyncEvent event) {
         if (event == null) {
             return;
         }
+        SwingUtilities.invokeLater(() -> dispatchSyncEvent(event));
+    }
 
+    private void dispatchSyncEvent(SyncEvent event) {
         SyncEventType type = event.getType();
         switch (type) {
             case SYNC_STARTED -> syncController.onSyncStarted();
@@ -32,45 +45,35 @@ public class SyncEventBridge {
             case TRANSFER_COMPLETE -> syncController.onTransferComplete();
             case FILE_PROGRESS -> {
                 SyncEvent.FileProgressEvent fileProgress = (SyncEvent.FileProgressEvent) event;
-                SwingUtilities.invokeLater(
-                        () ->
-                                syncController.onFileProgress(
-                                        fileProgress.getCurrentFile(),
-                                        fileProgress.getTotalFiles(),
-                                        fileProgress.getFileName()));
+                syncController.onFileProgress(
+                        fileProgress.getCurrentFile(),
+                        fileProgress.getTotalFiles(),
+                        fileProgress.getFileName());
             }
             case MANIFEST_PROGRESS -> {
                 SyncEvent.ManifestProgressEvent manifestProgress =
                         (SyncEvent.ManifestProgressEvent) event;
-                SwingUtilities.invokeLater(
-                        () ->
-                                syncController.onManifestProgress(
-                                        manifestProgress.getProcessed(),
-                                        manifestProgress.getTotal(),
-                                        manifestProgress.getFileName()));
+                syncController.onManifestProgress(
+                        manifestProgress.getProcessed(),
+                        manifestProgress.getTotal(),
+                        manifestProgress.getFileName());
             }
             case TRANSFER_PROGRESS -> {
                 SyncEvent.TransferProgressEvent transferProgress =
                         (SyncEvent.TransferProgressEvent) event;
-                SwingUtilities.invokeLater(
-                        () ->
-                                syncController.onTransferProgress(
-                                        transferProgress.getCurrentBlock(),
-                                        transferProgress.getTotalBlocks(),
-                                        transferProgress.getBytesTransferred(),
-                                        transferProgress.getSpeedBytesPerSec()));
+                syncController.onTransferProgress(
+                        transferProgress.getCurrentBlock(),
+                        transferProgress.getTotalBlocks(),
+                        transferProgress.getBytesTransferred(),
+                        transferProgress.getSpeedBytesPerSec());
             }
-            case SYNC_CONTROL_REFRESH ->
-                    SwingUtilities.invokeLater(syncController::updateSyncButtonState);
+            case SYNC_CONTROL_REFRESH -> syncController.updateSyncButtonState();
             case DIRECTION_CHANGED -> {
                 SyncEvent.DirectionEvent directionEvent = (SyncEvent.DirectionEvent) event;
-                SwingUtilities.invokeLater(
-                        () -> {
-                            syncController.applyDirection(directionEvent.isSender());
-                            logController.log(
-                                    "[DEBUG] Direction changed by remote, this device is now: "
-                                            + (directionEvent.isSender() ? "Sender" : "Receiver"));
-                        });
+                syncController.applyDirection(directionEvent.isSender());
+                logController.log(
+                        "[DEBUG] Direction changed by remote, this device is now: "
+                                + (directionEvent.isSender() ? "Sender" : "Receiver"));
             }
             case CONNECTION_STATUS -> {
                 SyncEvent.ConnectionEvent connectionEvent = (SyncEvent.ConnectionEvent) event;
@@ -92,20 +95,22 @@ public class SyncEventBridge {
             case DROP_FILE_RECEIVED -> {
                 SyncEvent.DropFileReceivedEvent dropFileEvent =
                         (SyncEvent.DropFileReceivedEvent) event;
-                SwingUtilities.invokeLater(
-                        () ->
-                                logController.log(
-                                        (dropFileEvent.isUnpackedArchive()
-                                                        ? "Received dropped folder: "
-                                                        : "Received dropped file: ")
-                                                + dropFileEvent.getFileName()
-                                                + " -> "
-                                                + dropFileEvent.getFilePath()));
+                logController.log(
+                        (dropFileEvent.isUnpackedArchive()
+                                        ? "Received dropped folder: "
+                                        : "Received dropped file: ")
+                                + dropFileEvent.getFileName()
+                                + " -> "
+                                + dropFileEvent.getFilePath());
             }
             case PENDING_FILE_WRITE -> {
                 SyncEvent.PendingWriteEvent pendingWriteEvent = (SyncEvent.PendingWriteEvent) event;
-                SwingUtilities.invokeLater(
-                        () -> syncController.onPendingWrites(pendingWriteEvent.getPendingPaths()));
+                syncController.onPendingWrites(pendingWriteEvent.getPendingPaths());
+            }
+            case REMOTE_FOLDER_CHANGED -> {
+                SyncEvent.RemoteFolderChangedEvent remoteFolderEvent =
+                        (SyncEvent.RemoteFolderChangedEvent) event;
+                folderController.onRemoteFolderChanged(remoteFolderEvent.getFolderPath());
             }
             default -> {}
         }

@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,22 +23,29 @@ class SyncEventBridgeTest {
     @Mock private SyncController syncController;
     @Mock private LogController logController;
     @Mock private SharedTextController sharedTextController;
+    @Mock private FolderController folderController;
 
     private SyncEventBridge bridge;
 
     @BeforeEach
     void setUp() {
-        bridge = new SyncEventBridge(syncController, logController, sharedTextController);
+        bridge =
+                new SyncEventBridge(
+                        syncController, logController, sharedTextController, folderController);
     }
 
     @Test
     void handleSyncEventWithNullDoesNothing() {
         bridge.handleSyncEvent(null);
-        verifyNoInteractions(syncController, logController, sharedTextController);
+        verifyNoInteractions(syncController, logController, sharedTextController, folderController);
     }
 
+    /**
+     * The bridge marshals every event to the EDT, so synchronous verifies would race the queued
+     * dispatch; the invokeAndWait barrier drains the queue (dispatches are FIFO) first.
+     */
     @Test
-    void handleSyncEventRoutesEachEventTypeToItsHandler() {
+    void handleSyncEventRoutesEachEventTypeToItsHandler() throws Exception {
         String logMessage = "Test log message";
         String errorMessage = "Test error";
         String sharedText = "Shared text content";
@@ -51,6 +59,10 @@ class SyncEventBridgeTest {
         bridge.handleSyncEvent(new SyncEvent.SharedTextReceivedEvent(sharedText));
         bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(true));
         bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(false));
+        bridge.handleSyncEvent(new SyncEvent.SyncControlRefreshEvent());
+        bridge.handleSyncEvent(new SyncEvent.DirectionEvent(true));
+        bridge.handleSyncEvent(new SyncEvent.DropFileReceivedEvent("notes.txt", "/tmp", false));
+        SwingUtilities.invokeAndWait(() -> {});
 
         verify(syncController).onSyncStarted();
         verify(syncController).onSyncComplete();
@@ -61,16 +73,18 @@ class SyncEventBridgeTest {
         verify(sharedTextController).onSharedTextReceived(sharedText);
         verify(syncController).onConnectionStatusChanged(true);
         verify(syncController).onConnectionStatusChanged(false);
+        verify(syncController).updateSyncButtonState();
+        verify(syncController).applyDirection(true);
+        verify(logController).log("Received dropped file: notes.txt -> /tmp");
     }
 
     @Test
-    void handleRemoteFolderChangedEventIsIgnored() {
+    void remoteFolderChangedEvent_isRoutedToFolderControllerOnEdt() throws Exception {
         String folderPath = "/sync/folder";
-        SyncEvent.RemoteFolderChangedEvent event =
-                new SyncEvent.RemoteFolderChangedEvent(folderPath);
+        bridge.handleSyncEvent(new SyncEvent.RemoteFolderChangedEvent(folderPath));
+        SwingUtilities.invokeAndWait(() -> {});
 
-        bridge.handleSyncEvent(event);
-
+        verify(folderController).onRemoteFolderChanged(folderPath);
         verifyNoInteractions(syncController);
     }
 

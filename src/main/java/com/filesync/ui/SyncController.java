@@ -636,52 +636,45 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         return (int) Math.min(100L, (long) cur * 100 / total);
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onSyncStarted() {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    cancelProgressBarReset();
-                    components.getSyncButton().setText(CANCEL_SYNC_TEXT);
-                    components.getSyncButton().setEnabled(true);
-                    components.getPreviewSyncButton().setEnabled(false);
-                    components.getDirectionButton().setEnabled(false);
-                    components.getProgressBar().setIndeterminate(false);
-                    components.getProgressBar().setValue(0);
-                    components.getProgressBar().setString("Starting sync...");
-                });
+        cancelProgressBarReset();
+        components.getSyncButton().setText(CANCEL_SYNC_TEXT);
+        components.getSyncButton().setEnabled(true);
+        components.getPreviewSyncButton().setEnabled(false);
+        components.getDirectionButton().setEnabled(false);
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setValue(0);
+        components.getProgressBar().setString("Starting sync...");
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onSyncCancelled() {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    cancelProgressBarReset();
-                    components.getProgressBar().setIndeterminate(false);
-                    components.getProgressBar().setString("Sync cancelled");
-                    updateSyncButtonState();
-                });
+        cancelProgressBarReset();
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setString("Sync cancelled");
+        updateSyncButtonState();
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onSyncComplete() {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    String port = (String) components.getPortComboBox().getSelectedItem();
-                    String remote = state.getPendingMappingRemotePath();
-                    if (remote != null && !remote.isEmpty()) {
-                        File localFolder = syncManager.getSyncFolder();
-                        if (localFolder != null && localFolder.exists()) {
-                            settings.setRememberedFolderMapping(
-                                    port,
-                                    SettingsManager.normalizeFolderPath(
-                                            localFolder.getAbsolutePath()),
-                                    SettingsManager.normalizeFolderPath(remote));
-                        }
-                    }
-                    state.clearPendingMappingRemotePath();
-                    components.getProgressBar().setIndeterminate(false);
-                    components.getProgressBar().setValue(100);
-                    components.getProgressBar().setString("Sync complete");
-                    scheduleProgressBarReset();
-                    updateSyncButtonState();
-                });
+        String port = (String) components.getPortComboBox().getSelectedItem();
+        String remote = state.getPendingMappingRemotePath();
+        if (remote != null && !remote.isEmpty()) {
+            File localFolder = syncManager.getSyncFolder();
+            if (localFolder != null && localFolder.exists()) {
+                settings.setRememberedFolderMapping(
+                        port,
+                        SettingsManager.normalizeFolderPath(localFolder.getAbsolutePath()),
+                        SettingsManager.normalizeFolderPath(remote));
+            }
+        }
+        state.clearPendingMappingRemotePath();
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setValue(100);
+        components.getProgressBar().setString("Sync complete");
+        scheduleProgressBarReset();
+        updateSyncButtonState();
     }
 
     public void showNoChangesPreview(String message) {
@@ -782,58 +775,51 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         updateSyncButtonState();
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onTransferComplete() {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    components.getProgressBar().setIndeterminate(false);
-                    components.getProgressBar().setString("Transfer complete");
-                    components.getProgressBar().setValue(100);
-                    scheduleProgressBarReset();
-                    updateSyncButtonState();
-                });
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setString("Transfer complete");
+        components.getProgressBar().setValue(100);
+        scheduleProgressBarReset();
+        updateSyncButtonState();
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onConnectionStatusChanged(boolean isAlive) {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    state.setConnected(isAlive);
-                    if (isAlive) {
-                        components.applyConnectedUi();
-                    } else {
-                        // Kept local rather than the shared applyDisconnectedUi(Color): this
-                        // remote-loss path deliberately leaves the connect and direction buttons
-                        // untouched (the updateSyncButtonState() below owns the direction button).
-                        components.getStatusLabel().setText("Disconnected");
-                        components
-                                .getStatusLabel()
-                                .setForeground(new java.awt.Color(128, 128, 128));
-                        components.getConnectButton().setText("Connect");
-                        components.getPortComboBox().setEnabled(true);
-                        components.getRefreshPortsButton().setEnabled(true);
-                        components.getSettingsButton().setEnabled(true);
-                        // The port that just vanished (e.g. an unplugged COM adapter) may no
-                        // longer exist; rescan so the combo box reflects the available ports.
-                        if (onDisconnectedCallback != null) {
-                            onDisconnectedCallback.run();
-                        }
-                    }
-                    updateSyncButtonState();
-                });
+        state.setConnected(isAlive);
+        if (isAlive) {
+            components.applyConnectedUi();
+        } else {
+            // Kept local rather than the shared applyDisconnectedUi(Color): this
+            // remote-loss path deliberately leaves the connect and direction buttons
+            // untouched (the updateSyncButtonState() below owns the direction button).
+            components.getStatusLabel().setText("Disconnected");
+            components.getStatusLabel().setForeground(new java.awt.Color(128, 128, 128));
+            components.getConnectButton().setText("Connect");
+            components.getPortComboBox().setEnabled(true);
+            components.getRefreshPortsButton().setEnabled(true);
+            components.getSettingsButton().setEnabled(true);
+            // The port that just vanished (e.g. an unplugged COM adapter) may no
+            // longer exist; rescan so the combo box reflects the available ports.
+            if (onDisconnectedCallback != null) {
+                onDisconnectedCallback.run();
+            }
+        }
+        updateSyncButtonState();
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onLog(String message) {
         logController.log(message);
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onError(String message) {
-        javax.swing.SwingUtilities.invokeLater(
-                () -> {
-                    logController.log("ERROR: " + message);
-                    cancelProgressBarReset();
-                    components.getProgressBar().setIndeterminate(false);
-                    components.getProgressBar().setString("Error");
-                    updateSyncButtonState();
-                });
+        logController.log("ERROR: " + message);
+        cancelProgressBarReset();
+        components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setString("Error");
+        updateSyncButtonState();
     }
 
     /**

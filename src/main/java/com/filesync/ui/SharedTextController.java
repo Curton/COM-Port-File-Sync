@@ -136,11 +136,9 @@ public class SharedTextController {
         }
     }
 
+    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
     public void onSharedTextReceived(String text) {
-        SwingUtilities.invokeLater(
-                () ->
-                        undoManager.runAsSingleEdit(
-                                () -> components.getSharedTextArea().setText(text)));
+        undoManager.runAsSingleEdit(() -> components.getSharedTextArea().setText(text));
     }
 
     public void pushSharedTextToRemote() {

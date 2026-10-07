@@ -94,7 +94,11 @@ public class MainFrame extends JFrame {
         syncManager.setLogMarkerSink(logController::logMarker);
 
         eventBusListener =
-                new SyncEventBridge(syncController, logController, sharedTextController)
+                new SyncEventBridge(
+                                syncController,
+                                logController,
+                                sharedTextController,
+                                folderController)
                         ::handleSyncEvent;
         mainPanel = components.createMainPanel();
         dragDropController =

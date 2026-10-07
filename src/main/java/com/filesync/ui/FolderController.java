@@ -2,7 +2,6 @@ package com.filesync.ui;
 
 import com.filesync.config.SettingsManager;
 import com.filesync.sync.FileSyncManager;
-import com.filesync.sync.SyncEvent;
 import java.io.File;
 import javax.swing.JFileChooser;
 import javax.swing.SwingUtilities;
@@ -32,17 +31,6 @@ public class FolderController {
     }
 
     public void initEventHandlers() {
-        // Register to remote folder change events
-        syncManager
-                .getEventBus()
-                .register(
-                        event -> {
-                            if (event instanceof SyncEvent.RemoteFolderChangedEvent remoteEvent) {
-                                SwingUtilities.invokeLater(
-                                        () -> onRemoteFolderChanged(remoteEvent.getFolderPath()));
-                            }
-                        });
-
         components.getBrowseFolderButton().addActionListener(event -> browseFolder());
         components
                 .getFolderComboBox()
@@ -147,7 +135,11 @@ public class FolderController {
         }
     }
 
-    private void onRemoteFolderChanged(String folderPath) {
+    /**
+     * Called on the EDT by {@link SyncEventBridge} when the remote peer switches its sync folder;
+     * no self-marshaling — the bridge owns EDT delivery for every event.
+     */
+    void onRemoteFolderChanged(String folderPath) {
         if (folderPath == null || folderPath.isBlank()) {
             return;
         }
