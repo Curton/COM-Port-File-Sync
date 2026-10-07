@@ -42,12 +42,11 @@ public class XModemTransfer {
     private static final byte PADDING = 0x1A; // CTRL-Z for padding
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
     private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
-    // The handshake drain only has to outlast the delivery latency of a 'C' the receiver has
-    // already sent: the 200ms re-send cadence means at most one straggler can be in flight, and
-    // USB-serial drivers deliver an already-sent byte well inside 20ms (FTDI's default RX
-    // latency timer is 16ms). A straggler that slips past the window costs one block re-send,
-    // which the receiver's duplicate-block ACK absorbs.
-    private static final int HANDSHAKE_DRAIN_QUIET_MS = 20;
+    // Fixed pause before the post-handshake drain, letting any in-flight 'C' straggler arrive so
+    // it can be cleared here instead of being read at the first block's ACK position. A straggler
+    // that outlasts even this pause still only costs one block re-send, which the receiver's
+    // duplicate-block ACK absorbs.
+    private static final int HANDSHAKE_DRAIN_PAUSE_MS = 50;
     private static final long RECEIVE_HANDSHAKE_WINDOW_MS = (long) MAX_RETRIES * 1000;
     // A receiver aborting mid-block re-sends CAN a few times, spaced out, because one lost CAN
     // makes the sender keep streaming into a session that has already given up.
@@ -549,32 +548,19 @@ public class XModemTransfer {
      * sent multiple 'C' chars before the sender started listening, and these stale chars could
      * interfere with ACK detection during block sending.
      *
-     * <p>Instead of a fixed pause, wait only until the line has been quiet for {@link
-     * #HANDSHAKE_DRAIN_QUIET_MS}: buffered stragglers are cleared immediately, and the window only
-     * has to outlast the delivery latency of a 'C' that is still in flight. A straggler that slips
-     * past the window is read at the block's ACK position and costs one block re-send (the receiver
-     * ACKs duplicate blocks), never the session.
+     * <p>A fixed pause first lets any in-flight 'C' straggler arrive so the drain clears it; one
+     * that outlasts the pause is read at the block's ACK position instead and costs one block
+     * re-send (the receiver ACKs duplicate blocks), never the session.
      */
     private void drainExtraHandshakeChars() throws IOException {
+        // Small delay to let any in-flight 'C' chars arrive
         try {
-            long quietUntil = System.currentTimeMillis() + HANDSHAKE_DRAIN_QUIET_MS;
-            while (System.currentTimeMillis() < quietUntil) {
-                assertSessionCurrent();
-                if (serialPort.available() > 0) {
-                    int b = readBufferedByteConsumingFrames();
-                    if (b >= 0 && b != C && b != NAK) {
-                        // Unexpected byte, stop draining
-                        return;
-                    }
-                } else {
-                    Thread.sleep(POLL_INTERVAL_MS);
-                }
-            }
+            Thread.sleep(HANDSHAKE_DRAIN_PAUSE_MS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
 
-        // Drain any 'C' or NAK chars that arrived as the window closed. Receiver-originated
+        // Drain any 'C' or NAK chars that arrived during the pause. Receiver-originated
         // frames are consumed whole so their bracket prefix cannot poison the block ACK reads.
         while (serialPort.available() > 0) {
             assertSessionCurrent();

@@ -174,7 +174,7 @@ class XModemTransferTest {
     @Timeout(20)
     void sendDrainsInFlightHandshakeCharWithoutResendingBlock() throws IOException {
         // A straggler 'C' still in flight when the handshake completes lands ~10ms later, inside
-        // the drain's quiet window, so it must be cleared there: the first block is written
+        // the 50ms drain pause, so it must be cleared there: the first block is written
         // exactly once.
         StagedTestSerialPortManager serialPort =
                 new StagedTestSerialPortManager(
@@ -1134,7 +1134,7 @@ class XModemTransferTest {
     /**
      * Port manager that records writes and serves input in two stages: the leading bytes are
      * visible immediately, the rest only after a delay, so a straggler handshake char can be
-     * scripted to land mid-drain (inside the quiet window) or after the drain window.
+     * scripted to land mid-drain (inside the drain pause) or after the drain window.
      */
     private static final class StagedTestSerialPortManager extends SerialPortManager {
         private final ByteArrayInputStream immediate;
