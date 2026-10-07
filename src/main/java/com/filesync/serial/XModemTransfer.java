@@ -42,19 +42,11 @@ public class XModemTransfer {
     private static final byte PADDING = 0x1A; // CTRL-Z for padding
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
     private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
-    // Pause before the post-handshake drain. It only has to outlast a 'C' straggler that is
-    // already in flight (one byte-time at any supported baud, plus driver latency) so the drain
-    // clears it before the first block goes out. The pause is a fast path, not the safety net:
-    // how long a straggler could still be coming was never knowable here, so a longer pause only
-    // buys sleep for every transfer. A straggler that arrives after it is skipped where it lands
-    // — at a block's ACK position — regardless of its offset (see
-    // readTransferResponseConsumingFrames).
-    private static final int HANDSHAKE_DRAIN_PAUSE_MS = 5;
-    // How many stray 'C's a single response read may skip before giving up and returning the byte
-    // (the caller's retry then drains the backlog with its stale-char drain). The receiver emits
-    // at most one live straggler per handshake; the bound only keeps a pathological 'C' stream
-    // from burning a whole block timeout on skips.
-    private static final int MAX_HANDSHAKE_STRAGGLERS = 8;
+    // Fixed pause before the post-handshake drain, letting any in-flight 'C' straggler arrive so
+    // it can be cleared here instead of being read at the first block's ACK position. A straggler
+    // that outlasts even this pause still only costs one block re-send, which the receiver's
+    // duplicate-block ACK absorbs.
+    private static final int HANDSHAKE_DRAIN_PAUSE_MS = 50;
     private static final long RECEIVE_HANDSHAKE_WINDOW_MS = (long) MAX_RETRIES * 1000;
     // A receiver aborting mid-block re-sends CAN a few times, spaced out, because one lost CAN
     // makes the sender keep streaming into a session that has already given up.
@@ -559,13 +551,12 @@ public class XModemTransfer {
      * sent multiple 'C' chars before the sender started listening, and these stale chars could
      * interfere with ACK detection during block sending.
      *
-     * <p>The pause covers only stragglers already in flight, so the drain clears them here and the
-     * first block's response read stays clean. One that arrives after the pause is not lost: the
-     * response read recognizes it as a straggler and skips it, so its arrival offset no longer
-     * matters and the block is still written exactly once.
+     * <p>A fixed pause first lets any in-flight 'C' straggler arrive so the drain clears it; one
+     * that outlasts the pause is read at the block's ACK position instead and costs one block
+     * re-send (the receiver ACKs duplicate blocks), never the session.
      */
     private void drainExtraHandshakeChars() throws IOException {
-        // Short delay to let an in-flight 'C' straggler arrive
+        // Small delay to let any in-flight 'C' chars arrive
         try {
             Thread.sleep(HANDSHAKE_DRAIN_PAUSE_MS);
         } catch (InterruptedException e) {
@@ -638,7 +629,7 @@ public class XModemTransfer {
 
             serialPort.write(packet);
 
-            int response = readTransferResponseConsumingFrames(TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -646,7 +637,7 @@ public class XModemTransfer {
                 cancelSignalled = true;
                 return false;
             }
-            // NAK, a 'C' past the straggler-skip bound, or timeout - retry
+            // NAK, 'C' (stale handshake char), or timeout - retry
         }
         return false;
     }
@@ -654,7 +645,7 @@ public class XModemTransfer {
     private boolean sendEOT() throws IOException {
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
             serialPort.write(EOT);
-            int response = readTransferResponseConsumingFrames(TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -676,7 +667,7 @@ public class XModemTransfer {
     public boolean sendInterleavedFrame(byte[] frame) throws IOException {
         for (int attempt = 0; attempt < MAX_INTERLEAVE_RETRIES; attempt++) {
             serialPort.write(frame);
-            int response = readTransferResponseConsumingFrames(INTERLEAVE_ACK_TIMEOUT_MS);
+            int response = readResponseByteConsumingFrames(INTERLEAVE_ACK_TIMEOUT_MS);
             if (response == ACK) {
                 return true;
             }
@@ -684,8 +675,7 @@ public class XModemTransfer {
                 cancelSignalled = true;
                 throw new IOException("Transfer cancelled by receiver");
             }
-            // NAK, a 'C' past the straggler-skip bound, timeout, or a frame the receiver could
-            // not parse.
+            // NAK, stale handshake char, timeout, or a frame the receiver could not parse.
         }
         return false;
     }
@@ -823,28 +813,7 @@ public class XModemTransfer {
      * follower is pushed back, mirroring the receive loop's header-position handling.
      */
     private int readResponseByteConsumingFrames(int timeoutMs) throws IOException {
-        return readResponseConsumingFrames(timeoutMs, false);
-    }
-
-    /**
-     * Read the peer's next single-byte response with the same frame handling as {@link
-     * #readResponseByteConsumingFrames}, but skipping stray 'C' handshake stragglers. Once blocks
-     * are flowing the receiver never sends 'C' — only its handshake does — so a 'C' read here is a
-     * straggler that outlasted the handshake drain. Skipping it keeps the ACK position honest;
-     * reading it as a bad response instead would re-send a block the receiver already has (its
-     * duplicate-block ACK absorbs that, but the round is pure waste, and at the EOT position a
-     * re-sent EOT lands on the command listener as garbage). Skips are bounded by {@link
-     * #MAX_HANDSHAKE_STRAGGLERS} so a flood falls back to a retry, whose stale-char drain clears
-     * the backlog.
-     */
-    private int readTransferResponseConsumingFrames(int timeoutMs) throws IOException {
-        return readResponseConsumingFrames(timeoutMs, true);
-    }
-
-    private int readResponseConsumingFrames(int timeoutMs, boolean skipHandshakeStragglers)
-            throws IOException {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        int stragglers = 0;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -852,10 +821,6 @@ public class XModemTransfer {
             }
             int b = readByteWithTimeout((int) remaining);
             if (b != (FRAME_START_BYTE & 0xFF)) {
-                if (skipHandshakeStragglers && b == C && stragglers < MAX_HANDSHAKE_STRAGGLERS) {
-                    stragglers++;
-                    continue;
-                }
                 return b;
             }
             int second =

@@ -19,18 +19,17 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Regression pin for the XMODEM handshake straggler handling. A receiver 'C' straggler is a 'C'
- * written but not yet delivered when the sender's handshake completed, so it can surface in the
- * middle of the transfer and — if mistaken for a block response — re-send a block the receiver
- * already has. Two defenses cover it: the short drain pause sweeps stragglers already in flight,
- * and the response read skips any 'C' that outlasts the pause, because 'C' has no meaning once
- * blocks are flowing. Together they make the outcome independent of the straggler's arrival
- * offset: both cases below — just past the pause and far past it — deliver intact data with the
- * baseline packet count and no duplicate block.
+ * Regression pin for the XMODEM handshake drain pause. The drain exists to absorb a receiver 'C'
+ * straggler - a 'C' written but not yet delivered when the sender's handshake completed - so it
+ * cannot be mistaken for a block response. 8670fca shrank the pause to a 20ms quiet window; the
+ * fixed pause is back at 50ms, and the mid-band case below is what distinguishes the two: a
+ * straggler landing inside the pause is swept away, one landing after it costs exactly one
+ * duplicate-block re-send, which the real receiver ACKs without saving. Session survival is not
+ * the observable - both windows deliver intact data - the packet count is.
  *
  * <p>The link runs at 19200 baud so the first 4096-byte block occupies the wire for ~2.1s: every
  * straggler tested here lands deep inside a live block-ACK wait instead of racing the session's
- * short tail, which makes the outcomes below deterministic rather than timing-dependent.
+ * short tail, which makes the two outcomes below deterministic rather than timing-dependent.
  */
 class DrainStragglerCTest {
 
@@ -41,32 +40,30 @@ class DrainStragglerCTest {
 
     @Test
     @Timeout(90)
-    void aStragglerJustPastTheDrainPauseIsSkippedAtTheBlockAckPosition() throws Exception {
-        // ~35ms: past the short drain pause, early enough that the straggler is buffered long
-        // before the first block's ACK is due. It must be skipped there, not re-sent: the block
-        // is written exactly once.
+    void drainPauseAbsorbsAStragglerThatLandsMidPause() throws Exception {
+        // ~35ms: past the 20ms quiet window, well inside the 50ms pause. The straggler must be
+        // swept and the first block must be written exactly once.
         Result result = runWithStraggler(35);
         assertTrue(result.sent, "the session must complete: " + result);
         assertArrayEquals(result.payload, result.received, "the payload must arrive intact");
         assertEquals(
                 BASELINE_DATA_PACKETS,
                 result.dataPackets,
-                "a straggler past the pause must not re-send the block");
+                "a straggler inside the drain pause must not reach the block ACK position");
     }
 
     @Test
     @Timeout(90)
-    void aStragglerFarPastTheDrainPauseIsAlsoSkippedWithoutAnyResend() throws Exception {
-        // ~140ms: far past the pause, landing mid-transfer with the ACK still ~2s away. The skip
-        // is offset-independent, so this costs no more than the 35ms case — and a re-sent block
-        // would be an observable regression.
+    void aStragglerBeyondThePauseCostsExactlyOneToleratedResend() throws Exception {
+        // ~140ms: far past the pause and into a live block ACK wait. The re-send is the duplicate
+        // block the receiver ACKs without saving - bounded, never the session.
         Result result = runWithStraggler(140);
         assertTrue(result.sent, "the session must complete: " + result);
         assertArrayEquals(result.payload, result.received, "the payload must arrive intact");
         assertEquals(
-                BASELINE_DATA_PACKETS,
+                BASELINE_DATA_PACKETS + 1,
                 result.dataPackets,
-                "a late straggler must be skipped regardless of its offset");
+                "a straggler past the pause costs exactly one duplicate-block re-send");
     }
 
     private static Result runWithStraggler(int stragglerAfterMillis) throws Exception {
