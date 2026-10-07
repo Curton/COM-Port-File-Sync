@@ -283,6 +283,50 @@ class TextMergePanelTest {
         assertTrue(panel.isMergeAvailable(), "A normal text conflict must still offer MERGE");
     }
 
+    /**
+     * The manual merge editor must colour the conflict block like the diff views: local lines on
+     * the removed red, remote lines on the added green, markers on the header grey, and context
+     * lines plain.
+     */
+    @Test
+    void mergeEditorColorsConflictBlockLikeTheDiffViews() throws Exception {
+        String localContent = "<?xml version=\"1.0\"?>\n" + "    <version>1.6.13</version>\n";
+        String remoteContent = "<?xml version=\"1.0\"?>\n" + "    <version>1.6.14</version>\n";
+
+        ConflictInfo conflict = createConflictInfo(localContent, remoteContent);
+        TextMergePanel panel = new TextMergePanel(conflict);
+        panel.getMergeRadio().doClick();
+
+        javax.swing.JTextPane editor = panel.getMergeTextArea();
+        // Read the document, not getText(): the JTextPane accessor rewrites newlines to the
+        // platform separator, while the document keeps the inserted LF bytes verbatim.
+        javax.swing.text.StyledDocument document = editor.getStyledDocument();
+        String text = document.getText(0, document.getLength());
+        assertEquals(
+                invokeBuildFullFileGitStyleMergeContent(panel, conflict),
+                text,
+                "The styled view and the plain builder must carry the same text");
+        assertFalse(
+                panel.getMergedContent().contains("\r"),
+                "The merged content must keep LF line endings, not the platform separator");
+
+        assertEquals(
+                DiffPaneSupport.REMOVED_COLOR,
+                backgroundAttributeAt(document, text.indexOf("1.6.13")),
+                "Local conflict lines carry the diff view's removed colour");
+        assertEquals(
+                DiffPaneSupport.ADDED_COLOR,
+                backgroundAttributeAt(document, text.indexOf("1.6.14")),
+                "Remote conflict lines carry the diff view's added colour");
+        assertEquals(
+                DiffPaneSupport.HEADER_BG_COLOR,
+                backgroundAttributeAt(document, text.indexOf("<<<<<<<")),
+                "Conflict markers carry the header colour");
+        assertNull(
+                backgroundAttributeAt(document, text.indexOf("<?xml")),
+                "Context lines stay uncoloured");
+    }
+
     private ConflictInfo createLazyConflictInfo(java.nio.file.Path localFile) {
         ConflictInfo conflict =
                 new ConflictInfo(
@@ -329,6 +373,18 @@ class TextMergePanelTest {
                         "buildFullFileGitStyleMergeContent", ConflictInfo.class);
         method.setAccessible(true);
         return (String) method.invoke(panel, conflict);
+    }
+
+    /**
+     * Raw background attribute of the character run containing {@code offset}. {@link
+     * StyleConstants#getBackground} would paper over an unset attribute with a default colour, so
+     * the raw attribute is what distinguishes "plain" from "coloured black".
+     */
+    private static Object backgroundAttributeAt(
+            javax.swing.text.StyledDocument document, int offset) {
+        return document.getCharacterElement(offset)
+                .getAttributes()
+                .getAttribute(javax.swing.text.StyleConstants.Background);
     }
 
     private int countOccurrences(String text, String substring) {

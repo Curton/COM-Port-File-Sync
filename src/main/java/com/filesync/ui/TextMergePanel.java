@@ -23,9 +23,11 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
-import javax.swing.JTextArea;
 import javax.swing.JTextPane;
 import javax.swing.text.BadLocationException;
+import javax.swing.text.SimpleAttributeSet;
+import javax.swing.text.StyleConstants;
+import javax.swing.text.StyledDocument;
 
 /**
  * Panel for resolving text file conflicts with merge option. Shows only the changed regions (diff
@@ -42,7 +44,7 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
     private final JRadioButton keepLocalRadio;
     private final JRadioButton keepRemoteRadio;
     private final JRadioButton mergeRadio;
-    private final JTextArea mergeTextArea;
+    private final JTextPane mergeTextArea;
     private final JPanel mergePanel;
 
     // Diff-related UI components
@@ -155,10 +157,8 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
         mergeLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 0, 4, 0));
         mergePanel.add(mergeLabel, BorderLayout.NORTH);
 
-        mergeTextArea = new JTextArea();
+        mergeTextArea = new JTextPane();
         mergeTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        mergeTextArea.setLineWrap(true);
-        mergeTextArea.setWrapStyleWord(true);
         JScrollPane mergeScroll = new JScrollPane(mergeTextArea);
         mergeScroll.setPreferredSize(new Dimension(0, 150));
         mergePanel.add(mergeScroll, BorderLayout.CENTER);
@@ -184,8 +184,8 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
                         return;
                     }
                     mergePanel.setVisible(true);
-                    // Show full file with git-merge-style conflict markers
-                    mergeTextArea.setText(buildFullFileGitStyleMergeContent(conflict));
+                    // Show full file with git-merge-style conflict markers, coloured by side
+                    renderStyledMergeContent(conflict);
                     revalidate();
                     repaint();
                     fireSelectionChanged();
@@ -340,9 +340,47 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
      * REMOTE markers. Uses LCS-based diff to accurately identify conflict regions.
      */
     private String buildFullFileGitStyleMergeContent(ConflictInfo conflict) {
+        StringBuilder sb = new StringBuilder();
+        for (MergeSegment segment : buildMergeSegments(conflict)) {
+            sb.append(segment.text());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Seed the merge editor with the git-style conflict view, each line carrying the background
+     * colour of its side. Falls back to plain text if the styled insert ever fails.
+     */
+    private void renderStyledMergeContent(ConflictInfo conflict) {
+        mergeTextArea.setText("");
+        StyledDocument document = mergeTextArea.getStyledDocument();
+        try {
+            for (MergeSegment segment : buildMergeSegments(conflict)) {
+                SimpleAttributeSet attr = new SimpleAttributeSet();
+                if (segment.color() != null) {
+                    StyleConstants.setBackground(attr, segment.color());
+                }
+                document.insertString(document.getLength(), segment.text(), attr);
+            }
+        } catch (BadLocationException e) {
+            // Fallback to plain text
+            mergeTextArea.setText(buildFullFileGitStyleMergeContent(conflict));
+        }
+        mergeTextArea.setCaretPosition(0);
+    }
+
+    /** One run of merge text plus the background colour it carries; a null colour means plain. */
+    private record MergeSegment(String text, Color color) {}
+
+    /**
+     * Walk both file versions and emit the merged text as segments: context lines plain, conflict
+     * markers on the header grey, local block lines on the diff view's removed red and remote block
+     * lines on its added green.
+     */
+    private List<MergeSegment> buildMergeSegments(ConflictInfo conflict) {
         if (!conflict.isLocalContentAvailable()) {
             // Never fabricate a merge from an empty local side.
-            return conflict.getLocalContentAsString();
+            return List.of(new MergeSegment(conflict.getLocalContentAsString(), null));
         }
         String localContent = conflict.getLocalContentAsString();
         String remoteContent = conflict.getRemoteContentAsString();
@@ -352,12 +390,12 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
 
         if (!diffResult.hasChanges()) {
             // No differences - return content as-is
-            return localContent;
+            return List.of(new MergeSegment(localContent, null));
         }
 
         String[] localLines = localContent.split("\n", -1);
         String[] remoteLines = remoteContent.split("\n", -1);
-        StringBuilder sb = new StringBuilder();
+        List<MergeSegment> segments = new ArrayList<>();
 
         // Collect all changed line numbers from local and remote
         java.util.Set<Integer> changedLocalLines = new java.util.HashSet<>();
@@ -387,7 +425,7 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
             if (!localChanged && !remoteChanged) {
                 // Both unchanged - output the line
                 if (localIdx < localLines.length) {
-                    sb.append(localLines[localIdx]).append("\n");
+                    segments.add(new MergeSegment(localLines[localIdx] + "\n", null));
                 }
                 localIdx++;
                 remoteIdx++;
@@ -410,19 +448,19 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
                 }
 
                 // Write conflict markers
-                sb.append("<<<<<<< LOCAL\n");
+                segments.add(new MergeSegment("<<<<<<< LOCAL\n", DiffPaneSupport.HEADER_BG_COLOR));
                 for (String line : localBlockLines) {
-                    sb.append(line).append("\n");
+                    segments.add(new MergeSegment(line + "\n", DiffPaneSupport.REMOVED_COLOR));
                 }
-                sb.append("=======\n");
+                segments.add(new MergeSegment("=======\n", DiffPaneSupport.HEADER_BG_COLOR));
                 for (String line : remoteBlockLines) {
-                    sb.append(line).append("\n");
+                    segments.add(new MergeSegment(line + "\n", DiffPaneSupport.ADDED_COLOR));
                 }
-                sb.append(">>>>>>> REMOTE\n");
+                segments.add(new MergeSegment(">>>>>>> REMOTE\n", DiffPaneSupport.HEADER_BG_COLOR));
             }
         }
 
-        return sb.toString();
+        return segments;
     }
 
     public Resolution getResolution() {
@@ -451,7 +489,14 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
             return null;
         }
         if (mergeRadio.isSelected()) {
-            return mergeTextArea.getText();
+            // JTextPane.getText() rewrites newlines to the platform separator; read the document
+            // so the merged bytes keep the files' own line endings.
+            try {
+                javax.swing.text.Document document = mergeTextArea.getDocument();
+                return document.getText(0, document.getLength()).replace("\r\n", "\n");
+            } catch (BadLocationException e) {
+                return mergeTextArea.getText().replace("\r\n", "\n");
+            }
         }
         return null;
     }
@@ -470,7 +515,7 @@ public class TextMergePanel extends JPanel implements ConflictChoicePanel {
         return mergeRadio;
     }
 
-    javax.swing.JTextArea getMergeTextArea() {
+    javax.swing.JTextPane getMergeTextArea() {
         return mergeTextArea;
     }
 
