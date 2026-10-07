@@ -173,9 +173,9 @@ class XModemTransferTest {
     @Test
     @Timeout(20)
     void sendDrainsInFlightHandshakeCharWithoutResendingBlock() throws IOException {
-        // A straggler 'C' still in flight when the handshake completes lands ~10ms later, inside
-        // the 50ms drain pause, so it must be cleared there: the first block is written
-        // exactly once.
+        // A straggler 'C' still in flight when the handshake completes lands ~2ms later, inside
+        // the 5ms drain pause, so it must be cleared there: the first block is written exactly
+        // once.
         StagedTestSerialPortManager serialPort =
                 new StagedTestSerialPortManager(
                         new byte[] {XModemTransfer.C},
@@ -186,7 +186,7 @@ class XModemTransferTest {
                             XModemTransfer.ACK, // acknowledges the data block
                             XModemTransfer.ACK // acknowledges the EOT
                         },
-                        10);
+                        2);
         XModemTransfer transfer = new XModemTransfer(serialPort);
 
         assertTrue(transfer.send(new byte[10]), "an in-flight straggler 'C' must be drained");
@@ -196,23 +196,54 @@ class XModemTransferTest {
 
     @Test
     @Timeout(20)
-    void sendRecoversViaBlockResendWhenHandshakeCharOutrunsDrainWindow() throws IOException {
-        // A straggler 'C' that lands after the drain window (~100ms here) is read at the block's
-        // ACK position instead; that must cost exactly one block re-send, not the session — the
-        // receiver ACKs duplicate blocks.
+    void sendIgnoresAStragglerThatOutrunsTheDrainPause() throws IOException {
+        // A straggler 'C' that lands after the short drain pause (~100ms here) is read at the
+        // block's ACK position, but 'C' means nothing once blocks are flowing: the response read
+        // recognizes the straggler and skips it, so the block is still written exactly once and
+        // the straggler's arrival offset no longer matters.
         StagedTestSerialPortManager serialPort =
                 new StagedTestSerialPortManager(
                         new byte[] {XModemTransfer.C},
                         new byte[] {
-                            XModemTransfer.C, // straggler read at the ACK position, triggers retry
-                            XModemTransfer.ACK, // consumed by the retry's stale-char drain
-                            XModemTransfer.ACK, // acknowledges the re-sent block
+                            XModemTransfer.C, // straggler, skipped at the block's ACK position
+                            XModemTransfer.ACK, // acknowledges the data block
                             XModemTransfer.ACK // acknowledges the EOT
                         },
                         100);
         XModemTransfer transfer = new XModemTransfer(serialPort);
 
-        assertTrue(transfer.send(new byte[10]), "a late straggler 'C' must not fail the session");
+        assertTrue(transfer.send(new byte[10]), "a late straggler 'C' must be skipped, not trusted");
+
+        assertEquals(1, countDataPackets(serialPort.getWrites()), "the block must not be re-sent");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendPastTheStragglerSkipBoundCostsOneResendInsteadOfAStall() throws IOException {
+        // A pathological stream of stray 'C's — the receiver never does this organically — must
+        // not burn a whole block timeout skipping: after the skip bound the byte is handed back,
+        // the retry's stale-char drain clears the backlog, and one block re-send settles it.
+        StagedTestSerialPortManager serialPort =
+                new StagedTestSerialPortManager(
+                        new byte[] {XModemTransfer.C},
+                        new byte[] {
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C,
+                            XModemTransfer.C, // ninth straggler: past the skip bound, returned
+                            XModemTransfer.ACK, // consumed by the retry's stale-char drain
+                            XModemTransfer.ACK, // acknowledges the re-sent block
+                            XModemTransfer.ACK // acknowledges the EOT
+                        },
+                        50);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(new byte[10]), "a 'C' flood must not fail the session");
 
         assertEquals(2, countDataPackets(serialPort.getWrites()), "the miss costs one re-send");
     }
@@ -265,6 +296,43 @@ class XModemTransferTest {
 
     private static final byte[] INTERLEAVE_FRAME =
             "[[SYNC:SHARED_TEXT:123:QUJD]]\n".getBytes(StandardCharsets.UTF_8);
+
+    @Test
+    @Timeout(20)
+    void receiveIntoSavesADuplicateBlockOnlyOnceAndAcksIt() throws IOException {
+        // A block delivered twice — its ACK was corrupted and the sender re-sent — must be ACKed
+        // again but saved only once, so a re-send round extends neither the payload nor the
+        // session. This path is the safety net behind the sender's straggler handling.
+        byte[] block = new byte[128];
+        for (int i = 0; i < block.length; i++) {
+            block[i] = (byte) (i * 7);
+        }
+        int crc = XModemTransfer.calculateCRC16(block);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        for (int copy = 0; copy < 2; copy++) {
+            input.write(XModemTransfer.SOH);
+            input.write(1);
+            input.write(254);
+            input.writeBytes(block);
+            input.write((crc >> 8) & 0xFF);
+            input.write(crc & 0xFF);
+        }
+        input.write(XModemTransfer.EOT);
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(input.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(block.length, sink);
+
+        assertEquals(block.length, written, "the duplicate must not extend the payload");
+        assertArrayEquals(block, sink.toByteArray());
+        assertEquals(
+                3,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK}),
+                "block, duplicate, and EOT each draw one ACK");
+        assertEquals(0, countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.NAK}));
+    }
 
     @Test
     @Timeout(20)
