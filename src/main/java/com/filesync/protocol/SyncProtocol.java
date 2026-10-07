@@ -59,12 +59,15 @@ public class SyncProtocol {
     private final AtomicBoolean interleaveSuppressed = new AtomicBoolean(false);
 
     // Narrow view of the queued shared text, wired by FileSyncManager, so a file-transfer
-    // sender can flush one pending text in the gap between two XMODEM data blocks.
-    private InterleavableTextSource interleavableTextSource;
+    // sender can flush one pending text in the gap between two XMODEM data blocks. Volatile:
+    // wired once during construction, but read from whichever worker thread runs a transfer.
+    private volatile InterleavableTextSource interleavableTextSource;
 
     // Handler for framed commands the peer interleaves between our data blocks; runs on the
     // transfer thread between blocks, so only cheap, non-serial commands may be dispatched.
-    private java.util.function.Consumer<Message> interleavedFrameHandler;
+    // Volatile: wired once during construction, but read from whichever thread parks in an
+    // XMODEM loop.
+    private volatile java.util.function.Consumer<Message> interleavedFrameHandler;
 
     // Protocol commands
     public static final String CMD_MANIFEST_REQ = "MANIFEST_REQ";
@@ -133,25 +136,28 @@ public class SyncProtocol {
 
     private final SerialPortManager serialPort;
     private final XModemTransfer xmodem;
-    private int timeoutMs;
-    private Runnable messageActivityCallback;
+    // Volatile: shortened at runtime by the folder-context preflight (a SwingWorker thread) and
+    // the sync worker's manifest wait while the listener thread and other workers keep reading
+    // it between their wait slices, so every thread must see the latest configured value.
+    private volatile int timeoutMs;
+    private volatile Runnable messageActivityCallback;
     // Fired when the peer reports (CMD_BASE_STALE) that a delta or append was rejected because
     // the receiver's file is not the state the sender diffed against. Wired by FileSyncManager to
     // the SyncCoordinator, which records the rejection before the notification aborts the
     // in-flight operation, so the failed transfer is not repeated on every sync.
-    private java.util.function.Consumer<Message> baseStaleHandler;
+    private volatile java.util.function.Consumer<Message> baseStaleHandler;
 
     // Fired after a received transfer is verified and written to disk, carrying the sender's
     // announced manifest md5 and the written size. Wired to the SyncCoordinator, which records
     // the path's confirmed (base) state — the anchor conflict arbitration compares against.
     // Must not throw: it runs inside the receive paths below.
-    private BatchTransferSession.EntryConfirmationListener transferConfirmedHandler;
+    private volatile BatchTransferSession.EntryConfirmationListener transferConfirmedHandler;
 
     // Fired when a received transfer cannot be honored as sent: the decoded content failed its
     // manifest-md5 verification, or the write itself failed. The SyncCoordinator collects these
     // paths so the end-of-session CMD_WRITE_FAILURES can tell the sender which of its
     // optimistic confirmations to withdraw. Must not throw.
-    private java.util.function.Consumer<String> writeFailedHandler;
+    private volatile java.util.function.Consumer<String> writeFailedHandler;
 
     private static final java.util.Base64.Encoder BASE64_ENCODER = java.util.Base64.getEncoder();
     private static final java.util.Base64.Decoder BASE64_DECODER = java.util.Base64.getDecoder();

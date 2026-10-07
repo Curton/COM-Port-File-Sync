@@ -85,6 +85,19 @@ public class SyncCoordinator {
      */
     private Consumer<String> communicationFailureReporter = reason -> {};
 
+    /**
+     * Lock shared with the other sender-side blocking exchanges (the folder-context preflight),
+     * held across the manifest round-trip's temporary {@code SyncProtocol#setTimeout} window.
+     * Without it, a preflight started while a manifest wait is in flight — two quick button clicks
+     * race past the UI gating, whose disable happens only once the preview flag is set — would swap
+     * the timeout underneath the wait, and the two save/restore pairs could restore each other's
+     * temporary value on top of the session default (e.g. leaving a 5 s folder timeout as the
+     * permanent command timeout). Wired by FileSyncManager to its {@code
+     * senderBlockingExchangeLock}; the unshared default only keeps this coordinator's own windows
+     * from overlapping.
+     */
+    private Object exchangeWindowLock = new Object();
+
     private ScheduledExecutorService executor;
 
     /**
@@ -228,6 +241,16 @@ public class SyncCoordinator {
 
     public void setProtocolExchangeGate(Consumer<Boolean> gate) {
         this.protocolExchangeGate = gate != null ? gate : value -> {};
+    }
+
+    /**
+     * Shares the manifest round-trip's window lock with the other sender-side blocking exchanges
+     * (see {@link #exchangeWindowLock}). FileSyncManager wires its {@code
+     * senderBlockingExchangeLock} so a folder-context preflight can never interleave with the
+     * manifest wait.
+     */
+    public void setExchangeWindowLock(Object lock) {
+        this.exchangeWindowLock = lock != null ? lock : new Object();
     }
 
     public void setCommunicationFailureReporter(Consumer<String> reporter) {
@@ -386,27 +409,33 @@ public class SyncCoordinator {
         // time: the receiver keeps sending heartbeats while it generates (handleManifestRequest),
         // so MANIFEST_WAIT_IDLE_MS of total silence means the peer died mid-generation.
         FileChangeDetector.FileManifest remoteManifest;
-        int savedTimeout = protocol.getTimeout();
-        protocol.setTimeout((int) MANIFEST_WAIT_TOTAL_MS);
-        // The protocol-exchange gate opens only now, after local manifest generation: hashing the
-        // local tree touches no serial I/O, and holding the gate open during it silences outbound
-        // heartbeats long enough (folder walks can take a minute) for the idle peer to declare
-        // "Connection lost - no heartbeat response" and tear the link down mid-preview.
-        protocolExchangeGate.accept(true);
-        try {
-            protocol.requestManifest(respectGitignore, fastMode);
+        // The lock (not just the timeout swap) spans the whole round-trip: a concurrent preflight
+        // excluded only from the field would still race this wait for the same response frames.
+        synchronized (exchangeWindowLock) {
+            int savedTimeout = protocol.getTimeout();
+            protocol.setTimeout((int) MANIFEST_WAIT_TOTAL_MS);
+            // The protocol-exchange gate opens only now, after local manifest generation: hashing
+            // the local tree touches no serial I/O, and holding the gate open during it silences
+            // outbound heartbeats long enough (folder walks can take a minute) for the idle peer
+            // to declare "Connection lost - no heartbeat response" and tear the link down
+            // mid-preview.
+            protocolExchangeGate.accept(true);
+            try {
+                protocol.requestManifest(respectGitignore, fastMode);
 
-            SyncProtocol.Message manifestMessage =
-                    protocol.waitForCommand(SyncProtocol.CMD_MANIFEST_DATA, MANIFEST_WAIT_IDLE_MS);
-            protocol.sendAck();
-            int expectedManifestSize =
-                    manifestMessage != null && manifestMessage.getParams().length > 0
-                            ? manifestMessage.getParamAsInt(0)
-                            : -1;
-            remoteManifest = protocol.receiveManifest(expectedManifestSize);
-        } finally {
-            protocolExchangeGate.accept(false);
-            protocol.setTimeout(savedTimeout);
+                SyncProtocol.Message manifestMessage =
+                        protocol.waitForCommand(
+                                SyncProtocol.CMD_MANIFEST_DATA, MANIFEST_WAIT_IDLE_MS);
+                protocol.sendAck();
+                int expectedManifestSize =
+                        manifestMessage != null && manifestMessage.getParams().length > 0
+                                ? manifestMessage.getParamAsInt(0)
+                                : -1;
+                remoteManifest = protocol.receiveManifest(expectedManifestSize);
+            } finally {
+                protocolExchangeGate.accept(false);
+                protocol.setTimeout(savedTimeout);
+            }
         }
 
         eventBus.post(

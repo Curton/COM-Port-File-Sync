@@ -62,10 +62,13 @@ public class XModemTransfer {
     private static final int CAN_RESEND_INTERVAL_MS = 50;
 
     private final SerialPortManager serialPort;
-    private TransferProgressListener progressListener;
-    private BlockBoundaryHook blockBoundaryHook;
-    private ReceiveBoundaryHook receiveBoundaryHook;
-    private Consumer<String> interleavedFrameHandler;
+    // Volatile: wired once by SyncProtocol/FileSyncManager before any transfer thread exists, but
+    // read from whichever worker thread runs an XMODEM send or receive — safe by declaration, not
+    // by wiring order.
+    private volatile TransferProgressListener progressListener;
+    private volatile BlockBoundaryHook blockBoundaryHook;
+    private volatile ReceiveBoundaryHook receiveBoundaryHook;
+    private volatile Consumer<String> interleavedFrameHandler;
 
     /**
      * One byte read past a lone '[' at the header position and pushed back for the next

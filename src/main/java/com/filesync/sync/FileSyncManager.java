@@ -171,6 +171,10 @@ public class FileSyncManager {
         syncCoordinator.setProtocolExchangeGate(senderBlockingProtocolExchange::set);
         syncCoordinator.setCommunicationFailureReporter(
                 connectionService::reportCommunicationFailure);
+        // The manifest round-trip and the folder-context preflight both swap the command timeout
+        // for their own duration; sharing the exchange lock keeps a late preflight from restoring
+        // a temporary value on top of the session default (see SyncCoordinator.exchangeWindowLock).
+        syncCoordinator.setExchangeWindowLock(senderBlockingExchangeLock);
 
         protocol.setMessageActivityCallback(connectionService::recordMessageActivity);
         protocol.setBaseStaleHandler(syncCoordinator::handleIncomingBaseStale);
