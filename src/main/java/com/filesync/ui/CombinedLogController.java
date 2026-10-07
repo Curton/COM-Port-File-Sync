@@ -108,7 +108,8 @@ public class CombinedLogController {
     private boolean canFetchRemoteLog() {
         return syncManager.isConnectionAlive()
                 && syncManager.isSender()
-                && !syncManager.isTransferBusy();
+                && !syncManager.isTransferBusy()
+                && syncManager.isRoleNegotiated();
     }
 
     /** Package-private for tests: the right-click menu entry, whose text is drawn centered. */
@@ -128,6 +129,12 @@ public class CombinedLogController {
         }
         if (!syncManager.isSender()) {
             logController.log("Only the sender can save the combined log");
+            return;
+        }
+        // After a reconnect isSender() still holds the pre-disconnect role until negotiation
+        // completes, and the role can flip — do not fetch on a stale role.
+        if (!syncManager.isRoleNegotiated()) {
+            logController.log("Cannot save combined log until role negotiation completes");
             return;
         }
         if (syncManager.isTransferBusy()) {

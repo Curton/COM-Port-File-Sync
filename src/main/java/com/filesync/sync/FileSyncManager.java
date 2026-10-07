@@ -331,7 +331,10 @@ public class FileSyncManager {
         connectionAlive.set(false);
         roleNegotiated.set(false);
         syncing.set(false);
-        protocol.clearStashedMessages();
+        // Defense in depth: by reconnect time any lingering worker from the previous session
+        // has unwound, so this reset always lands after the orphans are gone; sitting below the
+        // running early-exit above keeps it scoped to fresh starts only.
+        resetSessionScopedState();
 
         ensureExecutor();
         connectionService.setExecutor(executor);
@@ -351,6 +354,23 @@ public class FileSyncManager {
         return connectionService.waitForConnection(timeoutMs);
     }
 
+    /**
+     * Force-clears every session-scoped flag that the teardown threads clear only in their finally
+     * blocks. A worker blocked in an uninterruptible native serial read can outlive the teardown
+     * (and the user's reconnect) for seconds; until it unwinds, a stuck-true
+     * xmodemInProgress/awaitingCommand/drop-transfer gate makes isTransferBusy() refuse every
+     * operation, parks the listener loop and freezes heartbeat liveness detection for the fresh
+     * session. Clearing is idempotent and race-safe — the late worker's own finally merely
+     * re-clears the same flags.
+     */
+    private void resetSessionScopedState() {
+        protocol.resetSessionState();
+        senderBlockingProtocolExchange.set(false);
+        fileDropService.resetTransferInProgress();
+        syncCoordinator.resetForLinkLoss();
+        lastTransferCancelAtMillis = 0;
+    }
+
     /** Stop listening and tear down background tasks. */
     public void stopListening() {
         running.set(false);
@@ -368,7 +388,9 @@ public class FileSyncManager {
                                     + String.join(
                                             ", ", pendingFileWriteService.getPendingPaths())));
         }
-        protocol.clearStashedMessages();
+        // Must land before the close: the close bumps the port epoch that ends this session, and
+        // the fresh session has to start from clean flags, not leftovers of the dying one.
+        resetSessionScopedState();
         serialPort.close();
 
         if (listenerFuture != null) {
@@ -631,7 +653,13 @@ public class FileSyncManager {
         final long TIMEOUT_MS =
                 10000; // 10 seconds - may need adjustment for slow serial connections
         return blockingPeerFetch(
-                () -> isSender() && connectionAlive.get() && syncFolder != null,
+                // After a reconnect the role may re-negotiate to the opposite side (or flip),
+                // so a fetch must not run on the stale pre-disconnect role (mirrors previewSync).
+                () ->
+                        isSender()
+                                && connectionAlive.get()
+                                && syncFolder != null
+                                && roleNegotiated.get(),
                 () ->
                         protocol.sendCommand(
                                 SyncProtocol.CMD_FILE_CONTENT_REQ,
@@ -682,8 +710,12 @@ public class FileSyncManager {
 
     String fetchRemoteLogText(long timeoutMs) {
         return blockingPeerFetch(
-                () -> isSender() && connectionAlive.get(),
+                // After a reconnect the role may re-negotiate to the opposite side (or flip),
+                // so a fetch must not run on the stale pre-disconnect role (mirrors previewSync).
+                () -> isSender() && connectionAlive.get() && roleNegotiated.get(),
                 () -> {
+                    // Pin this exchange to the current serial session (see the epoch checks below).
+                    long portEpoch = serialPort.currentEpoch();
                     // Ask the remote peer to log a TIME-SYNC marker before its log is fetched, so
                     // the combined-log save can align the two machines' clocks. Best-effort: a
                     // peer that does not ACK within the timeout (or an IO failure) falls back to
@@ -691,7 +723,9 @@ public class FileSyncManager {
                     try {
                         protocol.sendLogMarkerRequest();
                         long markerDeadline = System.currentTimeMillis() + timeoutMs;
-                        while (System.currentTimeMillis() < markerDeadline) {
+                        // Stop waiting once the port was closed/reopened under this fetch.
+                        while (System.currentTimeMillis() < markerDeadline
+                                && serialPort.currentEpoch() == portEpoch) {
                             SyncProtocol.Message markerResponse = protocol.receiveCommand();
                             if (markerResponse == null) {
                                 try {
@@ -714,6 +748,11 @@ public class FileSyncManager {
                         // timestamps.
                     }
 
+                    // Never write CMD_LOG_REQ into a reopened port — abort the whole exchange
+                    // instead (the marker wait above may have exited for exactly this reason).
+                    if (serialPort.currentEpoch() != portEpoch) {
+                        throw new IOException("Serial session changed during log fetch");
+                    }
                     protocol.sendCommand(SyncProtocol.CMD_LOG_REQ);
                 },
                 timeoutMs,
@@ -783,6 +822,7 @@ public class FileSyncManager {
             if (!ready.getAsBoolean()) {
                 return null;
             }
+            final long portEpoch = serialPort.currentEpoch();
 
             senderBlockingProtocolExchange.set(true);
             protocol.setAwaitingCommand(true);
@@ -792,6 +832,13 @@ public class FileSyncManager {
 
                 long startTime = System.currentTimeMillis();
                 while (System.currentTimeMillis() - startTime < timeoutMs) {
+                    // The guard was only checked at entry: an orphaned fetch (SwingWorker
+                    // threads survive executor shutdown) must stop when the link died or the
+                    // port was closed and reopened underneath it, or it keeps stealing the
+                    // new session's frames.
+                    if (!ready.getAsBoolean() || serialPort.currentEpoch() != portEpoch) {
+                        return null;
+                    }
                     SyncProtocol.Message msg = protocol.receiveCommand();
                     if (msg == null) {
                         try {
@@ -1249,6 +1296,11 @@ public class FileSyncManager {
         // to the initial disconnected state (the ConnectionEvent(false) posted by markLost
         // drives that transition).
         resetSyncStateForLinkTransition(false);
+        // Mirror the user-cancel path (cancelSync) so the lingering sync worker's blocking read
+        // unwinds promptly instead of lingering past the user's reconnect; the interrupt-driven
+        // IOException surfaces as a cancellation. No peer CAN notification here — the link is
+        // already dead.
+        syncCoordinator.interruptOngoingSync();
         stopListening();
     }
 

@@ -1,6 +1,7 @@
 package com.filesync.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -153,6 +154,33 @@ class SyncProtocolWaitForCommandTest {
         protocol.clearStashedMessages();
 
         assertNull(protocol.pollStashedMessage());
+    }
+
+    /**
+     * Regression for stale session state surviving a disconnect/reconnect: a worker that dies
+     * inside an uninterruptible serial read leaves its flags set for seconds, and a stuck-true
+     * awaitingCommand parks the listener loop of the next session. The teardown path calls {@code
+     * resetSessionState}, which must force-clear both the wait flag and the stashed backlog from
+     * the dying session.
+     */
+    @Test
+    void resetSessionStateClearsAwaitingCommandAndStashedMessages() {
+        ScriptedProtocol protocol = new ScriptedProtocol();
+        // Dirty the session-scoped state exactly the way a wedged worker leaves it behind: the
+        // listener-loop pause gate plus a stashed frame from an aborted synchronous exchange.
+        protocol.setAwaitingCommand(true);
+        protocol.stashAsyncMessage(
+                new Message(SyncProtocol.CMD_SHARED_TEXT, new String[] {"1", "c3RhbGU="}));
+        assertTrue(protocol.isAwaitingCommand(), "Fixture: the wait flag starts out set");
+
+        protocol.resetSessionState();
+
+        assertFalse(
+                protocol.isAwaitingCommand(),
+                "the listener-loop pause gate must be force-cleared by the session reset");
+        assertNull(
+                protocol.pollStashedMessage(),
+                "stashed frames from the old session must be discarded by the session reset");
     }
 
     @Test

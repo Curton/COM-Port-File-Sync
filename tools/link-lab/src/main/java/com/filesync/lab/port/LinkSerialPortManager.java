@@ -94,6 +94,9 @@ public final class LinkSerialPortManager extends SerialPortManager {
                     this.portName = portName;
                     attachChannels(port.getInputStream(), port.getOutputStream());
                     this.open = true;
+                    // The real open() records a session transition; this override never calls
+                    // super, so record it here too.
+                    bumpSessionEpoch();
                     // Same settling drain the real manager performs: drop whatever a previous
                     // session left in the driver buffers before any protocol byte is read.
                     try {
@@ -161,6 +164,8 @@ public final class LinkSerialPortManager extends SerialPortManager {
             serialPort.closePort();
         }
         serialPort = null;
+        // The real close() records a session transition; this override never calls super.
+        bumpSessionEpoch();
         trace.log(Trace.Dir.WIRE, "closed " + portName);
     }
 

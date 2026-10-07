@@ -8,6 +8,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages serial port communication using jSerialComm library. Provides methods for listing,
@@ -29,6 +30,14 @@ public class SerialPortManager {
     private int dataBits;
     private int stopBits;
     private int parity;
+
+    /**
+     * Monotonic port-session epoch, bumped on every successful open and on every close. Loops that
+     * live across a teardown (e.g. an XMODEM transfer between blocks) capture it and abort when it
+     * changes, so a thread from a dead session cannot keep reading from and writing to a reopened
+     * port: those streams belong to the new session.
+     */
+    private final AtomicLong sessionEpoch = new AtomicLong();
 
     public SerialPortManager() {
         this.baudRate = DEFAULT_BAUD_RATE;
@@ -78,6 +87,10 @@ public class SerialPortManager {
                 if (serialPort.openPort()) {
                     inputStream = serialPort.getInputStream();
                     outputStream = serialPort.getOutputStream();
+                    // A new port session just began: bump the epoch so any loop still running
+                    // from the previous session sees the change at its next iteration and stops
+                    // touching the port (its streams are the new session's now).
+                    bumpSessionEpoch();
                     // Drain any stale data that may be lingering in hardware/driver
                     // buffers from a previous session. On reconnect, the UART FIFO
                     // can hold residual bytes that clearInputBuffer alone won't
@@ -128,6 +141,27 @@ public class SerialPortManager {
         inputStream = null;
         outputStream = null;
         serialPort = null;
+        // Teardown is a session transition too: bump so loops from the closed session observe
+        // it. A later open() bumps again; both directions of the transition must be visible.
+        bumpSessionEpoch();
+    }
+
+    /**
+     * Current port-session epoch. Changes on every successful {@code open} and every {@code close};
+     * long-lived transfer loops capture it when they start and abort once it moves, so they cannot
+     * keep reading/writing a port that was closed and reopened underneath them.
+     */
+    public long currentEpoch() {
+        return sessionEpoch.get();
+    }
+
+    /**
+     * Marks a port-session transition. Subclasses that override {@link #open(String)} or {@link
+     * #close()} without calling super must call this from their overrides, or epoch-fenced loops
+     * ({@link #currentEpoch()}) never observe the session change.
+     */
+    protected void bumpSessionEpoch() {
+        sessionEpoch.incrementAndGet();
     }
 
     /** Check if port is open */

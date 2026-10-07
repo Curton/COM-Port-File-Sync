@@ -2677,6 +2677,21 @@ public class SyncProtocol {
         xmodemInProgress.set(false);
     }
 
+    /**
+     * Force-clears every session-scoped transfer/wait flag and the stashed-message queue. Unlike
+     * the try/finally blocks that normally clear these, this runs synchronously on link teardown
+     * and again on reconnect: a worker that died inside an uninterruptible serial read may leave a
+     * flag set for seconds, and a stuck-true xmodemInProgress/awaitingCommand parks the listener
+     * loop and freezes liveness detection for the whole next session. Clearing is idempotent and
+     * race-safe — a late worker's own finally merely re-clears the same flags.
+     */
+    public void resetSessionState() {
+        xmodemInProgress.set(false);
+        awaitingCommand.set(false);
+        interleaveSuppressed.set(false);
+        stashedMessages.clear();
+    }
+
     private byte[] readFileContent(File file) throws IOException {
         long fileSize = file.length();
         if (fileSize > Integer.MAX_VALUE) {

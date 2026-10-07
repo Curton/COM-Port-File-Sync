@@ -848,6 +848,22 @@ public class SyncCoordinator {
     }
 
     /**
+     * Force-clears session-scoped bookkeeping when the serial link is torn down. The lingering
+     * worker of the aborted sync unwinds asynchronously (its blocking serial read only fails on the
+     * next timeout), so without this its late cleanup could still reference the old session and a
+     * stuck receiverWriteFailures set would leak into the next session's completion report. Called
+     * by FileSyncManager on disconnect and again on reconnect; clearing activeSyncSession also
+     * makes the late worker's cleanupAfterWorker guard skip, so it cannot tear down state a new
+     * sync already installed. The shared syncing flag is the manager's to clear, not ours.
+     */
+    public void resetForLinkLoss() {
+        activeSyncSession = null;
+        syncWorkerFuture = null;
+        activeSignatureCache = null;
+        receiverWriteFailures.clear();
+    }
+
+    /**
      * Check if sync cancellation has been requested and exit early if so. Used between operation
      * groups in performSync() to allow early cancellation. The finally block in performSync()
      * handles cleanup.
@@ -2533,23 +2549,36 @@ public class SyncCoordinator {
         } catch (TransferCancelledException e) {
             // The peer aborted the session (its user clicked cancel). A peer cancel applies to
             // the whole sync, so stop here instead of pushing the remaining files it refused.
-            eventBus.post(new SyncEvent.LogEvent("Sync cancelled by remote"));
-            eventBus.post(new SyncEvent.SyncCancelledEvent());
+            // When the link is already down (local teardown), this late "cancelled by remote"
+            // notice would only confuse the next session's log; the worker still exits through
+            // its finally.
+            if (connectionAliveSupplier.getAsBoolean()) {
+                eventBus.post(new SyncEvent.LogEvent("Sync cancelled by remote"));
+                eventBus.post(new SyncEvent.SyncCancelledEvent());
+            }
         } catch (IOException e) {
             if (session.cancelRequested.get()) {
                 // The user's cancel interrupted a blocking serial read; surface it as a
-                // cancellation, not as a failed sync.
-                eventBus.post(new SyncEvent.LogEvent("Sync cancelled"));
-                eventBus.post(new SyncEvent.SyncCancelledEvent());
+                // cancellation, not as a failed sync. The link teardown itself may have
+                // cancelled this session (interruptOngoingSync unwinds the blocked read the
+                // same way), so only report when the link is still alive.
+                if (connectionAliveSupplier.getAsBoolean()) {
+                    eventBus.post(new SyncEvent.LogEvent("Sync cancelled"));
+                    eventBus.post(new SyncEvent.SyncCancelledEvent());
+                }
             } else {
                 // A read timeout means the peer stopped responding mid-exchange (link torn down
                 // on its side, cable pulled, ...). Fail the connection immediately so recovery
                 // starts instead of idling until the next heartbeat check declares the loss.
-                if (isReadTimeout(e)) {
-                    communicationFailureReporter.accept(
-                            "Connection lost - read timeout during sync: " + e.getMessage());
+                // When the link is already down the connection layer owns the loss, so a late
+                // "Sync failed" is noise; genuine failures on a live link still surface.
+                if (connectionAliveSupplier.getAsBoolean()) {
+                    if (isReadTimeout(e)) {
+                        communicationFailureReporter.accept(
+                                "Connection lost - read timeout during sync: " + e.getMessage());
+                    }
+                    eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
                 }
-                eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
             }
         } catch (RuntimeException e) {
             // Anything else escaping the worker used to die silently: the executor swallowed

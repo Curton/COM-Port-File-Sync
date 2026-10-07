@@ -83,6 +83,9 @@ public class RoleNegotiationService {
         roleNegotiated.set(false);
         refreshPriority();
         refreshTieBreaker();
+        // A stale pre-disconnect rate-limit stamp must not delay the post-reconnect retry by
+        // up to NEGOTIATION_RETRY_INTERVAL_MS.
+        lastNegotiationSent.set(0);
     }
 
     /**

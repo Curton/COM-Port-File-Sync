@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -535,6 +536,101 @@ class XModemTransferTest {
                 "the EOT must still end the session cleanly");
     }
 
+    @Test
+    @Timeout(20)
+    void receiveAbortsPromptlyWhenThePortSessionChangesUnderneathIt() throws Exception {
+        // No input is ever served: the receive parks in the handshake window, re-sending 'C'
+        // every 200ms for up to the 10 s window. Closing the port bumps the session epoch, and
+        // the next loop-head session check must abort — not ride out the rest of the window.
+        RecordingTestSerialPortManager serialPort = new RecordingTestSerialPortManager(new byte[0]);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        AtomicReference<IOException> failure = new AtomicReference<>();
+
+        Thread receiver =
+                new Thread(
+                        () -> {
+                            try {
+                                transfer.receiveInto(100, sink);
+                            } catch (IOException e) {
+                                failure.set(e);
+                            }
+                        },
+                        "xmodem-epoch-abort");
+        receiver.start();
+        long handshakeDeadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < handshakeDeadline
+                && countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.C}) < 1) {
+            Thread.sleep(10);
+        }
+        assertTrue(
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.C}) >= 1,
+                "the receive must first reach the handshake window (at least one 'C' sent)");
+
+        long closedAt = System.currentTimeMillis();
+        serialPort.close(); // bumps the port-session epoch, like a link teardown
+
+        receiver.join(5_000);
+        long elapsedMs = System.currentTimeMillis() - closedAt;
+
+        assertFalse(receiver.isAlive(), "the receive thread must abort, not hang");
+        assertNotNull(failure.get(), "the abort must surface as an IOException");
+        assertTrue(
+                failure.get().getMessage().contains("Serial session changed"),
+                "the failure must name the session change: " + failure.get().getMessage());
+        assertTrue(
+                elapsedMs < 2_000,
+                "the abort must be prompt ("
+                        + elapsedMs
+                        + " ms), far under the 10 s handshake"
+                        + " window");
+        assertEquals(
+                0,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.CAN}),
+                "a torn-down session must not write CAN into a port the next session owns");
+    }
+
+    @Test
+    @Timeout(20)
+    void receiveAfterAnAbortedLoneBracketPushbackStartsWithACleanByteState() throws Exception {
+        // First receive: '[' followed by a non-'[' byte whose read coincides with the port
+        // session being torn down. The lone-'[' branch stores the peeked byte in
+        // pushedBackByte, then the loop-head session check aborts the receive — leaving the
+        // stale byte in the (reused) transfer instance. A later receive on the same instance
+        // must not see that byte: the entry-point reset clears it. The stale byte is
+        // observable as a misread first header (a spurious NAK), so a zero-NAK clean receive
+        // proves the leak is gone.
+        RestageableTestSerialPortManager serialPort = new RestageableTestSerialPortManager();
+        serialPort.stage(new byte[] {'[', 'A'}, serialPort::teardownSession);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        IOException aborted = assertThrows(IOException.class, () -> transfer.receiveInto(10, sink));
+        assertTrue(
+                aborted.getMessage().contains("Serial session changed"),
+                "the first receive must die on the session change: " + aborted.getMessage());
+
+        byte[] payload = "clean payload".getBytes(StandardCharsets.UTF_8);
+        serialPort.startFreshSession(buildSohFrame(payload));
+        sink.reset();
+        // The aborted receive legitimately NAKed the stray '[' before dying; only the follow-up
+        // receive's writes count for the leak check.
+        int writesBeforeFollowUp = serialPort.getWrites().size();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "the follow-up receive must complete cleanly");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertEquals(
+                0,
+                countWrites(
+                        serialPort
+                                .getWrites()
+                                .subList(writesBeforeFollowUp, serialPort.getWrites().size()),
+                        new byte[] {XModemTransfer.NAK}),
+                "no stale pushed-back byte may leak into the follow-up receive");
+    }
+
     /** Build an input of one leading byte followed by {@code ackCount} ACK bytes. */
     private static byte[] buildInput(byte first, int ackCount) {
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
@@ -1046,6 +1142,89 @@ class XModemTransferTest {
         @Override
         public void write(byte[] data) {
             writes.add(data.clone());
+        }
+    }
+
+    /**
+     * Port manager whose scripted input can be swapped between receives, so one {@link
+     * XModemTransfer} instance can be driven across a port-session teardown and reopen (the
+     * instance is reused across reconnects in production). The optional {@code onLastByteRead}
+     * callback fires while the final scripted byte is being read, letting a test land a session
+     * teardown at an exact point inside the receive loop. {@code teardownSession} and {@code
+     * startFreshSession} bump the epoch exactly like a real close/open pair.
+     */
+    private static final class RestageableTestSerialPortManager extends SerialPortManager {
+        private volatile ByteArrayInputStream inputStream = new ByteArrayInputStream(new byte[0]);
+        private volatile Runnable onLastByteRead;
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+
+        void stage(byte[] input, Runnable onLastByteRead) {
+            this.inputStream = new ByteArrayInputStream(input);
+            this.onLastByteRead = onLastByteRead;
+        }
+
+        void teardownSession() {
+            bumpSessionEpoch();
+        }
+
+        void startFreshSession(byte[] input) {
+            stage(input, null);
+            bumpSessionEpoch();
+        }
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return inputStream.available();
+        }
+
+        @Override
+        public int read() {
+            int b = inputStream.read();
+            if (b >= 0 && inputStream.available() == 0 && onLastByteRead != null) {
+                Runnable callback = onLastByteRead;
+                onLastByteRead = null;
+                callback.run();
+            }
+            return b;
+        }
+
+        @Override
+        public byte[] readExact(int length, int timeoutMs) throws IOException {
+            byte[] data = new byte[length];
+            int bytesRead = 0;
+            while (bytesRead < length) {
+                int read = inputStream.read(data, bytesRead, length - bytesRead);
+                if (read < 0) {
+                    throw new IOException(
+                            "Unexpected end of stream while reading " + length + " bytes");
+                }
+                bytesRead += read;
+            }
+            return data;
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
+        }
+
+        @Override
+        public void clearInputBuffer() {
+            // Intentionally ignored in test.
         }
     }
 }

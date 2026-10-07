@@ -66,6 +66,15 @@ public class XModemTransfer {
     private int pushedBackByte = -1;
 
     /**
+     * The port-session epoch ({@link SerialPortManager#currentEpoch()}) captured when the current
+     * transfer started. Volatile because the port can be closed and reopened by another thread
+     * mid-transfer. Loop heads compare it with the live epoch and abort the transfer when it moves,
+     * so a thread from a torn-down session cannot keep reading from and writing to the port after
+     * the user reconnects: those bytes belong to the new session.
+     */
+    private volatile long transferSessionEpoch;
+
+    /**
      * Stores the last human-readable error message for diagnostics. Higher level code (e.g.
      * SyncProtocol) can use this to provide more detailed context when reporting failures.
      */
@@ -100,6 +109,11 @@ public class XModemTransfer {
     /** Send data using XMODEM protocol (supports 4096/1024/128-byte blocks) */
     public boolean send(byte[] data) throws IOException {
         cancelSignalled = false;
+        // A transfer aborted right after a lone-'[' pushback must not leak its pushed-back byte
+        // into the next transfer: this instance is reused across reconnects.
+        pushedBackByte = -1;
+        // Capture the port session this transfer runs on; loop heads abort when it changes.
+        transferSessionEpoch = serialPort.currentEpoch();
 
         // Wait for receiver to send 'C' to initiate CRC mode
         if (!waitForHandshake()) {
@@ -121,6 +135,7 @@ public class XModemTransfer {
         boolean interleaveDisabled = false;
 
         while (dataOffset < data.length) {
+            assertSessionCurrent();
             int remaining = data.length - dataOffset;
 
             // Choose block size: prefer 4K, then 1K, fall back to 128-byte for tiny tails
@@ -150,7 +165,7 @@ public class XModemTransfer {
                                     + MAX_RETRIES
                                     + " retries");
                 }
-                sendCancel();
+                sendCancelIfSessionCurrent();
                 return false;
             }
 
@@ -215,6 +230,11 @@ public class XModemTransfer {
      */
     public long receiveInto(int expectedDataLength, OutputStream sink) throws IOException {
         cancelSignalled = false;
+        // A transfer aborted right after a lone-'[' pushback must not leak its pushed-back byte
+        // into the next transfer: this instance is reused across reconnects.
+        pushedBackByte = -1;
+        // Capture the port session this transfer runs on; loop heads abort when it changes.
+        transferSessionEpoch = serialPort.currentEpoch();
 
         // Initiate transfer by sending 'C' for CRC mode
         if (!initiateReceive()) {
@@ -241,7 +261,7 @@ public class XModemTransfer {
 
             // Best-effort cancel to put the sender (if any) into a known state
             try {
-                sendCancel();
+                sendCancelIfSessionCurrent();
             } catch (IOException e) {
                 // Ignore secondary failure during cancel
             }
@@ -262,6 +282,7 @@ public class XModemTransfer {
 
         try {
             while (true) {
+                assertSessionCurrent();
                 int header = readByteWithTimeout(TIMEOUT_MS);
 
                 if (header == EOT) {
@@ -310,7 +331,7 @@ public class XModemTransfer {
                         retryCount++;
                         if (retryCount > MAX_RETRIES) {
                             reportError("Too many errors, aborting transfer");
-                            sendCancel();
+                            sendCancelIfSessionCurrent();
                             return -1;
                         }
                         serialPort.write(NAK);
@@ -328,7 +349,7 @@ public class XModemTransfer {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
                         reportError("Timed out reading block number, aborting transfer");
-                        sendCancel();
+                        sendCancelIfSessionCurrent();
                         return -1;
                     }
                     serialPort.write(NAK);
@@ -353,7 +374,7 @@ public class XModemTransfer {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
                         reportError("Too many block number errors, aborting transfer");
-                        sendCancel();
+                        sendCancelIfSessionCurrent();
                         return -1;
                     }
                     serialPort.write(NAK);
@@ -372,7 +393,7 @@ public class XModemTransfer {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
                         reportError("Timed out reading block CRC, aborting transfer");
-                        sendCancel();
+                        sendCancelIfSessionCurrent();
                         return -1;
                     }
                     serialPort.write(NAK);
@@ -383,7 +404,7 @@ public class XModemTransfer {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
                         reportError("Timed out reading block CRC, aborting transfer");
-                        sendCancel();
+                        sendCancelIfSessionCurrent();
                         return -1;
                     }
                     serialPort.write(NAK);
@@ -397,7 +418,7 @@ public class XModemTransfer {
                     retryCount++;
                     if (retryCount > MAX_RETRIES) {
                         reportError("Too many CRC errors, aborting transfer");
-                        sendCancel();
+                        sendCancelIfSessionCurrent();
                         return -1;
                     }
                     serialPort.write(NAK);
@@ -431,7 +452,10 @@ public class XModemTransfer {
 
             return written;
         } finally {
-            if (!transferCompleted && !cancelSignalled) {
+            // sessionStillCurrent(): a torn-down session must exit silently. After a reconnect
+            // these streams belong to the NEW session, and a CAN written by the old session's
+            // abort path would corrupt it.
+            if (!transferCompleted && !cancelSignalled && sessionStillCurrent()) {
                 // Every exit that is not a clean EOT must leave the sender told to stop. The
                 // retry-exhaustion exits above already sent CAN on their way out and firing
                 // again here is deliberate: CANs are idempotent, and a few spaced re-sends are
@@ -453,12 +477,13 @@ public class XModemTransfer {
      * healthy link because the writer flushes immediately.
      *
      * <p>Stops early on interrupt (checked at the head of each round, not only when a sleep throws)
-     * so a cancel-driven shutdown does not have to wait out the retries, and skips the trailing
-     * pause so nothing is slept after the final attempt.
+     * so a cancel-driven shutdown does not have to wait out the retries, and likewise on a
+     * port-session change: the streams then belong to the new session, and a stale CAN would
+     * corrupt it. Also skips the trailing pause so nothing is slept after the final attempt.
      */
     private void sendCancelWithRetry() {
         for (int attempt = 0; attempt < CAN_RESEND_ATTEMPTS; attempt++) {
-            if (Thread.currentThread().isInterrupted()) {
+            if (Thread.currentThread().isInterrupted() || !sessionStillCurrent()) {
                 return;
             }
             try {
@@ -486,12 +511,14 @@ public class XModemTransfer {
         // already arrived by now; discarding it would stall the session until the receiver's
         // next re-send cycle. Drain stale bytes but keep an early 'C'.
         while (serialPort.available() > 0) {
+            assertSessionCurrent();
             if ((serialPort.read() & 0xFF) == C) {
                 return true;
             }
         }
 
         while (System.currentTimeMillis() - startTime < HANDSHAKE_TIMEOUT_MS) {
+            assertSessionCurrent();
             int b = readByteWithTimeout(1000);
             if (b == C) {
                 return true;
@@ -519,6 +546,7 @@ public class XModemTransfer {
         try {
             long quietUntil = System.currentTimeMillis() + HANDSHAKE_DRAIN_QUIET_MS;
             while (System.currentTimeMillis() < quietUntil) {
+                assertSessionCurrent();
                 if (serialPort.available() > 0) {
                     int b = serialPort.read() & 0xFF;
                     if (b != C && b != NAK) {
@@ -535,6 +563,7 @@ public class XModemTransfer {
 
         // Drain any 'C' or NAK chars that arrived as the window closed
         while (serialPort.available() > 0) {
+            assertSessionCurrent();
             int b = serialPort.read() & 0xFF;
             if (b != C && b != NAK) {
                 // Unexpected byte, stop draining
@@ -551,10 +580,12 @@ public class XModemTransfer {
         // keeps the former MAX_RETRIES x 1s budget.
         long deadline = System.currentTimeMillis() + RECEIVE_HANDSHAKE_WINDOW_MS;
         while (System.currentTimeMillis() < deadline) {
+            assertSessionCurrent();
             serialPort.write(C);
 
             long waitStart = System.currentTimeMillis();
             while (System.currentTimeMillis() - waitStart < HANDSHAKE_RESEND_INTERVAL_MS) {
+                assertSessionCurrent();
                 if (serialPort.available() > 0) {
                     return true;
                 }
@@ -582,6 +613,7 @@ public class XModemTransfer {
         packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
+            assertSessionCurrent();
             // Clear any stale 'C' chars before sending (especially on retry)
             while (serialPort.available() > 0) {
                 int stale = serialPort.read() & 0xFF;
@@ -691,6 +723,33 @@ public class XModemTransfer {
         // Send CAN twice to ensure it's received
         serialPort.write(CAN);
         serialPort.write(CAN);
+    }
+
+    /** True while the port session this transfer started on is still the current one. */
+    private boolean sessionStillCurrent() {
+        return serialPort.currentEpoch() == transferSessionEpoch;
+    }
+
+    /**
+     * Aborts the transfer when the port was closed/reopened underneath it (link teardown followed
+     * by a user reconnect): continuing would read and write the NEW session's stream.
+     */
+    private void assertSessionCurrent() throws IOException {
+        if (!sessionStillCurrent()) {
+            throw new IOException("Serial session changed since the transfer started");
+        }
+    }
+
+    /**
+     * Sends the CAN abort for a failing transfer, but only while the port session the transfer
+     * started on is still current. After a teardown followed by a reconnect the port's streams
+     * belong to the new session, and a CAN written by an old-session abort path would corrupt it,
+     * so an old-session failure must stay silent instead.
+     */
+    private void sendCancelIfSessionCurrent() throws IOException {
+        if (sessionStillCurrent()) {
+            sendCancel();
+        }
     }
 
     private int readByteWithTimeout(int timeoutMs) throws IOException {

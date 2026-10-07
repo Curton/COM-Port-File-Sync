@@ -270,6 +270,84 @@ class TwoEndedRegressionTest {
         awaitFileContent(firstReceiver.workspace(), "before.bin", before);
     }
 
+    /**
+     * The user's field scenario this suite guards: the link dies while an XMODEM transfer is in
+     * flight, both ends reconnect, and every operation must work again on the fresh session. No
+     * stale state of the dying session — a stuck-true transfer flag, a parked blocking exchange —
+     * may survive the teardown, or the reconnected pair can neither sync ("operation in progress")
+     * nor fetch the combined log. Three things are asserted after the reconnect: both managers
+     * report transfer-idle, a full sync completes, and the combined-log fetch (the sender's
+     * blocking log exchange) returns non-null once the roles have re-negotiated.
+     */
+    @Test
+    @Timeout(240)
+    void reconnectAfterMidTransferDropLeavesNoStaleTransferState() throws Exception {
+        RemotePeer sender = sender();
+        RemotePeer receiver = receiver();
+        // Large enough that the link dies safely inside the XMODEM phase: at the test's baud the
+        // wire carries ~46 kB/s, so a 1 MB payload keeps blocks flying for ~20 s.
+        byte[] payload = randomBytes(1_000_000);
+        writeFile(sender.workspace(), "mid-transfer.bin", payload);
+
+        // TRANSFER_PROGRESS only fires while XMODEM blocks are actually crossing the wire.
+        AtomicInteger transferBlocksFlown = new AtomicInteger();
+        sender.manager()
+                .getEventBus()
+                .register(
+                        event -> {
+                            if (event.getType() == SyncEventType.TRANSFER_PROGRESS) {
+                                transferBlocksFlown.incrementAndGet();
+                            }
+                        });
+
+        sender.sync();
+        await("transfer in flight", () -> transferBlocksFlown.get() > 0, AWAIT_MS);
+        assertFalse(
+                fileContentMatches(receiver.workspace(), "mid-transfer.bin", payload),
+                "the drop must land while the transfer is still incomplete");
+
+        // Pull the cable mid-transfer; both stacks must tear down (the dead port fails every
+        // read/write, and the heartbeat/timeout paths do the rest).
+        link.unplug();
+        await(
+                "both sides notice the dead link mid-transfer",
+                () ->
+                        !app.isConnected()
+                                && !peer.isConnected()
+                                && !app.manager().isRunning()
+                                && !peer.manager().isRunning(),
+                AWAIT_MS);
+
+        // Reconnect both ends the way the user does: replug, then Connect on each machine.
+        link.replug();
+        app.restart();
+        peer.restart();
+        awaitSessionAlive();
+
+        // (1) No stale transfer-busy state may survive into the fresh session on either end.
+        await(
+                "both ends transfer-idle after the reconnect",
+                () ->
+                        !app.manager().isTransferBusy() && !peer.manager().isTransferBusy(),
+                15_000);
+
+        // (2) A full sync on the re-negotiated roles must complete: drop any partial file the
+        // aborted transfer left, then move the whole payload across the fresh session.
+        RemotePeer retrySender = sender();
+        RemotePeer retryReceiver = receiver();
+        Files.deleteIfExists(new File(retryReceiver.workspace(), "mid-transfer.bin").toPath());
+        writeFile(retrySender.workspace(), "mid-transfer.bin", payload);
+        retrySender.sync();
+        awaitFileContent(retryReceiver.workspace(), "mid-transfer.bin", payload);
+        awaitSyncIdle();
+
+        // (3) The combined-log fetch — the sender-side blocking exchange the UI's "save combined
+        // log" runs — must succeed on the re-negotiated session.
+        String remoteLog = retrySender.manager().fetchRemoteLogText();
+        assertNotNull(
+                remoteLog, "the combined-log fetch must return the remote log after a reconnect");
+    }
+
     @Test
     @Timeout(180)
     void syncSurvivesALossyWire() throws Exception {

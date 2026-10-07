@@ -65,12 +65,15 @@ class ScriptedSerialPortManager extends SerialPortManager {
     public boolean open(String portName) {
         this.portName = portName;
         open.set(true);
+        // Same transition the real open() records.
+        bumpSessionEpoch();
         return true;
     }
 
     @Override
     public void close() {
         open.set(false);
+        bumpSessionEpoch();
     }
 
     @Override

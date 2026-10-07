@@ -86,8 +86,11 @@ public class FileDropService {
             logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
-            eventBus.post(
-                    new SyncEvent.ErrorEvent("Failed to send dropped file: " + e.getMessage()));
+            // After teardown the late failure report would only confuse the next session's log.
+            if (runningSupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.ErrorEvent("Failed to send dropped file: " + e.getMessage()));
+            }
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
@@ -166,8 +169,12 @@ public class FileDropService {
             logPeerCancel(e);
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } catch (IOException e) {
-            eventBus.post(
-                    new SyncEvent.ErrorEvent("Failed to receive dropped file: " + e.getMessage()));
+            // After teardown the late failure report would only confuse the next session's log.
+            if (runningSupplier.getAsBoolean()) {
+                eventBus.post(
+                        new SyncEvent.ErrorEvent(
+                                "Failed to receive dropped file: " + e.getMessage()));
+            }
             eventBus.post(new SyncEvent.SyncControlRefreshEvent());
         } finally {
             transferInProgress.set(false);
@@ -184,6 +191,15 @@ public class FileDropService {
 
     public boolean isTransferInProgress() {
         return transferInProgress.get();
+    }
+
+    /**
+     * Force-clears the drop-transfer gate on link teardown/reconnect. The in-flight drop's thread
+     * clears it in a finally only after its blocking serial read fails; until then a stuck-true
+     * flag makes isTransferBusy() refuse every new operation right after a reconnect.
+     */
+    public void resetTransferInProgress() {
+        transferInProgress.set(false);
     }
 
     private File getDownloadsDirectory() {

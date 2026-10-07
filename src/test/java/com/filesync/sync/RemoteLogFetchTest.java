@@ -62,6 +62,40 @@ class RemoteLogFetchTest {
         stopQuietly(fsm);
     }
 
+    /**
+     * Documents the new precondition: liveness alone is not enough. Until role negotiation
+     * completes, {@code fetchRemoteLogText} must refuse the exchange at entry — a session that
+     * reconnected but has not settled its role yet must not run a blocking exchange on a stale
+     * pre-disconnect role (mirrors {@code previewSync}).
+     */
+    @Test
+    void fetchRemoteLogText_returnsNull_whenConnectedButNotRoleNegotiated() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        try {
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+            // Default state: this side is the sender, but no ROLE_NEGOTIATE exchange has
+            // completed, so the session is live yet un-negotiated.
+            assertTrue(fsm.isSender(), "Fixture: the default role is sender");
+            assertFalse(fsm.isRoleNegotiated(), "Fixture: no role negotiation has completed");
+
+            assertNull(
+                    fsm.fetchRemoteLogText(SHORT_TIMEOUT_MS),
+                    "A connected-but-un-negotiated session must not fetch the remote log");
+            assertTrue(
+                    serial.getWrittenLines().stream()
+                            .noneMatch(
+                                    line ->
+                                            line.contains("LOG_MARKER_REQ")
+                                                    || line.contains("LOG_REQ")),
+                    "No fetch frames may hit the wire before negotiation completes");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
     @Test
     void fetchRemoteLogText_requestsMarkerBeforeLog() throws Exception {
         ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
@@ -561,12 +595,20 @@ class RemoteLogFetchTest {
         }
     }
 
-    /** Connect (HEARTBEAT) and wait until the manager reports the connection alive. */
+    /**
+     * Connect (HEARTBEAT) and wait until the manager reports the connection alive, then settle the
+     * session as a negotiated sender. The fetch guards require a completed role negotiation on top
+     * of liveness (a stale pre-disconnect role must not run an exchange after a reconnect), so the
+     * scripted session has to look like a negotiated one: {@code setIsSender(true)} sets isSender
+     * and roleNegotiated synchronously, exactly the state a successful ROLE_NEGOTIATE exchange
+     * leaves behind.
+     */
     private static void startConnected(FileSyncManager fsm, ScriptedSerialPortManager serial)
             throws Exception {
         fsm.startListening("TEST");
         serial.feedLine("[[SYNC:HEARTBEAT]]");
         waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+        fsm.setIsSender(true);
     }
 
     /**

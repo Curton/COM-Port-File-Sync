@@ -230,10 +230,7 @@ class FileSyncManagerTest {
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         fsm.setSyncFolder(folder);
         try {
-            fsm.startListening("TEST");
-
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+            startConnectedAsSender(fsm, serial);
 
             byte[] expected = "remote-content".getBytes(StandardCharsets.UTF_8);
             String encodedPath = SyncProtocol.encodePathForProtocol("remote.txt");
@@ -285,10 +282,7 @@ class FileSyncManagerTest {
         FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
         fsm.setSyncFolder(folder);
         try {
-            fsm.startListening("TEST");
-
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+            startConnectedAsSender(fsm, serial);
 
             byte[] contentA = "content-a".getBytes(StandardCharsets.UTF_8);
             byte[] contentB = "content-b".getBytes(StandardCharsets.UTF_8);
@@ -431,10 +425,7 @@ class FileSyncManagerTest {
         List<SyncEvent> events = new CopyOnWriteArrayList<>();
         fsm.getEventBus().register(events::add);
         try {
-            fsm.startListening("TEST");
-
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+            startConnectedAsSender(fsm, serial);
 
             byte[] expected = new byte[100];
             for (int i = 0; i < expected.length; i++) {
@@ -578,10 +569,7 @@ class FileSyncManagerTest {
         List<SyncEvent> events = new CopyOnWriteArrayList<>();
         fsm.getEventBus().register(events::add);
         try {
-            fsm.startListening("TEST");
-
-            serial.feedLine("[[SYNC:HEARTBEAT]]");
-            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+            startConnectedAsSender(fsm, serial);
 
             // Scripted peer: ACK the TIME-SYNC marker request, announce a LOG_XFER transfer
             // once this side asks for the log, then abort it with CAN before any block.
@@ -625,6 +613,75 @@ class FileSyncManagerTest {
         } finally {
             stopQuietly(fsm);
         }
+    }
+
+    /**
+     * Regression test for stale session state surviving a serial disconnect/reconnect: a log fetch
+     * whose blocking exchange is in flight when the link is torn down must unwind quietly, leave no
+     * stuck transfer-busy flags, and not interfere with a fresh session started on the same
+     * manager. Before the fix, flags cleared only in worker finally-blocks stayed set for seconds
+     * after the teardown, so the reconnected session could neither sync nor fetch the combined log.
+     */
+    @Test
+    void midExchangeDisconnect_clearsSessionStateAndAllowsFreshReconnect() throws Exception {
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        try {
+            startConnectedAsSender(fsm, serial);
+
+            // Park a fetch mid-exchange: the marker request on the wire proves the blocking
+            // exchange is active and the fetch thread is waiting for the peer's marker ACK.
+            AtomicReference<String> fetchResult = new AtomicReference<>("not-set");
+            Thread fetcher =
+                    new Thread(
+                            () -> fetchResult.set(fsm.fetchRemoteLogText(20_000)),
+                            "fsm-test-fetch-disconnect");
+            fetcher.start();
+            waitUntil(
+                    () -> serial.getWrittenLines().contains("[[SYNC:LOG_MARKER_REQ]]"),
+                    Duration.ofSeconds(5));
+
+            // Teardown path (resetSessionScopedState + port close / epoch bump), the same one a
+            // link loss or the user's disconnect takes.
+            fsm.disconnect(false);
+
+            fetcher.join(5_000);
+            assertFalse(
+                    fetcher.isAlive(),
+                    "The in-flight fetch thread must terminate after disconnect");
+            assertNull(fetchResult.get(), "A fetch aborted by teardown must yield null");
+            assertFalse(
+                    fsm.isTransferBusy(),
+                    "Teardown must force-clear transfer-busy state instead of waiting for the"
+                            + " aborted worker's finally block");
+            assertFalse(fsm.isRunning(), "Listen loop should be stopped after disconnect");
+
+            // The fresh session must come up cleanly on the same manager: no leftover flag from
+            // the aborted exchange may park the new listener loop or freeze liveness detection.
+            // The reconnect flow reopens the port (bumping the epoch again) before listening.
+            serial.open("TEST");
+            fsm.startListening("TEST");
+            serial.feedLine("[[SYNC:HEARTBEAT]]");
+            waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    /**
+     * Connect (HEARTBEAT) and wait until the manager reports the connection alive, then settle the
+     * session as a negotiated sender. The fetch guards require a completed role negotiation on top
+     * of liveness (a stale pre-disconnect role must not run an exchange after a reconnect), so the
+     * scripted session has to look like a negotiated one: {@code setIsSender(true)} sets isSender
+     * and roleNegotiated synchronously, exactly the state a successful ROLE_NEGOTIATE exchange
+     * leaves behind.
+     */
+    private static void startConnectedAsSender(
+            FileSyncManager fsm, ScriptedSerialPortManager serial) throws Exception {
+        fsm.startListening("TEST");
+        serial.feedLine("[[SYNC:HEARTBEAT]]");
+        waitUntil(fsm::isConnectionAlive, Duration.ofSeconds(5));
+        fsm.setIsSender(true);
     }
 
     private static void waitUntil(BooleanSupplier condition, Duration timeout) {
