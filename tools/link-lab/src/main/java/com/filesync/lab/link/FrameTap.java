@@ -132,10 +132,17 @@ final class FrameTap {
         return true;
     }
 
-    /** Length of the trailing run of bytes that is a prefix of the start marker. */
+    /**
+     * Length of the trailing run of bytes that is a prefix of the start marker. A single {@code
+     * '['} is deliberately NOT held back: it is an ordinary XMODEM data byte (1-in-256 of every
+     * block), and parking it until the next write delays real transfer data by a whole sender
+     * retry cycle — a holdback no real serial driver produces. Frames still detected: the split
+     * has to land exactly after the first {@code '['} for a frame to slip past the tap, and the
+     * bytes still reach the peer untouched either way.
+     */
     private static int trailingStartPrefix(byte[] data, int from, int to) {
         int max = Math.min(START.length - 1, to - from);
-        for (int keep = max; keep > 0; keep--) {
+        for (int keep = max; keep >= 2; keep--) {
             boolean match = true;
             for (int i = 0; i < keep; i++) {
                 if (data[to - keep + i] != START[i]) {

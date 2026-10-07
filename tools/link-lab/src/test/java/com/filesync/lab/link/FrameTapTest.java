@@ -166,6 +166,20 @@ class FrameTapTest {
     }
 
     @Test
+    void singleTrailingBracketIsForwardedImmediately() {
+        // 0x5B is an ordinary XMODEM data byte (one in 256 of every block). Parking a lone '['
+        // until the next write delayed real transfer data by a full sender retry cycle — a
+        // holdback no real serial driver produces. Only a run of two or more brackets can still
+        // open a frame and is worth holding.
+        FrameTap tap = new FrameTap(noRules, trace, Trace.Dir.APP_TO_PEER, new WireStats());
+        byte[] block = {0x01, 0x01, (byte) 0xFE, 0x0A, '['};
+        process(block, tap);
+        assertPassedBytes(List.of(block));
+        process("x", tap);
+        assertPassedBytes(List.of(block, new byte[] {'x'}));
+    }
+
+    @Test
     void trailingBytesThatCannotOpenAFrameAreForwardedImmediately() {
         FrameTap tap = new FrameTap(noRules, trace, Trace.Dir.APP_TO_PEER, new WireStats());
         process("payload[[Z", tap);
