@@ -122,6 +122,9 @@ public class SyncCoordinator {
     /** Confirmed paths since the last receiver-side flush (see {@link #CONFIRM_FLUSH_INTERVAL}). */
     private final AtomicInteger confirmsSinceFlush = new AtomicInteger(0);
 
+    /** Delivered paths since the last sender-side flush (see {@link #CONFIRM_FLUSH_INTERVAL}). */
+    private final AtomicInteger deliveredSinceFlush = new AtomicInteger(0);
+
     /**
      * Cancellation token of one sync session. A shared flag cannot express "cancel the old worker":
      * cancelOngoingSync() clears syncing immediately, and a restart that reset a shared flag would
@@ -181,9 +184,10 @@ public class SyncCoordinator {
     static final long MIN_DELTA_SAVINGS_BYTES = 2 * 1024L;
 
     /**
-     * How many received-file confirmations the receiver holds in memory before flushing the state
-     * store to disk. A session's SYNC_COMPLETE always flushes regardless; this only bounds the
-     * damage of a session that dies without that exchange.
+     * How many state-store records (a receiver-side confirmation, or a sender-side delivery) are
+     * held in memory before the store is flushed to disk. A session's SYNC_COMPLETE always flushes
+     * regardless, and the sender flushes its deliveries once more on the way out of the worker;
+     * this only bounds the damage of a session that dies without either.
      */
     private static final int CONFIRM_FLUSH_INTERVAL = 64;
 
@@ -1376,6 +1380,62 @@ public class SyncCoordinator {
     }
 
     /**
+     * Sender side: remember that {@code path} was pushed to the peer and the sender's transfer
+     * layer reported the transfer complete, so the next arbitration can tell "the peer holds what
+     * this side delivered" (a one-sided modification, transfer freely) from "the peer changed it
+     * itself" (a conflict).
+     *
+     * <p>A delivered record is deliberately weaker than a confirmed base and never advances one:
+     * the sender knows its transfer left the wire, not that the peer's write survived — that is
+     * what the end-of-session {@code CMD_WRITE_FAILURES} report settles, and a session torn down
+     * before it never does. Flushing follows the receiver-side confirmation bound plus a guaranteed
+     * flush on the way out of the worker, because a session that dies mid-transfer is exactly the
+     * case whose deliveries must survive into the next plan.
+     */
+    void recordDelivered(String path, String md5, long size) {
+        SyncStateStore store = baseStateStore();
+        if (store == null) {
+            return;
+        }
+        store.recordDelivered(path, md5, size);
+        if (deliveredSinceFlush.incrementAndGet() >= CONFIRM_FLUSH_INTERVAL) {
+            store.flush();
+            deliveredSinceFlush.set(0);
+        }
+    }
+
+    /**
+     * Withdraw delivered records for paths the peer could not write: what it holds is then provably
+     * not this side's delivery, so the marker must not suppress a future conflict.
+     */
+    private void withdrawDelivered(java.util.Collection<String> paths) {
+        if (paths == null || paths.isEmpty()) {
+            return;
+        }
+        SyncStateStore store = baseStateStore();
+        if (store == null) {
+            return;
+        }
+        for (String path : paths) {
+            if (path != null && !path.isEmpty()) {
+                store.forgetDelivered(path);
+            }
+        }
+    }
+
+    /** Persist outstanding delivered records (an aborted session still delivered its files). */
+    private void flushDeliveredState() {
+        if (deliveredSinceFlush.get() == 0) {
+            return;
+        }
+        SyncStateStore store = baseStateStore();
+        if (store != null) {
+            store.flush();
+        }
+        deliveredSinceFlush.set(0);
+    }
+
+    /**
      * Sender-side wiring for {@link SyncProtocol#CMD_WRITE_FAILURES} when the report arrives
      * outside the bounded wait (e.g. stashed behind a heartbeat): withdraw the reported paths'
      * confirmations. Redundant with the synchronous wait in {@link #performSync}, which already
@@ -1391,20 +1451,24 @@ public class SyncCoordinator {
             return;
         }
         boolean dirty = false;
+        List<String> failed = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             String path = msg.getParam(1 + i);
             if (path != null && !path.isEmpty()) {
                 store.remove(path);
+                failed.add(path);
                 dirty = true;
             }
         }
         if (dirty) {
+            // What the peer failed to write is not a delivery of ours, so the marker must go too.
+            withdrawDelivered(failed);
             eventBus.post(
                     new SyncEvent.LogEvent(
                             "Receiver reported "
                                     + count
                                     + " path(s) it could not write; they"
-                                    + " will be retransferred on the next sync"));
+                                    + " will be retransmitted on the next sync"));
             store.flush();
         }
     }
@@ -1476,7 +1540,9 @@ public class SyncCoordinator {
      *       the new path is agreed-on on both sides (its old path is pruned below).
      *   <li>Converged files (local md5 == remote md5): nothing was transferred, but the base must
      *       keep tracking them or a later cache wipe would resurrect old conflicts.
-     *   <li>Deselected / failed writes: nothing is recorded.
+     *   <li>Deselected / failed writes: nothing is recorded, and a failed write also withdraws the
+     *       path's delivered record — what the peer holds is then provably not this side's
+     *       delivery, so it must not be read as one.
      * </ul>
      */
     private void recordSenderBase(SyncPreviewPlan plan, Set<String> writeFailures) {
@@ -1485,7 +1551,6 @@ public class SyncCoordinator {
             return;
         }
         Map<String, SyncStateStore.Confirmed> confirmations = new LinkedHashMap<>();
-
         for (FileChangeDetector.FileInfo fi : plan.getFilesToTransfer()) {
             String path = fi.getPath();
             if (writeFailures.contains(path)) {
@@ -1550,6 +1615,9 @@ public class SyncCoordinator {
         }
 
         store.confirmAll(confirmations);
+        // A path the receiver could not write is not a delivery of ours even though its transfer
+        // reported success, so its marker must not suppress the next sync's conflict.
+        withdrawDelivered(writeFailures);
         store.prune(plan.getLocalFileInfos().keySet());
         store.flush();
     }
@@ -1820,7 +1888,21 @@ public class SyncCoordinator {
         long batchStart = System.currentTimeMillis();
         boolean ok = protocol.sendBatch(batch, batchByteTarget, batchCallback, syncFolder);
         long batchMs = System.currentTimeMillis() - batchStart;
-        if (!ok) {
+        if (ok) {
+            // Every entry left the wire in one verified XMODEM transfer; entries the receiver could
+            // not write are withdrawn later, when its end-of-session failure report arrives.
+            for (Object[] entry : batch) {
+                if (entry.length > 2 && entry[2] != null) {
+                    File entryFile = (File) entry[0];
+                    recordDelivered((String) entry[1], (String) entry[2], entryFile.length());
+                }
+            }
+            savedOpIndex = batchStartOpIdx + inBatch - 1;
+            operationIndex = savedOpIndex;
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Batch of " + inBatch + " files sent in " + batchMs + "ms"));
+        } else {
             if (finalBatch) {
                 eventBus.post(
                         new SyncEvent.ErrorEvent(
@@ -1871,6 +1953,10 @@ public class SyncCoordinator {
                 long ms = System.currentTimeMillis() - t0;
                 if (sentOk) {
                     touchHeartbeat();
+                    if (rpMd5 != null) {
+                        File rpFile = (File) batch.get(i)[0];
+                        recordDelivered(rp, rpMd5, rpFile.length());
+                    }
                     eventBus.post(
                             new SyncEvent.LogEvent(
                                     "Syncing (fallback) ["
@@ -1888,12 +1974,6 @@ public class SyncCoordinator {
                 throw new IOException(
                         "Failed to transfer " + inBatch + " file(s) after fallback attempts");
             }
-        } else {
-            savedOpIndex = batchStartOpIdx + inBatch - 1;
-            operationIndex = savedOpIndex;
-            eventBus.post(
-                    new SyncEvent.LogEvent(
-                            "Batch of " + inBatch + " files sent in " + batchMs + "ms"));
         }
         return new int[] {savedOpIndex, operationIndex};
     }
@@ -2009,6 +2089,17 @@ public class SyncCoordinator {
                 eventBus.post(
                         new SyncEvent.FileProgressEvent(
                                 operationIndex, totalOperationsRef[0], filePath));
+                // The receiver verified the merged bytes before writing them, so what it now holds
+                // is exactly this delivery.
+                try {
+                    recordDelivered(
+                            filePath,
+                            FileChangeDetector.manifestMd5(mergedContent),
+                            mergedContent.length);
+                } catch (IOException e) {
+                    // Unreadable content hash (never observed in practice): the next sync
+                    // re-arbitrates the file conservatively.
+                }
                 flushSharedTextBetweenOperations();
             }
 
@@ -2084,6 +2175,9 @@ public class SyncCoordinator {
                     eventBus.post(
                             new SyncEvent.FileProgressEvent(
                                     operationIndex, totalOperationsRef[0], path));
+                    // The receiver reconstructs and verifies the whole file before writing it, so
+                    // its copy is now this delivery (base plus tail).
+                    recordDelivered(path, append.fileInfo.getMd5(), append.finalSize);
                     savedOpIndex = operationIndex;
                     touchHeartbeat();
                     flushSharedTextBetweenOperations();
@@ -2274,6 +2368,9 @@ public class SyncCoordinator {
                         eventBus.post(
                                 new SyncEvent.FileProgressEvent(
                                         operationIndex, totalOperationsRef[0], path));
+                        // The receiver verifies the reconstructed file's manifest md5 before
+                        // writing it, so its copy is now this delivery.
+                        recordDelivered(path, fi.getMd5(), fi.getSize());
                         savedOpIndex = operationIndex;
                         touchHeartbeat();
                         flushSharedTextBetweenOperations();
@@ -2326,6 +2423,8 @@ public class SyncCoordinator {
                         long ms = System.currentTimeMillis() - t0;
                         if (sentOk) {
                             touchHeartbeat();
+                            recordDelivered(
+                                    fileInfo.getPath(), fileInfo.getMd5(), fileInfo.getSize());
                             eventBus.post(
                                     new SyncEvent.LogEvent(
                                             "Syncing ["
@@ -2434,6 +2533,9 @@ public class SyncCoordinator {
                                 rename.getLastModified(),
                                 rename.getMd5());
                 if (renamed) {
+                    // The receiver verified the announced md5 before moving its copy, so what it
+                    // now holds at toPath is this delivery.
+                    recordDelivered(toPath, rename.getMd5(), rename.getSize());
                     eventBus.post(
                             new SyncEvent.LogEvent(
                                     "Renamed "
@@ -2452,6 +2554,7 @@ public class SyncCoordinator {
                                             + toPath
                                             + " instead"));
                     protocol.sendFile(syncFolder, toPath, rename.getMd5());
+                    recordDelivered(toPath, rename.getMd5(), rename.getSize());
                     protocol.sendFileDelete(fromPath);
                 }
                 flushSharedTextBetweenOperations();
@@ -2599,6 +2702,11 @@ public class SyncCoordinator {
                                     + e.getMessage()
                                     + topFrame));
         } finally {
+            // Delivered records must outlive the session that made them: a session torn down
+            // before its end-of-session bookkeeping is exactly the case whose deliveries the next
+            // plan still needs to see. The confirmed base is unaffected — it is only ever written
+            // by recordSenderBase, which this flush does not call.
+            flushDeliveredState();
             cleanupAfterWorker(session);
         }
     }

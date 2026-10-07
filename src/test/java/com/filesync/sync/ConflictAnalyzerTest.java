@@ -24,8 +24,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Tests for {@link ConflictAnalyzer}: the base-state arbitration matrix (R == B is the only
- * non-conflict divergence), the conservative first-sync default without a base, the fast-mode
- * timestamp fallback, and the prefix-shape exemptions.
+ * non-conflict divergence), the delivered-state fallback that keeps a receiver holding this side's
+ * last push out of the conflict path, the conservative first-sync default without a base, the
+ * fast-mode timestamp fallback, and the prefix-shape exemptions.
  */
 class ConflictAnalyzerTest {
 
@@ -56,10 +57,25 @@ class ConflictAnalyzerTest {
     /** Fluent helper: find conflicts with a store pre-seeded with the given base md5. */
     private List<ConflictInfo> findConflicts(ConflictSetup setup, String baseMd5)
             throws IOException {
+        return findConflicts(setup, baseMd5, null);
+    }
+
+    /**
+     * Same, with an optional <em>delivered</em> md5: the content this side last pushed to the peer,
+     * as recorded when that transfer reported success.
+     */
+    private List<ConflictInfo> findConflicts(
+            ConflictSetup setup, String baseMd5, String deliveredMd5) throws IOException {
         SyncStateStore store = new SyncStateStore(setup.localDir.resolve("state.json").toFile());
         if (baseMd5 != null) {
             store.confirm(
                     "file.txt", baseMd5, setup.remoteManifest.getFiles().get("file.txt").getSize());
+        }
+        if (deliveredMd5 != null) {
+            store.recordDelivered(
+                    "file.txt",
+                    deliveredMd5,
+                    setup.remoteManifest.getFiles().get("file.txt").getSize());
         }
         return ConflictAnalyzer.findConflicts(
                 setup.localManifest, setup.remoteManifest, setup.localDir.toFile(), store);
@@ -144,6 +160,74 @@ class ConflictAnalyzerTest {
                 arguments("local version", "remote version", BaseMode.NONE, 1),
                 // Even a missing base cannot manufacture a conflict: content must differ first.
                 arguments("same content", "same content", BaseMode.NONE, 0));
+    }
+
+    /**
+     * The delivered-state fallback for a stale base: the base is behind what this side pushed (a
+     * session that died before its end-of-session bookkeeping), the receiver holds that pushed
+     * version, and only the sender modified the file since — a normal transfer, not a conflict. A
+     * receiver that moved on from the delivery still conflicts.
+     */
+    @ParameterizedTest
+    @MethodSource("deliveredArbitrationMatrix")
+    void findConflicts_deliveredArbitrationMatrix(
+            String localContent, String remoteContent, String deliveredContent, int expectedCount)
+            throws IOException {
+        ConflictSetup setup = setup(localContent, remoteContent);
+        // A base neither side holds: the delivery is the only reference for what the peer keeps.
+        String baseMd5 =
+                FileChangeDetector.manifestMd5("agreed version".getBytes(StandardCharsets.UTF_8));
+        String deliveredMd5 =
+                deliveredContent != null
+                        ? FileChangeDetector.manifestMd5(
+                                deliveredContent.getBytes(StandardCharsets.UTF_8))
+                        : null;
+
+        List<ConflictInfo> conflicts = findConflicts(setup, baseMd5, deliveredMd5);
+
+        assertEquals(
+                expectedCount,
+                conflicts.size(),
+                "delivered arbitration for local="
+                        + localContent
+                        + " remote="
+                        + remoteContent
+                        + " delivered="
+                        + deliveredContent);
+    }
+
+    private static Stream<Arguments> deliveredArbitrationMatrix() {
+        return Stream.of(
+                // The receiver holds exactly what this side pushed while the sender moved on:
+                // a one-sided modification, not a conflict.
+                arguments("newer version", "pushed version", "pushed version", 0),
+                // The receiver still holds the base: the pre-existing R == B rule already applies.
+                arguments("newer version", "agreed version", "pushed version", 0),
+                // The receiver moved on from the delivery: its own change would be overwritten.
+                arguments("newer version", "receiver edited", "pushed version", 1),
+                // Nothing was ever delivered: unknown history, conservatively a conflict.
+                arguments("newer version", "pushed version", null, 1));
+    }
+
+    /**
+     * The reported shape, end to end: the peer still holds the version this side pushed (the base
+     * was never advanced because that session died before its bookkeeping) while the sender has
+     * moved on. The plan must call this a one-sided modification, not a conflict.
+     */
+    @Test
+    void receiverHoldsPushedVersionAfterAbortedSession_isNotAConflict() throws IOException {
+        ConflictSetup setup = setup("sender's newer version", "previously pushed version");
+        String baseMd5 =
+                FileChangeDetector.manifestMd5(
+                        "older agreed version".getBytes(StandardCharsets.UTF_8));
+
+        List<ConflictInfo> withoutDelivery = findConflicts(setup, baseMd5, null);
+        List<ConflictInfo> withDelivery = findConflicts(setup, baseMd5, setup.remoteMd5());
+
+        assertEquals(1, withoutDelivery.size(), "stale base with no delivery record: conflict");
+        assertTrue(
+                withDelivery.isEmpty(),
+                "the receiver holding this side's last delivery is a one-sided modification");
     }
 
     @Test

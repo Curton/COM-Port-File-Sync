@@ -1903,6 +1903,95 @@ class SyncCoordinatorTest {
     }
 
     @Test
+    void performSync_missingWriteFailureReport_remembersDeliveredContent() throws IOException {
+        // The reported bug: last session agreed on "base content", the sender pushed "sent
+        // content", and the end-of-session failure report never arrived. The transfer itself
+        // succeeded — the receiver holds the pushed version — but the base was (correctly) kept at
+        // the pre-session state, so a stale-base comparison alone reads the receiver as diverged
+        // and reports a conflict for a file only the sender ever modified.
+        String baseMd5 = FileChangeDetector.manifestMd5("base content".getBytes());
+        String sentMd5 = FileChangeDetector.manifestMd5("sent content".getBytes());
+        seedBase("victim.txt", baseMd5, "base content".length());
+        Files.writeString(new File(syncFolder, "victim.txt").toPath(), "sent content");
+        FileChangeDetector.FileInfo victim =
+                new FileChangeDetector.FileInfo("victim.txt", 12L, 1L, sentMd5);
+        stubSuccessfulBatches();
+        when(mockProtocol.waitForWriteFailures()).thenReturn(null);
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(victim),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        12L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("victim.txt", victim)));
+
+        SyncStateStore store = stateStore();
+        assertEquals(
+                baseMd5,
+                store.base("victim.txt").md5(),
+                "a reportless session still must not advance the base");
+        SyncStateStore.Confirmed delivered = store.delivered("victim.txt");
+        assertNotNull(
+                delivered,
+                "the delivered content must outlive a session whose bookkeeping never ran");
+        assertEquals(sentMd5, delivered.md5());
+        assertEquals(12L, delivered.size());
+
+        // The receiver holds what was pushed to it: only the sender modified the file since, so the
+        // next plan must call it a normal transfer rather than a conflict.
+        File receiverDir = tempDir.resolve("receiver").toFile();
+        Files.createDirectories(receiverDir.toPath());
+        Files.writeString(new File(receiverDir, "victim.txt").toPath(), "sent content");
+        assertTrue(
+                ConflictAnalyzer.findConflicts(
+                                FileChangeDetector.generateManifest(syncFolder, false, false),
+                                FileChangeDetector.generateManifest(receiverDir, false, false),
+                                syncFolder,
+                                store)
+                        .isEmpty(),
+                "a receiver holding this side's last delivery is a one-sided modification");
+    }
+
+    @Test
+    void performSync_success_withdrawsDeliveredForReportedWriteFailures() throws IOException {
+        // The transfer reported success but the receiver could not write the file, so it does not
+        // hold this side's delivery: the marker must go, or a later arbitration would read the
+        // receiver's own content as a delivery and skip the conflict it deserves.
+        String sentMd5 = FileChangeDetector.manifestMd5("locked content".getBytes());
+        Files.writeString(new File(syncFolder, "locked.txt").toPath(), "locked content");
+        FileChangeDetector.FileInfo locked =
+                new FileChangeDetector.FileInfo("locked.txt", 15L, 1L, sentMd5);
+        stubSuccessfulBatches();
+        when(mockProtocol.waitForWriteFailures()).thenReturn(java.util.Set.of("locked.txt"));
+
+        runSync(
+                new SyncPreviewPlan(
+                        List.of(locked),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        15L,
+                        false,
+                        List.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        java.util.Set.of(),
+                        new java.util.HashMap<>(),
+                        java.util.Map.of("locked.txt", locked)));
+
+        assertNull(
+                stateStore().delivered("locked.txt"), "a reported write failure is not a delivery");
+    }
+
+    @Test
     void handleConflictAdopted_recordsAnnouncedStates() throws IOException {
         String frame = "[[SYNC:CONFLICT_ADOPTED:2:a.txt:aa11:10:sub/b.txt:bb22:20]]";
         SyncProtocol.Message msg = SyncProtocol.parseMessage(frame);

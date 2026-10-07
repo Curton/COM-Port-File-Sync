@@ -28,6 +28,11 @@ import java.util.Set;
  *       the timestamps decide exactly as before.
  * </ul>
  *
+ * <p>A receiver whose copy matches the sender's last <em>delivered</em> content instead of the base
+ * is also a one-sided modification: the peer holds bytes this side pushed (a session that died
+ * before its end-of-session bookkeeping leaves the base behind the delivery), not anything it
+ * changed itself, so the sender's newer version can take its place without a dialog.
+ *
  * <p>Conflict detection needs manifest metadata only (MD5, or size+mtime in fast mode); actual
  * content is fetched later when needed for the merge UI.
  */
@@ -88,8 +93,9 @@ public class ConflictAnalyzer {
                 // File exists on both sides - check if content differs
                 if (contentDiffers(localInfo, remoteInfo)) {
                     // Decide whether this is a conflict from the recorded base: transferring is
-                    // only harmless when the receiver still holds the agreed-on version.
-                    if (!isRemoteDivergedFromBase(path, localInfo, remoteInfo, syncState)) {
+                    // only harmless when the receiver still holds the agreed-on version, or holds
+                    // the version this side last pushed to it.
+                    if (!isReceiverDiverged(path, localInfo, remoteInfo, syncState)) {
                         continue; // only the sender modified: normal transfer
                     }
                     boolean isBinary = isBinaryExtension(path);
@@ -309,18 +315,20 @@ public class ConflictAnalyzer {
     }
 
     /**
-     * Whether the receiver's copy has diverged from the state both sides last agreed on (the base),
-     * so transferring the sender's version would overwrite receiver-side changes.
+     * Whether the receiver's copy has moved away from any state this side knows it agreed on or
+     * delivered, so transferring the sender's version would overwrite receiver-side changes.
      *
-     * <p>With hashes on both sides the base is the authority: the receiver still holding the base
-     * (R == B) means only the sender modified the file. A missing base (first sync, wiped store)
-     * has unknown history and always counts as diverged. Without hashes (fast mode) there is
-     * nothing to compare and the timestamps decide instead (see {@link #isReceiverNewer}).
+     * <p>With hashes on both sides two references are consulted, in order of authority: the base
+     * (the version both sides last agreed on) and the delivered state (the version this side last
+     * pushed). The receiver still holding either one means only the sender modified the file. A
+     * missing base (first sync, wiped store) has unknown history and always counts as diverged.
+     * Without hashes (fast mode) there is nothing to compare and the timestamps decide instead (see
+     * {@link #isReceiverNewer}).
      *
      * <p>Called only for paths whose content already differs (see {@link #contentDiffers}), so "L
      * == B" and "R == B" cannot both hold.
      */
-    private static boolean isRemoteDivergedFromBase(
+    private static boolean isReceiverDiverged(
             String path,
             FileChangeDetector.FileInfo local,
             FileChangeDetector.FileInfo remote,
@@ -334,10 +342,14 @@ public class ConflictAnalyzer {
             return true; // no recorded history: treat as diverged
         }
         SyncStateStore.Confirmed base = syncState.base(path);
-        if (base == null || base.md5() == null || base.md5().isEmpty()) {
-            return true; // never synced with a hash: unknown history
+        if (base != null && remoteMd5.equals(base.md5())) {
+            return false; // the receiver still holds the version both sides agreed on
         }
-        return !remoteMd5.equals(base.md5());
+        SyncStateStore.Confirmed delivered = syncState.delivered(path);
+        if (delivered != null && remoteMd5.equals(delivered.md5())) {
+            return false; // the receiver holds content this side delivered to it
+        }
+        return true; // moved away from both references, or holds neither: unknown history
     }
 
     /**

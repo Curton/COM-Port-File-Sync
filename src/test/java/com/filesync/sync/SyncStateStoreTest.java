@@ -17,8 +17,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests for {@link SyncStateStore}: confirm/lookup round trips, the no-hash rule, persistence
- * across instances, pruning and removal, and graceful handling of corrupt or incompatible state
- * files.
+ * across instances, pruning and removal, the delivered (last-pushed) record, and graceful handling
+ * of corrupt or incompatible state files.
  */
 class SyncStateStoreTest {
 
@@ -123,6 +123,98 @@ class SyncStateStoreTest {
 
         assertNull(store.base("file.txt"));
         assertNotNull(store.base("other.txt"));
+    }
+
+    @Test
+    void recordDeliveredThenDeliveredReturnsPushedState() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        assertNull(store.delivered("file.txt"), "no record before any delivery");
+
+        store.recordDelivered("file.txt", "md5-pushed", 42L);
+
+        SyncStateStore.Confirmed delivered = store.delivered("file.txt");
+        assertNotNull(delivered, "pushed path must have a delivered state");
+        assertEquals("md5-pushed", delivered.md5());
+        assertEquals(42L, delivered.size());
+        assertNull(store.base("file.txt"), "a delivery is not a confirmed base");
+    }
+
+    @Test
+    void recordDeliveredWithoutMd5IsIgnored() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.recordDelivered("file.txt", null, 42L);
+        store.recordDelivered("other.txt", "", 7L);
+
+        assertNull(store.delivered("file.txt"), "null md5 must not be recorded");
+        assertNull(store.delivered("other.txt"), "empty md5 must not be recorded");
+    }
+
+    @Test
+    void recordDeliveredSkipsContentTheBaseAlreadyHolds() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.confirm("file.txt", "md5-a", 42L);
+
+        store.recordDelivered("file.txt", "md5-a", 42L);
+
+        assertNull(store.delivered("file.txt"), "the base is the stronger claim; no marker needed");
+    }
+
+    @Test
+    void confirmClearsDeliveredMarkerWhenItCatchesUp() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.recordDelivered("file.txt", "md5-a", 42L);
+
+        store.confirm("file.txt", "md5-a", 42L);
+
+        assertNull(store.delivered("file.txt"), "a confirmed base needs no delivered marker");
+    }
+
+    @Test
+    void confirmForOtherContentKeepsDeliveredMarker() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.recordDelivered("file.txt", "md5-pushed", 42L);
+
+        store.confirm("file.txt", "md5-other", 42L);
+
+        SyncStateStore.Confirmed delivered = store.delivered("file.txt");
+        assertNotNull(delivered, "a base for different content must not clear the delivery");
+        assertEquals("md5-pushed", delivered.md5());
+    }
+
+    @Test
+    void forgetDeliveredDropsTheMarker() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.confirm("file.txt", "md5-base", 42L);
+        store.recordDelivered("file.txt", "md5-pushed", 42L);
+
+        store.forgetDelivered("file.txt");
+
+        assertNull(store.delivered("file.txt"));
+        assertNotNull(store.base("file.txt"), "forgetting a delivery keeps the base");
+    }
+
+    @Test
+    void deliveredPersistsAcrossInstances() throws IOException {
+        SyncStateStore first = new SyncStateStore(stateFile());
+        first.recordDelivered("file.txt", "md5-pushed", 42L);
+        first.flush();
+
+        SyncStateStore second = new SyncStateStore(stateFile());
+        SyncStateStore.Confirmed delivered = second.delivered("file.txt");
+        assertNotNull(delivered, "delivered state must survive a reload");
+        assertEquals("md5-pushed", delivered.md5());
+        assertEquals(42L, delivered.size());
+    }
+
+    @Test
+    void pruneDropsDeliveredOnlyEntries() {
+        SyncStateStore store = new SyncStateStore(stateFile());
+        store.confirm("keep.txt", "md5-keep", 1L);
+        store.recordDelivered("gone.txt", "md5-pushed", 2L);
+
+        store.prune(java.util.Set.of("keep.txt"));
+
+        assertNull(store.delivered("gone.txt"), "pruned path must not keep a delivered marker");
     }
 
     @Test
