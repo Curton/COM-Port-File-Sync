@@ -449,6 +449,92 @@ class XModemTransferTest {
                 "the frame is acknowledged even when the handler throws");
     }
 
+    @Test
+    @Timeout(20)
+    void receiveIntoTreatsLoneBracketAtHeaderPositionAsGarbageAndPreservesTheNextByte()
+            throws IOException {
+        // One 0x5B data byte ahead of a (re-sent) block used to route the receive loop into the
+        // interleaved-frame reader, which swallowed the whole block as a "truncated line" without
+        // consuming a retry — the session wedged forever. A frame must be confirmed by a second
+        // '['; otherwise the byte is just an unexpected header (bounded by the retry budget) and
+        // the byte after it is pushed back so the block parser still sees it.
+        byte[] payload = {'A'};
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.write('['); // stray data byte at the header position
+        stream.writeBytes(buildSohFrame(payload));
+
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(stream.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(payload.length, sink);
+
+        assertEquals(payload.length, written, "the block behind the stray '[' must still arrive");
+        assertArrayEquals(payload, sink.toByteArray());
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.NAK}),
+                "the stray '[' must cost exactly one NAK");
+        assertEquals(
+                0,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.CAN}),
+                "the recovery must not abort the session");
+    }
+
+    @Test
+    @Timeout(30)
+    void receiveIntoFailsTheBlockWhenTheCrcTrailerTimesOut() throws IOException {
+        // The field shape: a block arrives intact except its last CRC byte, which the link
+        // parks until the sender's next write (10 s later). The read must time out (-1) and
+        // fail the block. The old code masked the timeout into a data byte, so the missing
+        // low byte compared as 0xFF — and for the one block in 65536 whose real CRC is 0xFFFF
+        // the fabricated byte "completed" a matching checksum and the receiver ACKed data
+        // whose trailer it never saw. The delayed EOT stands in for the sender's next write.
+        byte[] block = new byte[128];
+        Arrays.fill(block, (byte) 'x');
+        int foundHigh = -1;
+        int foundLow = -1;
+        findSuffix:
+        for (int high = 0; high < 256 && foundHigh < 0; high++) {
+            for (int low = 0; low < 256; low++) {
+                block[126] = (byte) high;
+                block[127] = (byte) low;
+                if (XModemTransfer.calculateCRC16(block) == 0xFFFF) {
+                    foundHigh = high;
+                    foundLow = low;
+                    break findSuffix;
+                }
+            }
+        }
+        assertEquals(0xFFFF, XModemTransfer.calculateCRC16(block), "a 0xFFFF-CRC block must exist");
+
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        stream.write(XModemTransfer.SOH);
+        stream.write(1);
+        stream.write(254);
+        stream.writeBytes(block);
+        stream.write(0xFF); // the real CRC high byte; the low byte never arrives
+        WithheldTrailerTestSerialPortManager serialPort =
+                new WithheldTrailerTestSerialPortManager(
+                        stream.toByteArray(), new byte[] {XModemTransfer.EOT}, 10_500);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+
+        long written = transfer.receiveInto(128, sink);
+
+        assertEquals(0, written, "a block without its CRC trailer must not be accepted");
+        assertEquals(0, sink.size());
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.NAK}),
+                "the withheld trailer must NAK the block exactly once");
+        assertEquals(
+                0,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.CAN}),
+                "the EOT must still end the session cleanly");
+    }
+
     /** Build an input of one leading byte followed by {@code ackCount} ACK bytes. */
     private static byte[] buildInput(byte first, int ackCount) {
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
@@ -882,6 +968,74 @@ class XModemTransferTest {
                 return immediate.read();
             }
             return delayed.read();
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
+        }
+    }
+
+    /**
+     * Port manager that serves one byte run immediately and a second run only after a wall-clock
+     * delay, simulating a withheld XMODEM trailer (a byte the link parks until the sender's next
+     * write). While the delay has not elapsed, {@code available()} reports nothing — a read then
+     * times out exactly like a silent line, instead of hitting end-of-stream.
+     */
+    private static final class WithheldTrailerTestSerialPortManager extends SerialPortManager {
+        private final ByteArrayInputStream immediate;
+        private final ByteArrayInputStream delayed;
+        private final long delayedAtMillis;
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+
+        private WithheldTrailerTestSerialPortManager(
+                byte[] immediate, byte[] delayed, long delayMillis) {
+            this.immediate = new ByteArrayInputStream(immediate);
+            this.delayed = new ByteArrayInputStream(delayed);
+            this.delayedAtMillis = System.currentTimeMillis() + delayMillis;
+        }
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            return System.currentTimeMillis() >= delayedAtMillis
+                    ? immediate.available() + delayed.available()
+                    : immediate.available();
+        }
+
+        @Override
+        public int read() {
+            if (immediate.available() > 0) {
+                return immediate.read();
+            }
+            return delayed.read();
+        }
+
+        @Override
+        public byte[] readExact(int length, int timeoutMs) throws IOException {
+            byte[] data = new byte[length];
+            int offset = 0;
+            while (offset < length) {
+                int b = read();
+                if (b < 0) {
+                    throw new IOException("Unexpected end of staged input");
+                }
+                data[offset++] = (byte) b;
+            }
+            return data;
         }
 
         @Override

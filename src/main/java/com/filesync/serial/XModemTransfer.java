@@ -60,6 +60,12 @@ public class XModemTransfer {
     private Consumer<String> interleavedFrameHandler;
 
     /**
+     * One byte read past a lone '[' at the header position and pushed back for the next
+     * header-position read (see the FRAME_START_BYTE branch of the receive loop). -1 = empty.
+     */
+    private int pushedBackByte = -1;
+
+    /**
      * Stores the last human-readable error message for diagnostics. Higher level code (e.g.
      * SyncProtocol) can use this to provide more detailed context when reporting failures.
      */
@@ -273,13 +279,25 @@ public class XModemTransfer {
                 }
 
                 if (header == FRAME_START_BYTE) {
-                    // A framed control line (e.g. shared text) interleaved by the sender in the
-                    // gap between two data blocks: consume it, hand it to the handler, ACK it,
-                    // and keep waiting for the next block header without burning a retry.
-                    if (consumeInterleavedFrame()) {
-                        serialPort.write(ACK);
+                    // A framed control line starts "[[SYNC:" — a lone '[' that is really block
+                    // data must not trigger the frame path. Only when the next byte also is '['
+                    // does the interleaved-frame read run; otherwise the '[' is treated as an
+                    // unexpected header byte (bounded by the retry budget, like every other
+                    // garbage byte) and the peeked byte is pushed back so the block parser
+                    // still sees it. Without this, one 0x5B data byte at a block boundary sent
+                    // the loop into the frame reader, which swallowed the resent block as a
+                    // "truncated line" without consuming a retry — wedging the session forever.
+                    int second = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
+                    if (second == FRAME_START_BYTE) {
+                        if (consumeInterleavedFrameAfterSecondBracket()) {
+                            serialPort.write(ACK);
+                        }
+                        continue;
                     }
-                    continue;
+                    if (second >= 0) {
+                        pushedBackByte = second;
+                    }
+                    // Fall through: the switch below NAKs the stray '[' and advances retryCount.
                 }
 
                 // Determine block size based on header
@@ -300,9 +318,22 @@ public class XModemTransfer {
                     }
                 }
 
-                // Read block number and its complement
+                // Read block number and its complement. A read timeout returns -1; masking it
+                // into a data byte (turning -1 into 0xFF) fabricates corruption that never
+                // happened on the wire. Treat an incomplete header as a failed block instead,
+                // failing fast so one silent-sender round costs a single timeout.
                 int blockNum = readByteWithTimeout(TIMEOUT_MS);
-                int blockNumComplement = readByteWithTimeout(TIMEOUT_MS);
+                int blockNumComplement = blockNum < 0 ? -1 : readByteWithTimeout(TIMEOUT_MS);
+                if (blockNum < 0 || blockNumComplement < 0) {
+                    retryCount++;
+                    if (retryCount > MAX_RETRIES) {
+                        reportError("Timed out reading block number, aborting transfer");
+                        sendCancel();
+                        return -1;
+                    }
+                    serialPort.write(NAK);
+                    continue;
+                }
 
                 // Verify block number
                 if (blockNum + blockNumComplement != 255) {
@@ -332,9 +363,32 @@ public class XModemTransfer {
                 // Read data block
                 byte[] block = serialPort.readExact(blockSize, TIMEOUT_MS);
 
-                // Read CRC (2 bytes, high byte first)
+                // Read CRC (2 bytes, high byte first). A timeout (-1) must fail the block
+                // right there: it means the trailer never arrived, not that the CRC byte was
+                // 0xFF. Failing immediately also keeps one silent-sender round at a single
+                // timeout instead of two back-to-back ones.
                 int crcHigh = readByteWithTimeout(TIMEOUT_MS);
+                if (crcHigh < 0) {
+                    retryCount++;
+                    if (retryCount > MAX_RETRIES) {
+                        reportError("Timed out reading block CRC, aborting transfer");
+                        sendCancel();
+                        return -1;
+                    }
+                    serialPort.write(NAK);
+                    continue;
+                }
                 int crcLow = readByteWithTimeout(TIMEOUT_MS);
+                if (crcLow < 0) {
+                    retryCount++;
+                    if (retryCount > MAX_RETRIES) {
+                        reportError("Timed out reading block CRC, aborting transfer");
+                        sendCancel();
+                        return -1;
+                    }
+                    serialPort.write(NAK);
+                    continue;
+                }
                 int receivedCrc = ((crcHigh & 0xFF) << 8) | (crcLow & 0xFF);
 
                 // Verify CRC
@@ -590,8 +644,8 @@ public class XModemTransfer {
     }
 
     /**
-     * Read the rest of an interleaved frame line — the leading {@code '['} was already consumed as
-     * the block-header byte — and hand the complete line to the handler.
+     * Read the rest of an interleaved frame line — the leading {@code "[["} was already consumed at
+     * the block-header position — and hand the complete line to the handler.
      *
      * <p>A handler failure is swallowed: this runs inside the receive loop, so letting it escape
      * would skip the frame's ACK (making the sender retry or abandon the interleave) and abort the
@@ -600,7 +654,7 @@ public class XModemTransfer {
      * @return false when the line is truncated or implausibly long, leaving the frame
      *     unacknowledged so the sender resends or gives up
      */
-    private boolean consumeInterleavedFrame() throws IOException {
+    private boolean consumeInterleavedFrameAfterSecondBracket() throws IOException {
         ByteArrayOutputStream lineBytes = new ByteArrayOutputStream();
         while (true) {
             int b = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
@@ -619,9 +673,7 @@ public class XModemTransfer {
             }
         }
         if (interleavedFrameHandler != null) {
-            String line =
-                    ((char) (FRAME_START_BYTE & 0xFF))
-                            + lineBytes.toString(StandardCharsets.UTF_8.name());
+            String line = "[[" + lineBytes.toString(StandardCharsets.UTF_8.name());
             try {
                 interleavedFrameHandler.accept(line);
             } catch (RuntimeException e) {
@@ -642,6 +694,11 @@ public class XModemTransfer {
     }
 
     private int readByteWithTimeout(int timeoutMs) throws IOException {
+        if (pushedBackByte >= 0) {
+            int value = pushedBackByte;
+            pushedBackByte = -1;
+            return value;
+        }
         long startTime = System.currentTimeMillis();
         while (System.currentTimeMillis() - startTime < timeoutMs) {
             if (serialPort.available() > 0) {
