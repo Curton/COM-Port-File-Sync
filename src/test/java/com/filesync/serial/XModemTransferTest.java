@@ -212,7 +212,8 @@ class XModemTransferTest {
                         100);
         XModemTransfer transfer = new XModemTransfer(serialPort);
 
-        assertTrue(transfer.send(new byte[10]), "a late straggler 'C' must be skipped, not trusted");
+        assertTrue(
+                transfer.send(new byte[10]), "a late straggler 'C' must be skipped, not trusted");
 
         assertEquals(1, countDataPackets(serialPort.getWrites()), "the block must not be re-sent");
     }

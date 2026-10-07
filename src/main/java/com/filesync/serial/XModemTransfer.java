@@ -826,8 +826,8 @@ public class XModemTransfer {
     /**
      * Read the peer's next single-byte response with the same frame handling as {@link
      * #readResponseByteConsumingFrames}, but skipping stray 'C' handshake stragglers. Once blocks
-     * are flowing the receiver never sends 'C' — only its handshake does — so a 'C' read here is
-     * a straggler that outlasted the handshake drain. Skipping it keeps the ACK position honest;
+     * are flowing the receiver never sends 'C' — only its handshake does — so a 'C' read here is a
+     * straggler that outlasted the handshake drain. Skipping it keeps the ACK position honest;
      * reading it as a bad response instead would re-send a block the receiver already has (its
      * duplicate-block ACK absorbs that, but the round is pure waste, and at the EOT position a
      * re-sent EOT lands on the command listener as garbage). Skips are bounded by {@link
