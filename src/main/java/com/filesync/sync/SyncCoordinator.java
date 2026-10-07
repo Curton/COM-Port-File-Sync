@@ -16,7 +16,9 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.io.RandomAccessFile;
+import java.io.StringWriter;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -2549,6 +2551,24 @@ public class SyncCoordinator {
                 }
                 eventBus.post(new SyncEvent.ErrorEvent("Sync failed: " + e.getMessage()));
             }
+        } catch (RuntimeException e) {
+            // Anything else escaping the worker used to die silently: the executor swallowed
+            // the throwable, the finally still cleared the syncing flag, and the log showed
+            // nothing after "Requesting block signatures..." — an unexplainable dead sync.
+            // Surface it so a recurrence is diagnosable instead of invisible: exception
+            // class, message and the throwing frame. SyncCancelledException is caught
+            // above, so this only sees genuinely unexpected failures.
+            StringWriter stack = new StringWriter();
+            e.printStackTrace(new PrintWriter(stack));
+            String[] lines = stack.toString().split("\\R");
+            String topFrame = lines.length > 1 ? " @ " + lines[1].trim() : "";
+            eventBus.post(
+                    new SyncEvent.ErrorEvent(
+                            "Sync failed (unexpected "
+                                    + e.getClass().getSimpleName()
+                                    + "): "
+                                    + e.getMessage()
+                                    + topFrame));
         } finally {
             cleanupAfterWorker(session);
         }
