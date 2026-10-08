@@ -4,10 +4,6 @@ import com.filesync.config.SettingsManager;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.TimeSyncMarker;
 import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.FontMetrics;
-import java.awt.Graphics;
-import java.awt.Rectangle;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -19,7 +15,6 @@ import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.JTextArea;
 import javax.swing.SwingWorker;
-import javax.swing.plaf.basic.BasicMenuItemUI;
 
 /**
  * Right-click menu on the log area: "Save combined log" fetches the remote log (sender only),
@@ -34,35 +29,7 @@ public class CombinedLogController {
     private final LogController logController;
 
     private final JPopupMenu popupMenu = new JPopupMenu();
-    private final JMenuItem saveCombinedLogItem = createCenteredMenuItem();
-
-    /**
-     * The Windows L&F menu layout pins the text after a leading icon column (menu items ignore
-     * horizontalAlignment), so the entry would render visibly off-center and far wider than its
-     * text. Size the entry to the text itself and draw the text centered over it, keeping the rest
-     * of the standard menu rendering.
-     */
-    private static JMenuItem createCenteredMenuItem() {
-        JMenuItem item =
-                new JMenuItem("Save combined log") {
-                    @Override
-                    public Dimension getPreferredSize() {
-                        FontMetrics fm = getFontMetrics(getFont());
-                        return new Dimension(fm.stringWidth(getText()) + 12, fm.getHeight() + 8);
-                    }
-                };
-        item.setUI(
-                new BasicMenuItemUI() {
-                    @Override
-                    protected void paintText(
-                            Graphics g, JMenuItem menuItem, Rectangle textRect, String text) {
-                        Rectangle centered = new Rectangle(textRect);
-                        centered.x = (menuItem.getWidth() - textRect.width) / 2;
-                        super.paintText(g, menuItem, centered, text);
-                    }
-                });
-        return item;
-    }
+    private final JMenuItem saveCombinedLogItem = CenteredMenuItem.of("Save combined log");
 
     public CombinedLogController(
             MainFrameComponents components,

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.awt.FontMetrics;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,6 +14,8 @@ import java.util.Arrays;
 import java.util.List;
 import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
+import javax.swing.border.LineBorder;
+import javax.swing.plaf.basic.BasicMenuItemUI;
 import javax.swing.table.DefaultTableModel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -165,6 +168,35 @@ class SyncPreviewRendererIgnoreTest {
         assertEquals(model.getRowCount(), rows.size());
         assertFalse(log.isEmpty(), "The action must be logged");
         assertTrue(log.get(0).contains("/skip.log"));
+    }
+
+    @Test
+    void popupEntryHugsItsTextAndCentersTheLabel() {
+        SyncPreviewRenderer renderer = new SyncPreviewRenderer(null, null, message -> {});
+        List<SyncPreviewRow> rows = new ArrayList<>(List.of(fileRow("skip.log")));
+        DefaultTableModel model = renderer.createSyncPreviewTableModel(rows);
+
+        JPopupMenu popup = renderer.buildIgnorePopup(rows.get(0), model, rows);
+        JMenuItem item = (JMenuItem) popup.getComponent(0);
+
+        // Without this the Windows L&F leaves the text off-center and the entry far wider and
+        // taller
+        // than the label, which is exactly what the entry is meant to avoid.
+        assertTrue(
+                item.getUI() instanceof BasicMenuItemUI,
+                "The entry must use the paintText-overriding UI that centers the text");
+        FontMetrics fm = item.getFontMetrics(item.getFont());
+        assertEquals(
+                fm.stringWidth(item.getText()) + 12,
+                item.getPreferredSize().width,
+                "The entry width must be the text width plus a small padding");
+        assertEquals(
+                fm.getHeight() + 8,
+                item.getPreferredSize().height,
+                "The entry height must be the text height plus a small padding");
+        assertTrue(
+                popup.getBorder() instanceof LineBorder,
+                "The thick system popup border must be replaced by a thin line border");
     }
 
     private List<String> ignoreFileLines() throws IOException {

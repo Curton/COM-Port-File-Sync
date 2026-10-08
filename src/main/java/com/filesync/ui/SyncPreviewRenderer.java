@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
@@ -379,7 +380,9 @@ public class SyncPreviewRenderer {
     JPopupMenu buildIgnorePopup(
             SyncPreviewRow target, DefaultTableModel model, List<SyncPreviewRow> rows) {
         JPopupMenu popup = new JPopupMenu();
-        JMenuItem ignoreItem = new JMenuItem("Ignore (add to .filesyncignore)");
+        // A thin border instead of the thick system one, so the menu hugs the entry.
+        popup.setBorder(BorderFactory.createLineBorder(new Color(0xA0A0A0)));
+        JMenuItem ignoreItem = CenteredMenuItem.of("Ignore (add to .filesyncignore)");
         ignoreItem.addActionListener(event -> ignoreRow(target, model, rows));
         popup.add(ignoreItem);
         return popup;
