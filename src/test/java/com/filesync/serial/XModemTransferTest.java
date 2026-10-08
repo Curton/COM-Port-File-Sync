@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -215,6 +216,212 @@ class XModemTransferTest {
         assertTrue(transfer.send(new byte[10]), "a late straggler 'C' must not fail the session");
 
         assertEquals(2, countDataPackets(serialPort.getWrites()), "the miss costs one re-send");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendSkipsAStragglerAtTheEotAckPositionWithoutResendingEot() throws IOException {
+        // Two blocks (4200 bytes), so the EOT is answered well after the session's first ACK: a
+        // stray 'C' at the EOT response position is provably a handshake straggler and must be
+        // skipped. Returning it instead would re-send the EOT, and the receiver — already back at
+        // its command listener — would read that EOT as garbage.
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        script.writeBytes(buildInput(XModemTransfer.C, 5));
+        script.write(XModemTransfer.C); // straggler at the EOT response position, skipped
+        script.write(XModemTransfer.ACK); // acknowledges the EOT
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(new byte[4200]), "the session must complete past the straggler");
+
+        assertEquals(2, countDataPackets(serialPort.getWrites()), "no block may be re-sent");
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.EOT}),
+                "the EOT must not be re-sent");
+    }
+
+    @Test
+    @Timeout(20)
+    void sendSkipsAStragglerAtTheInterleaveAckPosition() throws IOException {
+        // The interleaved frame is answered after block 1's ACK, so a stray 'C' racing the
+        // frame's ACK is a straggler and must be skipped: the frame is written exactly once and
+        // the session continues untouched.
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        script.writeBytes(buildInput(XModemTransfer.C, 3));
+        script.write(XModemTransfer.C); // straggler at the interleave response position, skipped
+        for (int i = 0; i < 4; i++) {
+            script.write(XModemTransfer.ACK);
+        }
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        AtomicBoolean frameAcked = new AtomicBoolean();
+        transfer.setBlockBoundaryHook(
+                () -> {
+                    if (!frameAcked.get()) {
+                        frameAcked.set(
+                                transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+                        return frameAcked.get()
+                                ? XModemTransfer.InterleaveResult.SENT
+                                : XModemTransfer.InterleaveResult.FAILED;
+                    }
+                    return XModemTransfer.InterleaveResult.NOTHING_PENDING;
+                });
+
+        assertTrue(transfer.send(new byte[4200]), "the session must complete past the straggler");
+
+        assertTrue(frameAcked.get(), "the interleaved frame must be acknowledged, not retried");
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), INTERLEAVE_FRAME),
+                "the frame must be written exactly once");
+        // countDataPackets also sees the 28-byte frame write, so subtract it back out.
+        assertEquals(
+                2,
+                countDataPackets(serialPort.getWrites())
+                        - countWrites(serialPort.getWrites(), INTERLEAVE_FRAME),
+                "no block may be re-sent");
+    }
+
+    @Test
+    @Timeout(20)
+    void adaptiveDrainArmsAfterACleanSessionAndDowngradesOnTheFirstStraggler() throws IOException {
+        // The drain pause is conservative on a connection's first session, skipped once a
+        // session completes without any straggler, and re-armed by the first straggler a fast
+        // session observes — bounding the fast path's exposure to one straggler per connection.
+        StagedTestSerialPortManager serialPort =
+                new StagedTestSerialPortManager(
+                        new byte[] {
+                            XModemTransfer.C,
+                            XModemTransfer.ACK, // consumed by drainExtraHandshakeChars
+                            XModemTransfer.ACK, // consumed by sendBlock's stale-char drain
+                            XModemTransfer.ACK, // acknowledges the data block
+                            XModemTransfer.ACK // acknowledges the EOT
+                        },
+                        new byte[0],
+                        0);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        List<String> notices = new CopyOnWriteArrayList<>();
+        transfer.setProgressListener(
+                new XModemTransfer.TransferProgressListener() {
+                    @Override
+                    public void onProgress(
+                            int currentBlock,
+                            int totalBlocks,
+                            long bytesTransferred,
+                            double speedBytesPerSec) {}
+
+                    @Override
+                    public void onError(String message) {}
+
+                    @Override
+                    public void onNotice(String message) {
+                        notices.add(message);
+                    }
+                });
+
+        // Session 1 — the connection's first, so the drain waits out the pause. Clean, so the
+        // fast path arms for the next session.
+        assertTrue(transfer.send(new byte[10]), "session 1 must complete");
+        assertEquals(1, countDataPackets(serialPort.getWrites()), "session 1 writes one block");
+
+        // Session 2 — fast: no pause, so the 20ms straggler reaches block 1's ACK position and
+        // costs exactly one re-send (the receiver ACKs duplicate blocks). The observation
+        // downgrades the connection back to conservative.
+        int packetsAfterSession1 = countDataPackets(serialPort.getWrites());
+        serialPort.restage(
+                new byte[] {XModemTransfer.C},
+                new byte[] {
+                    XModemTransfer.C, // straggler read at block 1's ACK position
+                    XModemTransfer.ACK, // consumed by the retry's stale-char drain
+                    XModemTransfer.ACK, // acknowledges the re-sent block
+                    XModemTransfer.ACK // acknowledges the EOT
+                },
+                20);
+        assertTrue(transfer.send(new byte[10]), "session 2 must complete");
+        assertEquals(
+                packetsAfterSession1 + 2,
+                countDataPackets(serialPort.getWrites()),
+                "the fast session's straggler must cost exactly one re-send");
+
+        // Session 3 — conservative again: the same 20ms straggler now lands inside the 50ms
+        // pause and is drained there; the block is written exactly once.
+        int packetsAfterSession2 = countDataPackets(serialPort.getWrites());
+        serialPort.restage(
+                new byte[] {XModemTransfer.C},
+                new byte[] {
+                    XModemTransfer.C, // straggler, drained by the conservative pause
+                    XModemTransfer.ACK, // consumed by drainExtraHandshakeChars
+                    XModemTransfer.ACK, // consumed by sendBlock's stale-char drain
+                    XModemTransfer.ACK, // acknowledges the data block
+                    XModemTransfer.ACK // acknowledges the EOT
+                },
+                20);
+        assertTrue(transfer.send(new byte[10]), "session 3 must complete");
+        assertEquals(
+                packetsAfterSession2 + 1,
+                countDataPackets(serialPort.getWrites()),
+                "the downgraded session must absorb the straggler in the pause");
+
+        assertEquals(1, notices.size(), "exactly the session-2 downgrade may be reported");
+        assertTrue(
+                notices.get(0).contains("re-armed the conservative"),
+                "the notice must report the downgrade: " + notices);
+    }
+
+    @Test
+    @Timeout(20)
+    void reconnectResetsTheAdaptiveDrainToConservative() throws IOException {
+        // The strategy is scoped to the port session: a teardown/reconnect must start over, so
+        // the new connection's first session waits out the pause even though the previous
+        // connection had armed the fast path.
+        StagedTestSerialPortManager serialPort =
+                new StagedTestSerialPortManager(
+                        new byte[] {
+                            XModemTransfer.C,
+                            XModemTransfer.ACK,
+                            XModemTransfer.ACK,
+                            XModemTransfer.ACK,
+                            XModemTransfer.ACK
+                        },
+                        new byte[0],
+                        0);
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        // Two clean sessions: the first is conservative, the second fast — either way the fast
+        // path is armed by the end.
+        assertTrue(transfer.send(new byte[10]), "session 1 must complete");
+        serialPort.restage(
+                new byte[] {
+                    XModemTransfer.C,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK,
+                    XModemTransfer.ACK
+                },
+                new byte[0],
+                0);
+        assertTrue(transfer.send(new byte[10]), "session 2 must complete");
+
+        serialPort.simulateReconnect();
+        int packetsBeforeReconnect = countDataPackets(serialPort.getWrites());
+        serialPort.restage(
+                new byte[] {XModemTransfer.C},
+                new byte[] {
+                    XModemTransfer.C, // straggler, must land in the reset conservative pause
+                    XModemTransfer.ACK, // consumed by drainExtraHandshakeChars
+                    XModemTransfer.ACK, // consumed by sendBlock's stale-char drain
+                    XModemTransfer.ACK, // acknowledges the data block
+                    XModemTransfer.ACK // acknowledges the EOT
+                },
+                20);
+        assertTrue(transfer.send(new byte[10]), "session 3 must complete");
+        assertEquals(
+                packetsBeforeReconnect + 1,
+                countDataPackets(serialPort.getWrites()),
+                "the first session after a reconnect must absorb the straggler in the pause");
     }
 
     @Test
@@ -1174,15 +1381,25 @@ class XModemTransferTest {
      * scripted to land mid-drain (inside the drain pause) or after the drain window.
      */
     private static final class StagedTestSerialPortManager extends SerialPortManager {
-        private final ByteArrayInputStream immediate;
-        private final ByteArrayInputStream delayed;
-        private final long delayedAtMillis;
+        private ByteArrayInputStream immediate;
+        private ByteArrayInputStream delayed;
+        private long delayedAtMillis;
         private final List<byte[]> writes = new CopyOnWriteArrayList<>();
 
         private StagedTestSerialPortManager(byte[] immediate, byte[] delayed, long delayMillis) {
+            restage(immediate, delayed, delayMillis);
+        }
+
+        /** Re-arms the staged delivery for the next session on the same manager. */
+        void restage(byte[] immediate, byte[] delayed, long delayMillis) {
             this.immediate = new ByteArrayInputStream(immediate);
             this.delayed = new ByteArrayInputStream(delayed);
             this.delayedAtMillis = System.currentTimeMillis() + delayMillis;
+        }
+
+        /** Bumps the port-session epoch like a real close/open pair, keeping the streams. */
+        void simulateReconnect() {
+            bumpSessionEpoch();
         }
 
         List<byte[]> getWrites() {
