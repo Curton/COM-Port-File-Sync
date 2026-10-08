@@ -18,6 +18,14 @@ import javax.swing.plaf.basic.BasicMenuItemUI;
  * DPI-scaled system menu font that this app's smaller font never matches.
  */
 final class CenteredMenuItem {
+    /**
+     * The L&amp;F centers the text on the font's metric box (ascent + descent + leading), while the
+     * visible ink stops at the descent line. On the entry's tight box that leaves the label sitting
+     * visibly low — measured 17 device px above the ink against 4 below on a 200% display. Climb
+     * the label to even the padding out; 3 user px is 6 px there.
+     */
+    private static final int VERTICAL_OPTICAL_NUDGE = 3;
+
     private CenteredMenuItem() {}
 
     static JMenuItem of(String text) {
@@ -36,6 +44,7 @@ final class CenteredMenuItem {
                             Graphics g, JMenuItem menuItem, Rectangle textRect, String text) {
                         Rectangle centered = new Rectangle(textRect);
                         centered.x = (menuItem.getWidth() - textRect.width) / 2;
+                        centered.y = textRect.y - VERTICAL_OPTICAL_NUDGE;
                         super.paintText(g, menuItem, centered, text);
                     }
                 });
