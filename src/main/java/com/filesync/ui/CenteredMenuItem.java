@@ -21,10 +21,12 @@ final class CenteredMenuItem {
     /**
      * The L&amp;F centers the text on the font's metric box (ascent + descent + leading), while the
      * visible ink stops at the descent line. On the entry's tight box that leaves the label sitting
-     * visibly low — measured 17 device px above the ink against 4 below on a 200% display. Climb
-     * the label to even the padding out; 3 user px is 6 px there.
+     * visibly low — measured 15 device px above the ink against 2 below on a 200% display. Climb
+     * the label until the optical center lands on the entry: cap top to baseline is the band people
+     * read, so its space above should match the space from the baseline down to the entry edge. 2
+     * user px is 4 there, which measures 11 above against 6 below; the next pixel up over-corrects.
      */
-    private static final int VERTICAL_OPTICAL_NUDGE = 3;
+    private static final int VERTICAL_OPTICAL_NUDGE = 2;
 
     private CenteredMenuItem() {}
 
