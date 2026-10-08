@@ -106,14 +106,17 @@ public class XModemTransfer {
     // different worker threads; volatile carries the strategy state across them.
     /** Port-session epoch the strategy was last reset on; a change means a fresh connection. */
     private volatile long drainStrategyEpoch = -1;
+
     /**
-     * Armed after one session completes without any straggler: later sessions skip the drain
-     * pause. Any observed straggler disarms it for the rest of the connection, so the fast path
-     * is exposed at most once per connection and the worst case matches the fixed pause.
+     * Armed after one session completes without any straggler: later sessions skip the drain pause.
+     * Any observed straggler disarms it for the rest of the connection, so the fast path is exposed
+     * at most once per connection and the worst case matches the fixed pause.
      */
     private volatile boolean fastDrainArmed;
+
     /** Whether this send session has observed a straggler 'C' at any response position. */
     private volatile boolean sessionSawStraggler;
+
     /**
      * Set once this session's first block ACK arrives. Until then a 'C' at a response position is
      * ambiguous — it may be the receiver still polling in {@code initiateReceive()} (block 1 was
@@ -599,12 +602,12 @@ public class XModemTransfer {
      * interfere with ACK detection during block sending.
      *
      * <p>Conservative connections (every connection's first session, and every session after a
-     * straggler was observed) wait out the fixed pause first so an in-flight 'C' straggler
-     * arrives and is cleared here. Fast connections — one session already completed without any
-     * straggler — skip the pause: a straggler then lands at the first block's ACK position, where
-     * it costs one re-send the receiver's duplicate-block ACK absorbs, and the observation
-     * re-arms the conservative pause for the rest of the connection. The drain loop itself always
-     * runs: bytes already buffered when the handshake completed are cleared either way.
+     * straggler was observed) wait out the fixed pause first so an in-flight 'C' straggler arrives
+     * and is cleared here. Fast connections — one session already completed without any straggler —
+     * skip the pause: a straggler then lands at the first block's ACK position, where it costs one
+     * re-send the receiver's duplicate-block ACK absorbs, and the observation re-arms the
+     * conservative pause for the rest of the connection. The drain loop itself always runs: bytes
+     * already buffered when the handshake completed are cleared either way.
      */
     private void drainExtraHandshakeChars() throws IOException {
         if (!fastDrainArmed) {
@@ -882,8 +885,8 @@ public class XModemTransfer {
      * <p>Once the session's first block ACK has arrived, a 'C' read here is always a handshake
      * straggler — the receiver's receive loop only writes ACK/NAK and frames; only {@code
      * initiateReceive()} writes 'C', and it has provably exited — so it is skipped and the read
-     * keeps waiting for the real response, bounded by {@link #MAX_HANDSHAKE_STRAGGLERS}. Before
-     * the first ACK the 'C' is returned untouched: there it may be a live handshake retry (block 1
+     * keeps waiting for the real response, bounded by {@link #MAX_HANDSHAKE_STRAGGLERS}. Before the
+     * first ACK the 'C' is returned untouched: there it may be a live handshake retry (block 1
      * never arrived) whose re-send response is the only thing that recovers the session inside the
      * receiver's handshake window.
      */
@@ -1047,9 +1050,9 @@ public class XModemTransfer {
      * Records a handshake straggler 'C' observed at a response position. A straggler is evidence
      * the link does not settle immediately after the handshake, so it also retires the fast drain
      * for the rest of the connection: the next session (and every one after it) waits out the
-     * conservative pause again. Benign by construction — the receiver absorbs the duplicate block
-     * a straggler at a pre-ACK position triggers — but worth a log line: it is the field evidence
-     * for whether stragglers happen at all, and in which band.
+     * conservative pause again. Benign by construction — the receiver absorbs the duplicate block a
+     * straggler at a pre-ACK position triggers — but worth a log line: it is the field evidence for
+     * whether stragglers happen at all, and in which band.
      */
     private void noteStraggler(String where) {
         sessionSawStraggler = true;

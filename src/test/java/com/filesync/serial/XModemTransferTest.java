@@ -261,8 +261,7 @@ class XModemTransferTest {
         transfer.setBlockBoundaryHook(
                 () -> {
                     if (!frameAcked.get()) {
-                        frameAcked.set(
-                                transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
+                        frameAcked.set(transfer.sendInterleavedFrame(INTERLEAVE_FRAME));
                         return frameAcked.get()
                                 ? XModemTransfer.InterleaveResult.SENT
                                 : XModemTransfer.InterleaveResult.FAILED;
