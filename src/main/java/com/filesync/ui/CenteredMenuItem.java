@@ -13,7 +13,9 @@ import javax.swing.plaf.basic.BasicMenuItemUI;
  * <p>The Windows L&amp;F menu layout pins the text after a leading icon column (menu items ignore
  * horizontalAlignment), so an entry would render visibly off-center and far wider than its text.
  * Size the entry to the text itself and draw the text centered over it, keeping the rest of the
- * standard menu rendering.
+ * standard menu rendering. The popup itself gets a thin border (see callers) so the menu hugs the
+ * entry; the vertical padding stays small because the Windows menu metrics are sized for a
+ * DPI-scaled system menu font that this app's smaller font never matches.
  */
 final class CenteredMenuItem {
     private CenteredMenuItem() {}
@@ -24,7 +26,7 @@ final class CenteredMenuItem {
                     @Override
                     public Dimension getPreferredSize() {
                         FontMetrics fm = getFontMetrics(getFont());
-                        return new Dimension(fm.stringWidth(getText()) + 12, fm.getHeight() + 8);
+                        return new Dimension(fm.stringWidth(getText()) + 12, fm.getHeight() + 4);
                     }
                 };
         item.setUI(

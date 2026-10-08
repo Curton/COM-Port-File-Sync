@@ -189,11 +189,11 @@ class SyncPreviewRendererIgnoreTest {
         assertEquals(
                 fm.stringWidth(item.getText()) + 12,
                 item.getPreferredSize().width,
-                "The entry width must be the text width plus a small padding");
+                "The entry width must be the text width plus a tight padding");
         assertEquals(
-                fm.getHeight() + 8,
+                fm.getHeight() + 4,
                 item.getPreferredSize().height,
-                "The entry height must be the text height plus a small padding");
+                "The entry height must be the text height plus a tight padding");
         assertTrue(
                 popup.getBorder() instanceof LineBorder,
                 "The thick system popup border must be replaced by a thin line border");
