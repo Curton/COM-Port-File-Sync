@@ -17,8 +17,10 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 import java.util.function.Supplier;
 
 /**
@@ -65,6 +67,14 @@ public class FileSyncManager {
      * per card view on SwingWorker's shared pool.
      */
     private final Object senderBlockingExchangeLock = new Object();
+
+    /**
+     * Percent sink of the file-content fetch currently running on a caller's behalf (a preview
+     * row's Pre button), or null when no caller asked for progress. Installed for the duration of
+     * one fetch only; fetches are serialized by {@link #senderBlockingExchangeLock}, so the restore
+     * in {@link #fetchRemoteFileContent(String, IntConsumer)} cannot orphan a caller's sink.
+     */
+    private final AtomicReference<IntConsumer> fetchProgressSink = new AtomicReference<>();
 
     private final AtomicBoolean connectionAlive = new AtomicBoolean(false);
     private final AtomicBoolean roleNegotiated = new AtomicBoolean(false);
@@ -199,6 +209,11 @@ public class FileSyncManager {
                                             totalBlocks,
                                             bytesTransferred,
                                             speedBytesPerSec));
+                            IntConsumer progress = fetchProgressSink.get();
+                            int percent = transferPercent(currentBlock, totalBlocks);
+                            if (progress != null && percent >= 0) {
+                                progress.accept(percent);
+                            }
                         }
                     }
 
@@ -667,6 +682,36 @@ public class FileSyncManager {
     /** Notify remote of direction change. */
     public void notifyDirectionChange() {
         roleNegotiationService.notifyDirectionChange();
+    }
+
+    /**
+     * Fetch remote file content, reporting the transfer's completion percent to {@code progress}
+     * while it runs. Only an XMODEM content transfer reports (the peer switches to it above {@link
+     * #XMODEM_CONTENT_THRESHOLD}); an inline Base64 response is a single frame with no intermediate
+     * progress events, so the sink stays silent for it.
+     *
+     * @param relativePath the relative path of the file to fetch
+     * @param progress receives the transfer's percent (0-100) as blocks complete; may be null
+     * @return the file content bytes, or null if unavailable/timeout/error
+     */
+    public byte[] fetchRemoteFileContent(String relativePath, IntConsumer progress) {
+        IntConsumer previousSink = fetchProgressSink.getAndSet(progress);
+        try {
+            return fetchRemoteFileContent(relativePath);
+        } finally {
+            fetchProgressSink.set(previousSink);
+        }
+    }
+
+    /**
+     * Map an XMODEM block count onto a completion percent, or -1 when the total is unknown (a
+     * payload whose size the sender never announced).
+     */
+    static int transferPercent(int currentBlock, int totalBlocks) {
+        if (totalBlocks <= 0 || currentBlock < 0) {
+            return -1;
+        }
+        return currentBlock * 100 / totalBlocks;
     }
 
     /**

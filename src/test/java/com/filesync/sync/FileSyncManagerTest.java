@@ -668,6 +668,100 @@ class FileSyncManagerTest {
         }
     }
 
+    // ========== Fetch progress ==========
+
+    @Test
+    void transferPercent_mapsBlockCountsOntoAPercent() {
+        assertEquals(0, FileSyncManager.transferPercent(0, 10));
+        assertEquals(33, FileSyncManager.transferPercent(1, 3));
+        assertEquals(50, FileSyncManager.transferPercent(5, 10));
+        assertEquals(100, FileSyncManager.transferPercent(10, 10));
+        // A payload whose size the sender never announced has no known total, so nothing is
+        // reported rather than a misleading 0%.
+        assertEquals(-1, FileSyncManager.transferPercent(1, -1));
+        assertEquals(-1, FileSyncManager.transferPercent(0, 0));
+    }
+
+    @Test
+    void fetchRemoteFileContent_xmodemXferResponse_reportsTheTransferPercent() throws Exception {
+        File folder = tempDir.resolve("root-percent").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            startConnectedAsSender(fsm, serial);
+
+            // Three 128-byte blocks, so the transfer reports 33% / 66% / 100% as blocks complete.
+            byte[] payload = new byte[3 * 128];
+            for (int i = 0; i < payload.length; i++) {
+                payload[i] = (byte) i;
+            }
+            List<Integer> percents = new CopyOnWriteArrayList<>();
+
+            Thread feeder =
+                    new Thread(
+                            () -> {
+                                waitUntil(
+                                        () ->
+                                                serial.getWrittenLines().stream()
+                                                        .anyMatch(
+                                                                l ->
+                                                                        l.contains(
+                                                                                "FILE_CONTENT_REQ")),
+                                        Duration.ofSeconds(5));
+                                serial.feedLine(
+                                        "[[SYNC:FILE_CONTENT_XFER:" + payload.length + "]]");
+                                serial.feedBytes(buildSohBlocks(payload));
+                            },
+                            "fsm-test-feeder-percent");
+            feeder.start();
+
+            byte[] result = fsm.fetchRemoteFileContent("percent.bin", percents::add);
+            feeder.join(5_000);
+
+            assertFalse(feeder.isAlive(), "Feeder thread should have completed");
+            assertTrue(
+                    Arrays.equals(result, payload),
+                    "Bytes received via XMODEM should match the" + " scripted payload");
+            // Only an XMODEM transfer reports: the percent is derived from the block count, so a
+            // single-block payload would report only 100%.
+            assertEquals(
+                    List.of(33, 66, 100),
+                    percents,
+                    "Each completed block reports the transfer" + " percent");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    /** Split a payload into 128-byte SOH blocks with block numbers and CRC, ending with EOT. */
+    private static byte[] buildSohBlocks(byte[] payload) {
+        java.io.ByteArrayOutputStream stream = new java.io.ByteArrayOutputStream();
+        int offset = 0;
+        int blockNumber = 1;
+        while (offset < payload.length) {
+            int length = Math.min(128, payload.length - offset);
+            byte[] block = new byte[128];
+            Arrays.fill(block, (byte) 0x1A);
+            System.arraycopy(payload, offset, block, 0, length);
+            int crc = XModemTransfer.calculateCRC16(block);
+            stream.write(XModemTransfer.SOH);
+            stream.write(blockNumber);
+            stream.write(255 - blockNumber);
+            stream.writeBytes(block);
+            stream.write((crc >> 8) & 0xFF);
+            stream.write(crc & 0xFF);
+            offset += length;
+            blockNumber++;
+        }
+        stream.write(XModemTransfer.EOT);
+        return stream.toByteArray();
+    }
+
     /**
      * Connect (HEARTBEAT) and wait until the manager reports the connection alive, then settle the
      * session as a negotiated sender. The fetch guards require a completed role negotiation on top

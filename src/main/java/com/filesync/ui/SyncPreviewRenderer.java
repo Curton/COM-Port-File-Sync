@@ -35,6 +35,7 @@ import javax.swing.ListSelectionModel;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
@@ -132,6 +133,13 @@ public class SyncPreviewRenderer {
      */
     private String previewSearchQuery = "";
 
+    /**
+     * Content panel of the preview dialog while it is open. Held so a row's preview state can be
+     * pushed into it - the window's wait cursor, and a repaint that swaps the row's button between
+     * "Pre" and its loading label. Null whenever no preview dialog is on screen.
+     */
+    private JPanel previewDialogPanel;
+
     public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
         this(owner, conflictResolver, msg -> {});
     }
@@ -177,13 +185,18 @@ public class SyncPreviewRenderer {
 
         // Every row starts unchecked. No git query is issued when the dialog opens: the sync set is
         // whatever the user picks (individually, Select All, or the "Select Changes (git)" button).
-        int response = showPreviewOptionDialog(previewPanel);
+        this.previewDialogPanel = previewPanel;
+        try {
+            int response = showPreviewOptionDialog(previewPanel);
 
-        if (response != 0) {
-            return null;
+            if (response != 0) {
+                return null;
+            }
+            SyncPreviewPlan plan = createFilteredSyncPlan(syncPreview, previewModel, rows);
+            return new SyncPreviewResult(plan, previewModel, rows);
+        } finally {
+            this.previewDialogPanel = null;
         }
-        SyncPreviewPlan plan = createFilteredSyncPlan(syncPreview, previewModel, rows);
-        return new SyncPreviewResult(plan, previewModel, rows);
     }
 
     /** Build a preview panel without a search field; used by tests that only exercise the table. */
@@ -804,6 +817,28 @@ public class SyncPreviewRenderer {
     }
 
     /**
+     * Label a busy Preview cell shows while the transfer's percent is still unknown (a fetch that
+     * has not reported yet, or an inline one that never reports).
+     */
+    static String previewBusyLabel() {
+        return "...";
+    }
+
+    /**
+     * Label a busy Preview cell shows: the transfer's percent once it is known, the busy label
+     * until then. The percent is capped at 99 so the indicator stays three characters wide like
+     * "Pre" - the column is pinned to that width (see {@link #configurePreviewColumn}) and "100%"
+     * would overflow it.
+     */
+    static String previewProgressLabel(SyncPreviewRow row) {
+        int percent = row.getPreviewProgressPercent();
+        if (percent < 0) {
+            return previewBusyLabel();
+        }
+        return Math.min(percent, 99) + "%";
+    }
+
+    /**
      * Build the preview table's row sorter. All four columns (Sync, Type, Size, Path) are sortable
      * by clicking their headers; Path compares in directory order, Type case-insensitively. The
      * default sort key is the Sync column descending, so a re-sort puts checked rows on top. Model
@@ -1200,49 +1235,105 @@ public class SyncPreviewRenderer {
      * cached (off the EDT, since the fetch runs a serial round-trip), then show the modal diff
      * dialog. Directory operations have no content to preview, and a rename is verified identical
      * by md5 before it is planned, so both are reported inline instead of opening an empty window.
+     *
+     * <p>Single-flight per row: while a row's preview is being fetched or shown, a repeat click is
+     * refused. The preview dialog is modal, so the event queue keeps draining inside its nested
+     * event loop and a queued click would otherwise be dispatched as a fresh request - which is how
+     * a rapid double-click opened two File Change Preview windows.
      */
     void openChangePreview(SyncPreviewRow row) {
         if (row == null) {
             return;
         }
-        if (row.getOperationType() == SyncPreviewOperationType.CREATE_DIR
-                || row.getOperationType() == SyncPreviewOperationType.DELETE_DIR) {
-            showPreviewMessage(
-                    "Directory operation",
-                    "\""
-                            + row.getPath()
-                            + "\" is a directory operation, so there is no file"
-                            + " content to preview.");
+        if (row.isPreviewInProgress()) {
             return;
         }
-        if (row.getOperationType() == SyncPreviewOperationType.RENAME) {
-            showPreviewMessage(
-                    "Rename",
-                    "\""
-                            + row.getAltPath()
-                            + "\" will be renamed to \""
-                            + row.getPath()
-                            + "\" on the other side. Both copies have the same content"
-                            + " (verified by checksum), so there is nothing to compare.");
-            return;
-        }
+        // Claim the row before anything modal opens, so any click dispatched from the dialog's
+        // nested event loop finds the claim already taken.
+        row.setPreviewInProgress(true);
+        row.setPreviewProgressPercent(-1);
+        reflectPreviewState(row);
+        boolean fetchHoldsTheClaim = false;
+        try {
+            if (row.getOperationType() == SyncPreviewOperationType.CREATE_DIR
+                    || row.getOperationType() == SyncPreviewOperationType.DELETE_DIR) {
+                showPreviewMessage(
+                        "Directory operation",
+                        "\""
+                                + row.getPath()
+                                + "\" is a directory operation, so there is no file"
+                                + " content to preview.");
+                return;
+            }
+            if (row.getOperationType() == SyncPreviewOperationType.RENAME) {
+                showPreviewMessage(
+                        "Rename",
+                        "\""
+                                + row.getAltPath()
+                                + "\" will be renamed to \""
+                                + row.getPath()
+                                + "\" on the other side. Both copies have the same content"
+                                + " (verified by checksum), so there is nothing to compare.");
+                return;
+            }
 
-        boolean needsFetch = row.hasBaseVersion() && !row.isBaseFetched();
-        if (needsFetch) {
-            fetchBaseContentThenShowPreview(row);
+            boolean needsFetch = row.hasBaseVersion() && !row.isBaseFetched();
+            if (needsFetch) {
+                // The claim spans the fetch and the dialog its worker opens, so the worker releases
+                // it; releasing it here would let a duplicate through while the fetch is running.
+                fetchHoldsTheClaim = true;
+                fetchBaseContentThenShowPreview(row);
+                return;
+            }
+            showPreviewForRow(row, null);
+        } finally {
+            if (!fetchHoldsTheClaim) {
+                row.setPreviewInProgress(false);
+                row.setPreviewProgressPercent(-1);
+                reflectPreviewState(row);
+            }
+        }
+    }
+
+    /**
+     * Push {@code row}'s preview state into the open preview dialog: the window's wait cursor, plus
+     * a repaint so the row's button swaps between "Pre" and its loading label.
+     */
+    private void reflectPreviewState(SyncPreviewRow row) {
+        if (previewDialogPanel == null) {
             return;
         }
-        showPreviewForRow(row, null);
+        previewDialogPanel.setCursor(
+                row.isPreviewInProgress()
+                        ? java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR)
+                        : null);
+        previewDialogPanel.repaint();
     }
 
     /** Fetch the row's previous (peer) version, then show the preview on the EDT. */
     private void fetchBaseContentThenShowPreview(SyncPreviewRow row) {
         logSink.accept("preview: fetching previous version of " + row.getPath() + " from peer...");
+        // Scoped to this fetch: the transfer runs on the worker thread, and a late report from a
+        // previous fetch must not suppress this one's percentages.
+        java.util.concurrent.atomic.AtomicInteger published =
+                new java.util.concurrent.atomic.AtomicInteger(-1);
         SwingWorker<byte[], Void> worker =
                 new SwingWorker<>() {
                     @Override
                     protected byte[] doInBackground() {
-                        return fetchBaseContent(row);
+                        return fetchBaseContent(
+                                row,
+                                percent -> {
+                                    if (percent <= published.get()) {
+                                        return;
+                                    }
+                                    published.set(percent);
+                                    SwingUtilities.invokeLater(
+                                            () -> {
+                                                row.setPreviewProgressPercent(percent);
+                                                reflectPreviewState(row);
+                                            });
+                                });
                     }
 
                     @Override
@@ -1274,7 +1365,13 @@ public class SyncPreviewRenderer {
                         } else {
                             logSink.accept("preview: peer has no content for " + row.getPath());
                         }
-                        showPreviewForRow(row, failure);
+                        try {
+                            showPreviewForRow(row, failure);
+                        } finally {
+                            row.setPreviewInProgress(false);
+                            row.setPreviewProgressPercent(-1);
+                            reflectPreviewState(row);
+                        }
                     }
                 };
         worker.execute();
@@ -1286,10 +1383,19 @@ public class SyncPreviewRenderer {
      * fetched" state in that case so the preview explains the absence itself.
      */
     byte[] fetchBaseContent(SyncPreviewRow row) {
+        return fetchBaseContent(row, null);
+    }
+
+    /**
+     * Retrieve the peer's copy of {@code row}'s file, reporting the transfer's completion percent
+     * to {@code progress} while it runs. An inline (Base64) response carries no intermediate
+     * progress events, so a fetch that cannot report leaves the sink silent.
+     */
+    byte[] fetchBaseContent(SyncPreviewRow row, java.util.function.IntConsumer progress) {
         if (conflictResolver == null) {
             return null;
         }
-        return conflictResolver.fetchRemoteContent(row.getPath());
+        return conflictResolver.fetchRemoteContent(row.getPath(), progress);
     }
 
     /** Assemble the preview model for a row and show it. */
@@ -1723,6 +1829,14 @@ public class SyncPreviewRenderer {
          * @return the file content, or null if unavailable
          */
         byte[] fetchRemoteContent(String path);
+
+        /**
+         * Fetch remote content, reporting the transfer's completion percent (0-100) to {@code
+         * progress} while it runs. Resolvers that cannot report progress simply ignore the sink.
+         */
+        default byte[] fetchRemoteContent(String path, java.util.function.IntConsumer progress) {
+            return fetchRemoteContent(path);
+        }
     }
 
     /**
@@ -1757,11 +1871,15 @@ public class SyncPreviewRenderer {
                 fallbackLabel.setForeground(new Color(140, 140, 140));
                 return fallbackLabel;
             }
-            setText(previewButtonLabel());
+            boolean loading = previewRow != null && previewRow.isPreviewInProgress();
+            setText(loading ? previewProgressLabel(previewRow) : previewButtonLabel());
+            setEnabled(!loading);
             setToolTipText(
-                    previewRow != null
-                            ? "Preview the changes to " + previewRow.getPath()
-                            : "Preview changes");
+                    loading
+                            ? "Loading the change preview - please wait"
+                            : previewRow != null
+                                    ? "Preview the changes to " + previewRow.getPath()
+                                    : "Preview changes");
             setHorizontalAlignment(SwingConstants.CENTER);
             return this;
         }
@@ -1810,10 +1928,18 @@ public class SyncPreviewRenderer {
         public Component getTableCellEditorComponent(
                 JTable table, Object value, boolean isSelected, int row, int column) {
             SyncPreviewRow previewRow = rowAt(rows, table, row);
+            // Kept enabled even for a busy row: the click must still reach the action listener so
+            // the cell edit is cancelled, otherwise the table stays in editing mode and this button
+            // (with a stale label) lingers after the preview closes. openChangePreview refuses the
+            // repeat click; the renderer paints the dimmed, unusable look.
+            boolean loading = previewRow != null && previewRow.isPreviewInProgress();
+            button.setText(loading ? previewProgressLabel(previewRow) : previewButtonLabel());
             button.setToolTipText(
-                    previewRow != null
-                            ? "Preview the changes to " + previewRow.getPath()
-                            : "Preview changes");
+                    loading
+                            ? "Loading the change preview - please wait"
+                            : previewRow != null
+                                    ? "Preview the changes to " + previewRow.getPath()
+                                    : "Preview changes");
             return button;
         }
 

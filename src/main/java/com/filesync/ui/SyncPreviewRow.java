@@ -26,6 +26,20 @@ final class SyncPreviewRow {
 
     private boolean baseFetched;
 
+    /**
+     * True while this row's change preview is being opened: the peer's version is still being
+     * fetched, or the modal preview dialog is still open. A repeat click on the row's Pre button
+     * must not start a second fetch or open a second window, so it is refused while this holds.
+     */
+    private boolean previewInProgress;
+
+    /**
+     * Completion percent of the fetch transferring the peer's version, as reported by the transfer;
+     * -1 until it reports anything. An inline (base64) fetch carries no intermediate progress
+     * events, so -1 also means "the percent is unknown", never zero.
+     */
+    private volatile int previewProgressPercent = -1;
+
     SyncPreviewRow(
             SyncPreviewOperationType operationType, String path, String sizeText, long sizeBytes) {
         this(operationType, path, sizeText, sizeBytes, null);
@@ -104,6 +118,24 @@ final class SyncPreviewRow {
 
     void setBaseFetched(boolean baseFetched) {
         this.baseFetched = baseFetched;
+    }
+
+    /** True while this row's change preview is being fetched or shown. */
+    boolean isPreviewInProgress() {
+        return previewInProgress;
+    }
+
+    void setPreviewInProgress(boolean previewInProgress) {
+        this.previewInProgress = previewInProgress;
+    }
+
+    /** Transfer percent so far while the preview is being fetched, or -1 when unknown. */
+    int getPreviewProgressPercent() {
+        return previewProgressPercent;
+    }
+
+    void setPreviewProgressPercent(int previewProgressPercent) {
+        this.previewProgressPercent = previewProgressPercent;
     }
 
     /**

@@ -9,6 +9,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 import javax.swing.JCheckBox;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
@@ -73,6 +74,16 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     public byte[] fetchRemoteContent(String path) {
         try {
             return syncManager.fetchRemoteFileContent(path);
+        } catch (Exception e) {
+            logController.log("Failed to fetch remote content for " + path + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    @Override
+    public byte[] fetchRemoteContent(String path, IntConsumer progress) {
+        try {
+            return syncManager.fetchRemoteFileContent(path, progress);
         } catch (Exception e) {
             logController.log("Failed to fetch remote content for " + path + ": " + e.getMessage());
             return null;
