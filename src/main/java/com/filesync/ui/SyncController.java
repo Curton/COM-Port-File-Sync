@@ -53,6 +53,12 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
                 new javax.swing.Timer(
                         PROGRESS_RESET_DELAY_MS,
                         event -> {
+                            // A silent mid-sync stretch (e.g. a long delta encode with no block
+                            // progress) can let the timer fire; that must not flash Ready over
+                            // live sync progress.
+                            if (syncManager.isSyncing()) {
+                                return;
+                            }
                             javax.swing.JProgressBar bar = components.getProgressBar();
                             bar.setIndeterminate(false);
                             bar.setValue(0);
@@ -632,7 +638,13 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         logController.log("[DEBUG] runSyncPreview: initiateSync returned");
     }
 
-    /** Arms the one-shot timer that reverts the progress bar to Ready (EDT only). */
+    /**
+     * Arms the one-shot timer that reverts the progress bar to Ready (EDT only). Progress handlers
+     * call this on every event, not just the completion handlers: preview manifest/fetch transfers
+     * and drop transfers post progress with no SYNC_COMPLETE following, so the last block has to
+     * schedule its own revert. The timer callback skips the revert while a sync session is active,
+     * so a silent mid-sync stretch cannot flash Ready over live progress.
+     */
     private void scheduleProgressBarReset() {
         progressResetTimer.restart();
     }
@@ -719,7 +731,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     private int lastManifestPercent = 0;
 
     public void onManifestProgress(int processed, int total, String fileName) {
-        cancelProgressBarReset();
+        scheduleProgressBarReset();
         javax.swing.JProgressBar bar = components.getProgressBar();
         if (processed < 0) {
             // Sender waiting for the remote manifest: nothing countable yet, show motion instead
@@ -756,7 +768,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
     }
 
     public void onFileProgress(int currentFile, int totalFiles, String fileName) {
-        cancelProgressBarReset();
+        scheduleProgressBarReset();
         javax.swing.JProgressBar bar = components.getProgressBar();
         if (totalFiles <= 0) {
             // The receiver's unknown-total batch path reports 0; a percentage of zero is
@@ -772,7 +784,7 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
 
     public void onTransferProgress(
             int currentBlock, int totalBlocks, long bytesTransferred, double speedBytesPerSec) {
-        cancelProgressBarReset();
+        scheduleProgressBarReset();
         components.getProgressBar().setIndeterminate(false);
         String speedStr = UiFormatting.formatSpeed(speedBytesPerSec);
         if (totalBlocks > 0) {
