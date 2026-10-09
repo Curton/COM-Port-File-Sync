@@ -16,7 +16,7 @@ import java.util.Collections;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
-import javax.swing.JDialog;
+import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -425,7 +425,13 @@ public class FileDiffPreviewPanel extends JPanel {
         return !model.isText();
     }
 
-    /** Show a modal preview dialog. Returns when the user closes it. */
+    /**
+     * Show a blocking preview window. Returns when the user closes it.
+     *
+     * <p>The window is a frame rather than a dialog so its native title bar carries the
+     * minimize/maximize/close buttons a side-by-side diff this wide genuinely needs; the blocking
+     * half of the dialog contract is kept by {@link ModalFrameSupport}.
+     */
     public static void showDialog(java.awt.Component parent, FileDiffPreviewModel model) {
         if (model == null) {
             return;
@@ -435,22 +441,19 @@ public class FileDiffPreviewPanel extends JPanel {
                         ? window
                         : javax.swing.SwingUtilities.getWindowAncestor(parent);
         String title = "File Change Preview - " + model.getFileName();
-        JDialog dialog =
-                owner instanceof java.awt.Frame frame
-                        ? new JDialog(frame, title, true)
-                        : new JDialog((java.awt.Dialog) null, title, true);
-        dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        dialog.setContentPane(new FileDiffPreviewPanel(model));
+        JFrame frame = new JFrame(title);
+        frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        frame.setContentPane(new FileDiffPreviewPanel(model));
 
         JButton closeButton = new JButton("Close");
-        closeButton.addActionListener(e -> dialog.dispose());
+        closeButton.addActionListener(e -> frame.dispose());
         JPanel closePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
         closePanel.add(closeButton);
-        dialog.getContentPane().add(closePanel, BorderLayout.SOUTH);
-        dialog.getRootPane().setDefaultButton(closeButton);
+        frame.getContentPane().add(closePanel, BorderLayout.SOUTH);
+        frame.getRootPane().setDefaultButton(closeButton);
 
-        dialog.pack();
-        dialog.setLocationRelativeTo(owner);
-        dialog.setVisible(true);
+        frame.pack();
+        frame.setLocationRelativeTo(owner);
+        ModalFrameSupport.showAndWait(frame, owner);
     }
 }

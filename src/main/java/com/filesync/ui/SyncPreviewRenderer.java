@@ -1707,8 +1707,9 @@ public class SyncPreviewRenderer {
             return;
         }
 
-        // The dialog is modal, so it has to be opened on the event dispatch thread; calling into
-        // this method from a worker (the preview flow does) hops there through done().
+        // The conflict window blocks its caller until it closes, so it has to be opened on the
+        // event dispatch thread; calling into this method from a worker (the preview flow does)
+        // hops there through done().
         SwingWorker<Void, Void> dialogWorker =
                 new SwingWorker<>() {
                     @Override
@@ -1731,9 +1732,9 @@ public class SyncPreviewRenderer {
     }
 
     /**
-     * Open the unified conflict resolution dialog. Extracted as a seam: the dialog is a modal
-     * window and cannot be created where no display is available, so tests substitute a stub that
-     * models a completed resolution.
+     * Open the unified conflict resolution window. Extracted as a seam: the window cannot be
+     * created where no display is available, so tests substitute a stub that models a completed
+     * resolution.
      */
     protected ConflictResolutionDialog.Result showConflictDialog(
             List<ConflictInfo> conflicts, ConflictResolver resolver) {

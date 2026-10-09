@@ -23,8 +23,8 @@ import javax.swing.SwingWorker;
  * resolved locally and dropped from the queue without ever showing a card, which is what the
  * pre-fetch filter used to guarantee.
  *
- * <p>The queue owns no window on purpose. A modal {@link javax.swing.JDialog} cannot be built where
- * no display exists — the unit-test JVM runs headless, so surefire turns any window into a {@link
+ * <p>The queue owns no window on purpose. A windowed UI cannot be built where no display exists —
+ * the unit-test JVM runs headless, so surefire turns any window into a {@link
  * java.awt.HeadlessException} — and the card lifecycle is exactly the part that needs covering
  * against a real queue. It therefore reports through {@link View}, and {@link
  * ConflictResolutionDialog} is left as a thin shell that renders {@link ViewState} and closes on

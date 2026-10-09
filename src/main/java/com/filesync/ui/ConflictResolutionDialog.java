@@ -7,23 +7,27 @@ import java.awt.FlowLayout;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
-import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.WindowConstants;
 
 /**
- * Unified dialog for resolving multiple file conflicts in one window. Shows one conflict at a time
- * with Next/Previous navigation and progress (e.g. 2/5). User can cancel at any time to abort the
- * entire resolution.
+ * Unified window for resolving multiple file conflicts in one go. Shows one conflict at a time with
+ * Next/Previous navigation and progress (e.g. 2/5). User can cancel at any time to abort the entire
+ * resolution.
  *
  * <p>The window is a thin shell: the card lifecycle — which card is in front, when its panel is
  * built, when the remote version of a text conflict is fetched, and what the resolutions amounted
  * to — lives in {@link ConflictQueueController}, which reports the state the header and the
- * controls render. That split is what keeps the queue testable: a modal dialog cannot be built in
+ * controls render. That split is what keeps the queue testable: a windowed UI cannot be built in
  * the headless JVM the unit tests run in.
+ *
+ * <p>It is a {@link JFrame} rather than a dialog because only a frame's native title bar carries
+ * the minimize/maximize/close buttons a merge view this dense wants; {@link ModalFrameSupport}
+ * supplies the "block the caller until the window closes" half of the dialog contract.
  */
-public class ConflictResolutionDialog extends JDialog {
+public class ConflictResolutionDialog extends JFrame {
 
     public enum Result {
         /** All conflicts resolved successfully */
@@ -51,13 +55,12 @@ public class ConflictResolutionDialog extends JDialog {
     private final JButton applyToAllButton;
 
     public ConflictResolutionDialog(
-            JFrame parent,
-            List<ConflictInfo> conflicts,
-            RemoteContentFetcher remoteContentFetcher) {
-        super(parent, "Resolve Conflicts", true);
+            List<ConflictInfo> conflicts, RemoteContentFetcher remoteContentFetcher) {
+        super("Resolve Conflicts");
 
+        setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
         setMinimumSize(new Dimension(920, 720));
-        setLocationRelativeTo(parent);
+        setSize(new Dimension(920, 720));
 
         progressLabel = new JLabel();
         pathLabel = new JLabel();
@@ -99,9 +102,9 @@ public class ConflictResolutionDialog extends JDialog {
     }
 
     /**
-     * Show the unified conflict resolution dialog.
+     * Show the unified conflict resolution window.
      *
-     * @param parent the parent frame
+     * @param parent the parent frame the window is centered on and blocked while it is open
      * @param conflicts list of conflicts to resolve
      * @param remoteContentFetcher used to fetch the remote version of a text conflict when its card
      *     is shown; may be null, in which case panels are built from whatever content they already
@@ -116,8 +119,9 @@ public class ConflictResolutionDialog extends JDialog {
             return Result.COMPLETED;
         }
         ConflictResolutionDialog dialog =
-                new ConflictResolutionDialog(parent, conflicts, remoteContentFetcher);
-        dialog.setVisible(true);
+                new ConflictResolutionDialog(conflicts, remoteContentFetcher);
+        dialog.setLocationRelativeTo(parent);
+        ModalFrameSupport.showAndWait(dialog, parent);
         return dialog.getResult();
     }
 
