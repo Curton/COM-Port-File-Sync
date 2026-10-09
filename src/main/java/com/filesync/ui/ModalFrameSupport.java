@@ -1,5 +1,6 @@
 package com.filesync.ui;
 
+import java.awt.Frame;
 import java.awt.SecondaryLoop;
 import java.awt.Toolkit;
 import java.awt.Window;
@@ -40,18 +41,54 @@ final class ModalFrameSupport {
                         loop.exit();
                     }
                 });
+        // While the frame is up the owner refuses all input, so the only way back into the app is
+        // the frame itself. Anything that buries it - the taskbar or the shell raising the owner,
+        // the frame left minimized in the taskbar - would therefore dead-end the whole flow. Every
+        // activation of the owner drags the frame back out in front, which is what the native
+        // owner/dialog pair enforces for free.
+        WindowAdapter ownerGuard =
+                new WindowAdapter() {
+                    @Override
+                    public void windowActivated(WindowEvent e) {
+                        if (frame.isShowing()) {
+                            raiseToFront(frame);
+                        }
+                    }
+                };
         if (owner != null) {
             owner.setEnabled(false);
+            owner.addWindowListener(ownerGuard);
         }
         frame.setVisible(true);
+        raiseToFront(frame);
         // On the dispatch thread the frame cannot be closed between setVisible and enter - no
         // event can run there; the check only keeps a stray off-EDT call from hanging in enter().
         if (!closed.get()) {
             loop.enter();
         }
         if (owner != null) {
+            owner.removeWindowListener(ownerGuard);
             owner.setEnabled(true);
             owner.toFront();
         }
+    }
+
+    /**
+     * Put {@code frame} in front and focused, de-iconifying it first if needed.
+     *
+     * <p>A plain toFront is not enough at birth: a window shown while its process is not the
+     * foreground one - the user switched away during the serial fetch that precedes a preview - is
+     * born behind, and Windows' foreground lock silently ignores toFront for background processes.
+     * A brief always-on-top assignment carries the right to jump the z-order; dropping it right
+     * afterwards restores normal stacking against other applications.
+     */
+    private static void raiseToFront(JFrame frame) {
+        if ((frame.getExtendedState() & Frame.ICONIFIED) != 0) {
+            frame.setExtendedState(frame.getExtendedState() & ~Frame.ICONIFIED);
+        }
+        frame.setAlwaysOnTop(true);
+        frame.toFront();
+        frame.requestFocus();
+        frame.setAlwaysOnTop(false);
     }
 }
