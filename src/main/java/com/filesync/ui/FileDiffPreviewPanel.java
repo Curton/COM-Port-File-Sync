@@ -445,7 +445,6 @@ public class FileDiffPreviewPanel extends JPanel {
         JButton closeButton = new JButton("Close");
         closeButton.addActionListener(e -> dialog.dispose());
         JPanel closePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
-        closePanel.add(DialogMaximizeButton.create(dialog));
         closePanel.add(closeButton);
         dialog.getContentPane().add(closePanel, BorderLayout.SOUTH);
         dialog.getRootPane().setDefaultButton(closeButton);
