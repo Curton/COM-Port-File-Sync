@@ -529,10 +529,11 @@ class FileSyncManagerTest {
         try {
             fsm.startListening("TEST");
 
-            // Scripted peer: announce a large shared text, then play the XMODEM sender role —
-            // a single SOH block carrying the payload, followed by EOT.
+            // Scripted peer: announce a large shared text (asking for the local clipboard copy),
+            // then play the XMODEM sender role — a single SOH block carrying the payload, followed
+            // by EOT.
             byte[] payload = "shared text body".getBytes(StandardCharsets.UTF_8);
-            serial.feedLine("[[SYNC:SHARED_TEXT_DATA:12345:false:" + payload.length + "]]");
+            serial.feedLine("[[SYNC:SHARED_TEXT_DATA:12345:false:" + payload.length + ":true]]");
             serial.feedBytes(ScriptedSerialPortManager.buildSohFrame(payload));
 
             waitUntil(
@@ -546,7 +547,8 @@ class FileSyncManagerTest {
                                                                                     .SharedTextReceivedEvent
                                                                             ste
                                                             && ste.getText()
-                                                                    .equals("shared text body")),
+                                                                    .equals("shared text" + " body")
+                                                            && ste.isAutoCopyToClipboard()),
                     Duration.ofSeconds(10));
             waitUntil(
                     () ->

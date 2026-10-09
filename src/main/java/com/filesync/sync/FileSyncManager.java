@@ -459,8 +459,8 @@ public class FileSyncManager {
     }
 
     /** Send shared text to remote. */
-    public void sendSharedText(String text) {
-        sharedTextService.queueSharedText(text);
+    public void sendSharedText(String text, boolean autoCopyToClipboard) {
+        sharedTextService.queueSharedText(text, autoCopyToClipboard);
     }
 
     /**
@@ -471,11 +471,12 @@ public class FileSyncManager {
      * Runs on the listener thread, which is parked inside the XMODEM receive.
      */
     private void handleInterleavedFrameMessage(SyncProtocol.Message msg) {
-        if (!SyncProtocol.CMD_SHARED_TEXT.equals(msg.getCommand()) || msg.getParams().length != 2) {
+        if (!SyncProtocol.CMD_SHARED_TEXT.equals(msg.getCommand()) || msg.getParams().length < 2) {
             return;
         }
         try {
-            sharedTextService.handleIncomingSharedText(msg.getParamAsLong(0), msg.getParam(1));
+            sharedTextService.handleIncomingSharedText(
+                    msg.getParamAsLong(0), msg.getParam(1), msg.getParamAsBoolean(2));
         } catch (IllegalArgumentException e) {
             // Malformed interleaved frame (e.g. bad timestamp): drop it, the file session
             // is unaffected and the regular listener loop keeps handling well-formed traffic.
@@ -1310,7 +1311,7 @@ public class FileSyncManager {
             case SyncProtocol.CMD_SHARED_TEXT -> {
                 if (msg.getParams().length >= 2) {
                     sharedTextService.handleIncomingSharedText(
-                            msg.getParamAsLong(0), msg.getParam(1));
+                            msg.getParamAsLong(0), msg.getParam(1), msg.getParamAsBoolean(2));
                 } else {
                     sharedTextService.handleIncomingSharedText(msg.getParam(0));
                 }
@@ -1318,7 +1319,10 @@ public class FileSyncManager {
             case SyncProtocol.CMD_SHARED_TEXT_DATA -> {
                 if (msg.getParams().length >= 3) {
                     sharedTextService.handleIncomingSharedTextData(
-                            msg.getParamAsLong(0), msg.getParamAsBoolean(1), msg.getParamAsInt(2));
+                            msg.getParamAsLong(0),
+                            msg.getParamAsBoolean(1),
+                            msg.getParamAsInt(2),
+                            msg.getParamAsBoolean(3));
                 } else {
                     eventBus.post(new SyncEvent.ErrorEvent("Invalid shared text data message"));
                 }

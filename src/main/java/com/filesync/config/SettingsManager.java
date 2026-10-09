@@ -23,6 +23,7 @@ public class SettingsManager {
     private static final String PREF_RESPECT_GITIGNORE = "respectGitignore";
     private static final String PREF_FAST_MODE = "fastMode";
     private static final String PREF_DEBUG_MODE = "debugMode";
+    private static final String PREF_SHARED_TEXT_AUTO_COPY = "sharedTextAutoCopy";
     private static final String PREF_FOLDER_MAPPING_PREFIX = "folderMapping.";
     private static final String PREF_FOLDER_MAPPING_COUNT = "count";
     private static final String PREF_FOLDER_MAPPING_SENDER = "sender";
@@ -74,6 +75,7 @@ public class SettingsManager {
     private boolean respectGitignore;
     private boolean fastMode;
     private boolean debugMode;
+    private boolean sharedTextAutoCopy;
 
     /** Creates a SettingsManager using the production preferences node. */
     public SettingsManager() {
@@ -106,6 +108,7 @@ public class SettingsManager {
         respectGitignore = prefs.getBoolean(PREF_RESPECT_GITIGNORE, false);
         fastMode = prefs.getBoolean(PREF_FAST_MODE, true);
         debugMode = prefs.getBoolean(PREF_DEBUG_MODE, false);
+        sharedTextAutoCopy = prefs.getBoolean(PREF_SHARED_TEXT_AUTO_COPY, false);
     }
 
     /** Save current settings to preferences storage */
@@ -121,6 +124,7 @@ public class SettingsManager {
         prefs.putBoolean(PREF_RESPECT_GITIGNORE, respectGitignore);
         prefs.putBoolean(PREF_FAST_MODE, fastMode);
         prefs.putBoolean(PREF_DEBUG_MODE, debugMode);
+        prefs.putBoolean(PREF_SHARED_TEXT_AUTO_COPY, sharedTextAutoCopy);
         persistPreferences();
     }
 
@@ -242,6 +246,14 @@ public class SettingsManager {
 
     public void setDebugMode(boolean debugMode) {
         this.debugMode = debugMode;
+    }
+
+    public boolean isSharedTextAutoCopy() {
+        return sharedTextAutoCopy;
+    }
+
+    public void setSharedTextAutoCopy(boolean sharedTextAutoCopy) {
+        this.sharedTextAutoCopy = sharedTextAutoCopy;
     }
 
     /**

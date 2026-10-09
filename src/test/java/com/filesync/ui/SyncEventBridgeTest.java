@@ -56,7 +56,7 @@ class SyncEventBridgeTest {
         bridge.handleSyncEvent(new SyncEvent.TransferCompleteEvent());
         bridge.handleSyncEvent(new SyncEvent.LogEvent(logMessage));
         bridge.handleSyncEvent(new SyncEvent.ErrorEvent(errorMessage));
-        bridge.handleSyncEvent(new SyncEvent.SharedTextReceivedEvent(sharedText));
+        bridge.handleSyncEvent(new SyncEvent.SharedTextReceivedEvent(sharedText, true));
         bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(true));
         bridge.handleSyncEvent(new SyncEvent.ConnectionEvent(false));
         bridge.handleSyncEvent(new SyncEvent.SyncControlRefreshEvent());
@@ -70,7 +70,7 @@ class SyncEventBridgeTest {
         verify(syncController).onTransferComplete();
         verify(syncController).onLog(logMessage);
         verify(syncController).onError(errorMessage);
-        verify(sharedTextController).onSharedTextReceived(sharedText);
+        verify(sharedTextController).onSharedTextReceived(sharedText, true);
         verify(syncController).onConnectionStatusChanged(true);
         verify(syncController).onConnectionStatusChanged(false);
         verify(syncController).updateSyncButtonState();

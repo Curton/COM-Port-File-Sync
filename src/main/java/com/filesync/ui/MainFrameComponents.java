@@ -42,6 +42,7 @@ public class MainFrameComponents {
     private final JCheckBox fastModeCheckBox;
     private final JProgressBar progressBar;
     private final JTextArea sharedTextArea;
+    private final JCheckBox sendToRemoteClipboardCheckBox;
     private final JButton sendSharedTextButton;
     private final JButton overwriteFromClipboardButton;
     private final JButton appendFromClipboardButton;
@@ -95,6 +96,11 @@ public class MainFrameComponents {
         sharedTextArea.setLineWrap(true);
         sharedTextArea.setWrapStyleWord(true);
         sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+
+        sendToRemoteClipboardCheckBox = new JCheckBox("To Remote Clipboard");
+        sendToRemoteClipboardCheckBox.setToolTipText(
+                "When checked, the sent text is copied directly into the remote clipboard");
+        sendToRemoteClipboardCheckBox.setMargin(new Insets(2, 4, 2, 4));
 
         sendSharedTextButton = new JButton("Send Text");
         overwriteFromClipboardButton = new JButton("Overwrite from Clipboard");
@@ -204,6 +210,7 @@ public class MainFrameComponents {
         sharedPanel.add(sharedScroll, BorderLayout.CENTER);
 
         JPanel clipboardButtonsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 5));
+        clipboardButtonsPanel.add(sendToRemoteClipboardCheckBox);
         clipboardButtonsPanel.add(sendSharedTextButton);
         clipboardButtonsPanel.add(overwriteFromClipboardButton);
         clipboardButtonsPanel.add(appendFromClipboardButton);
@@ -363,6 +370,10 @@ public class MainFrameComponents {
 
     public JTextArea getSharedTextArea() {
         return sharedTextArea;
+    }
+
+    public JCheckBox getSendToRemoteClipboardCheckBox() {
+        return sendToRemoteClipboardCheckBox;
     }
 
     public JButton getSendSharedTextButton() {

@@ -81,7 +81,7 @@ public class MainFrame extends JFrame {
                         logController,
                         syncController::updateSyncButtonState);
         sharedTextController =
-                new SharedTextController(components, state, syncManager, logController);
+                new SharedTextController(components, state, syncManager, settings, logController);
         combinedLogController =
                 new CombinedLogController(
                         components, syncManager, folderController, settings, logController);
@@ -167,6 +167,8 @@ public class MainFrame extends JFrame {
                 syncManager::setRespectGitignoreMode);
         loadModeCheckBox(
                 components.getFastModeCheckBox(), settings::isFastMode, syncManager::setFastMode);
+
+        components.getSendToRemoteClipboardCheckBox().setSelected(settings.isSharedTextAutoCopy());
 
         syncController.updateRespectGitignoreState();
         syncController.applyDirection(state.isSender());

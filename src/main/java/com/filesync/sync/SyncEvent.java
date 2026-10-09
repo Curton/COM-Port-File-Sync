@@ -215,13 +215,22 @@ public interface SyncEvent {
 
     final class SharedTextReceivedEvent implements SyncEvent {
         private final String text;
+        private final boolean autoCopyToClipboard;
 
-        public SharedTextReceivedEvent(String text) {
+        /**
+         * {@code autoCopyToClipboard} marks a text the sender asked to land in the local clipboard.
+         */
+        public SharedTextReceivedEvent(String text, boolean autoCopyToClipboard) {
             this.text = text;
+            this.autoCopyToClipboard = autoCopyToClipboard;
         }
 
         public String getText() {
             return text;
+        }
+
+        public boolean isAutoCopyToClipboard() {
+            return autoCopyToClipboard;
         }
 
         @Override

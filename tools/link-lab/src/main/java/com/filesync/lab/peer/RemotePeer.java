@@ -303,7 +303,7 @@ public final class RemotePeer implements AutoCloseable {
 
     public void sendSharedText(String text) {
         trace.log(Trace.Dir.PEER, "shared text -> app: " + abbreviate(text));
-        manager.sendSharedText(text);
+        manager.sendSharedText(text, false);
     }
 
     public List<String> receivedTexts() {

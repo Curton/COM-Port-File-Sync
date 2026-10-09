@@ -929,15 +929,10 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public void sendSharedText(long timestamp, String text) {
+        public void sendSharedText(long timestamp, String text, boolean autoCopyToClipboard) {
             lastSharedText = text;
             sharedTextSent.set(true);
             sharedTextSentWhileSyncing.set(syncingState.get());
-        }
-
-        @Override
-        public void sendSharedText(String text) {
-            sendSharedText(System.currentTimeMillis(), text);
         }
 
         @Override
@@ -981,12 +976,7 @@ class ReconnectRecoveryTest {
         }
 
         @Override
-        public void sendSharedText(String text) throws IOException {
-            sendSharedText(System.currentTimeMillis(), text);
-        }
-
-        @Override
-        public void sendSharedText(long timestamp, String text) {
+        public void sendSharedText(long timestamp, String text, boolean autoCopyToClipboard) {
             sentTexts.add(text);
         }
 

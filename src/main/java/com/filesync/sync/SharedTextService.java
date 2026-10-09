@@ -39,9 +39,14 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
     }
 
     public void queueSharedText(String text) {
+        queueSharedText(text, false);
+    }
+
+    public void queueSharedText(String text, boolean autoCopyToClipboard) {
         String normalizedText = normalizeText(text);
         SharedTextPayload payload =
-                new SharedTextPayload(System.currentTimeMillis(), normalizedText);
+                new SharedTextPayload(
+                        System.currentTimeMillis(), normalizedText, autoCopyToClipboard);
         pendingSharedText.set(payload);
         flushIfIdle();
     }
@@ -90,7 +95,8 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                     return;
                 }
                 try {
-                    protocol.sendSharedText(textToSend.timestamp, textToSend.text);
+                    protocol.sendSharedText(
+                            textToSend.timestamp, textToSend.text, textToSend.autoCopyToClipboard);
                     eventBus.post(new SyncEvent.LogEvent("Shared text sent"));
                     if (pendingSharedText.compareAndSet(textToSend, null)) {
                         return;
@@ -114,12 +120,14 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
     }
 
     public void handleIncomingSharedText(String encodedPayload) {
-        handleIncomingSharedText(System.currentTimeMillis(), encodedPayload);
+        handleIncomingSharedText(System.currentTimeMillis(), encodedPayload, false);
     }
 
-    public void handleIncomingSharedText(long remoteTimestamp, String encodedPayload) {
+    public void handleIncomingSharedText(
+            long remoteTimestamp, String encodedPayload, boolean autoCopyToClipboard) {
         try {
-            SharedTextPayload incoming = decodeSharedTextPayload(remoteTimestamp, encodedPayload);
+            SharedTextPayload incoming =
+                    decodeSharedTextPayload(remoteTimestamp, encodedPayload, autoCopyToClipboard);
             if (incoming == null) {
                 return;
             }
@@ -127,7 +135,9 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
                 return;
             }
             if (markTimestampIfNewer(incoming.timestamp)) {
-                eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+                eventBus.post(
+                        new SyncEvent.SharedTextReceivedEvent(
+                                incoming.text, incoming.autoCopyToClipboard));
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
         } catch (IllegalArgumentException e) {
@@ -137,16 +147,22 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
     }
 
     public void handleIncomingSharedTextData(
-            long remoteTimestamp, boolean wasCompressed, int expectedSize) {
+            long remoteTimestamp,
+            boolean wasCompressed,
+            int expectedSize,
+            boolean autoCopyToClipboard) {
         try {
             String text = protocol.receiveSharedTextData(wasCompressed, expectedSize);
             SharedTextPayload incoming =
-                    new SharedTextPayload(remoteTimestamp, normalizeText(text));
+                    new SharedTextPayload(
+                            remoteTimestamp, normalizeText(text), autoCopyToClipboard);
             if (!isNewerThanLatest(incoming.timestamp)) {
                 return;
             }
             if (markTimestampIfNewer(incoming.timestamp)) {
-                eventBus.post(new SyncEvent.SharedTextReceivedEvent(incoming.text));
+                eventBus.post(
+                        new SyncEvent.SharedTextReceivedEvent(
+                                incoming.text, incoming.autoCopyToClipboard));
                 eventBus.post(new SyncEvent.LogEvent("Shared text received"));
             }
         } catch (TransferCancelledException e) {
@@ -212,10 +228,11 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
         latestAcceptedTimestamp.set(0);
     }
 
-    private SharedTextPayload decodeSharedTextPayload(long remoteTimestamp, String encodedPayload) {
+    private SharedTextPayload decodeSharedTextPayload(
+            long remoteTimestamp, String encodedPayload, boolean autoCopyToClipboard) {
         try {
             String text = protocol.decodeSharedText(encodedPayload);
-            return new SharedTextPayload(remoteTimestamp, normalizeText(text));
+            return new SharedTextPayload(remoteTimestamp, normalizeText(text), autoCopyToClipboard);
         } catch (IllegalArgumentException e) {
             throw e;
         }
@@ -241,6 +258,6 @@ public class SharedTextService implements SyncProtocol.InterleavableTextSource {
         return Objects.requireNonNullElse(text, "");
     }
 
-    private record SharedTextPayload(long timestamp, String text)
+    private record SharedTextPayload(long timestamp, String text, boolean autoCopyToClipboard)
             implements SyncProtocol.PendingText {}
 }

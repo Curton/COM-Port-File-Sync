@@ -76,9 +76,14 @@ class SyncEventTest {
     @Test
     void sharedTextReceivedEventStoresText() {
         SyncEvent.SharedTextReceivedEvent event =
-                new SyncEvent.SharedTextReceivedEvent("Hello World");
+                new SyncEvent.SharedTextReceivedEvent("Hello World", false);
         assertEquals("Hello World", event.getText());
+        assertFalse(event.isAutoCopyToClipboard());
         assertEquals(SyncEventType.SHARED_TEXT_RECEIVED, event.getType());
+
+        SyncEvent.SharedTextReceivedEvent autoCopyEvent =
+                new SyncEvent.SharedTextReceivedEvent("Hello World", true);
+        assertTrue(autoCopyEvent.isAutoCopyToClipboard());
     }
 
     @Test

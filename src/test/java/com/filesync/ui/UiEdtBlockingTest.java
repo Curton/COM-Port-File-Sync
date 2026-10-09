@@ -115,7 +115,11 @@ class UiEdtBlockingTest {
         state.setConnected(true);
         SharedTextController controller =
                 new SharedTextController(
-                        components, state, syncManager, new LogController(new JTextArea()));
+                        components,
+                        state,
+                        syncManager,
+                        new SettingsManager(true),
+                        new LogController(new JTextArea()));
 
         CountDownLatch callDone = new CountDownLatch(1);
         SwingUtilities.invokeLater(
@@ -204,7 +208,7 @@ class UiEdtBlockingTest {
         }
 
         @Override
-        public void sendSharedText(String text) {
+        public void sendSharedText(String text, boolean autoCopyToClipboard) {
             sendEntered.countDown();
             awaitRelease();
         }

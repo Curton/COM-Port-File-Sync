@@ -21,6 +21,81 @@ import org.junit.jupiter.api.Test;
 class SharedTextServiceTest {
 
     @Test
+    void queueSharedTextPassesTheAutoCopyFlagToTheProtocol() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        new SimpleSyncEventBus(),
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.queueSharedText("plain");
+        service.queueSharedText("to clipboard", true);
+
+        assertEquals(List.of(false, true), protocol.getSentAutoCopyFlags());
+    }
+
+    @Test
+    void handleIncomingSharedTextCarriesTheAutoCopyFlagInTheEvent() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<Boolean> autoCopyFlags = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                        autoCopyFlags.add(sharedTextEvent.isAutoCopyToClipboard());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedText(100L, "plain", false);
+        service.handleIncomingSharedText(200L, "to clipboard", true);
+
+        assertEquals(List.of(false, true), autoCopyFlags);
+    }
+
+    @Test
+    void handleIncomingSharedTextDataCarriesTheAutoCopyFlagInTheEvent() {
+        TestSharedTextProtocol protocol = new TestSharedTextProtocol();
+        protocol.setReceivedSharedText("big text");
+        SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
+        List<Boolean> autoCopyFlags = new ArrayList<>();
+        eventBus.register(
+                event -> {
+                    if (event instanceof SyncEvent.SharedTextReceivedEvent sharedTextEvent) {
+                        autoCopyFlags.add(sharedTextEvent.isAutoCopyToClipboard());
+                    }
+                });
+
+        SharedTextService service =
+                new SharedTextService(
+                        protocol,
+                        eventBus,
+                        () -> true,
+                        () -> true,
+                        () -> false,
+                        () -> false,
+                        () -> true);
+
+        service.handleIncomingSharedTextData(777L, true, 8, true);
+
+        assertEquals(List.of(true), autoCopyFlags);
+    }
+
+    @Test
     void queueSharedTextSendsLatestPendingValueAfterBusyTransferCompletes() {
         TestSharedTextProtocol protocol = new TestSharedTextProtocol();
         SimpleSyncEventBus eventBus = new SimpleSyncEventBus();
@@ -81,7 +156,7 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedTextData(777L, true, 17);
+        service.handleIncomingSharedTextData(777L, true, 17, false);
 
         assertEquals("with explicit length", receivedText.get());
         assertEquals(17, protocol.getReceivedSharedTextLength());
@@ -149,8 +224,8 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedText(200L, "newer");
-        service.handleIncomingSharedText(100L, "older");
+        service.handleIncomingSharedText(200L, "newer", false);
+        service.handleIncomingSharedText(100L, "older", false);
 
         assertEquals(List.of("newer"), receivedText);
     }
@@ -179,7 +254,7 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedTextData(123L, false, 0);
+        service.handleIncomingSharedTextData(123L, false, 0, false);
 
         assertTrue(
                 errors.stream()
@@ -207,7 +282,7 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedTextData(123L, false, 0);
+        service.handleIncomingSharedTextData(123L, false, 0, false);
 
         assertTrue(
                 events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
@@ -387,7 +462,7 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedText(100L, "some text");
+        service.handleIncomingSharedText(100L, "some text", false);
 
         assertTrue(
                 logs.contains("Shared text received"),
@@ -416,12 +491,12 @@ class SharedTextServiceTest {
                         () -> false,
                         () -> true);
 
-        service.handleIncomingSharedText(300L, "newer");
+        service.handleIncomingSharedText(300L, "newer", false);
         // Simulate session teardown (stopListening) between connections.
         service.clearPendingSharedText();
         // After reconnect, a payload with an older timestamp (e.g. clock skew) must not be
         // silently rejected anymore.
-        service.handleIncomingSharedText(100L, "older but fresh");
+        service.handleIncomingSharedText(100L, "older but fresh", false);
 
         assertEquals(List.of("newer", "older but fresh"), receivedText);
     }
@@ -569,6 +644,11 @@ class SharedTextServiceTest {
                     public String text() {
                         return "kept";
                     }
+
+                    @Override
+                    public boolean autoCopyToClipboard() {
+                        return false;
+                    }
                 };
 
         assertFalse(
@@ -580,6 +660,7 @@ class SharedTextServiceTest {
     private static final class TestSharedTextProtocol extends SyncProtocol {
         private final AtomicBoolean sending = new AtomicBoolean(false);
         private final List<String> sentTexts = new ArrayList<>();
+        private final List<Boolean> sentAutoCopyFlags = new ArrayList<>();
         private Consumer<String> beforeSendHook;
         private String receivedSharedText = "";
         private IllegalArgumentException decodeFailure;
@@ -592,21 +673,18 @@ class SharedTextServiceTest {
         }
 
         @Override
-        public void sendSharedText(long timestamp, String text) throws IOException {
+        public void sendSharedText(long timestamp, String text, boolean autoCopyToClipboard)
+                throws IOException {
             sending.set(true);
             try {
                 sentTexts.add(text);
+                sentAutoCopyFlags.add(autoCopyToClipboard);
                 if (beforeSendHook != null) {
                     beforeSendHook.accept(text);
                 }
             } finally {
                 sending.set(false);
             }
-        }
-
-        @Override
-        public void sendSharedText(String text) throws IOException {
-            sendSharedText(System.currentTimeMillis(), text);
         }
 
         @Override
@@ -634,6 +712,10 @@ class SharedTextServiceTest {
 
         private List<String> getSentTexts() {
             return sentTexts;
+        }
+
+        private List<Boolean> getSentAutoCopyFlags() {
+            return sentAutoCopyFlags;
         }
 
         private void setBeforeSendHook(Consumer<String> beforeSendHook) {

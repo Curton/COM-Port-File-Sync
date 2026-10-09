@@ -237,6 +237,9 @@ public class SyncProtocol {
         long timestamp();
 
         String text();
+
+        /** Whether the receiving peer should also drop the text into its system clipboard. */
+        boolean autoCopyToClipboard();
     }
 
     /**
@@ -2268,22 +2271,25 @@ public class SyncProtocol {
         sendCommand(CMD_RMDIR, relativePath);
     }
 
-    /** Send shared text payload (Base64 encoded to protect delimiters) */
-    public void sendSharedText(String text) throws IOException {
-        sendSharedText(System.currentTimeMillis(), text);
-    }
-
-    /** Send shared text payload with a last-changed timestamp. */
-    public void sendSharedText(long timestamp, String text) throws IOException {
+    /**
+     * Send shared text payload with a last-changed timestamp. {@code autoCopyToClipboard} tells the
+     * receiving peer to also drop the text into its system clipboard.
+     */
+    public void sendSharedText(long timestamp, String text, boolean autoCopyToClipboard)
+            throws IOException {
         if (text == null) {
             text = "";
         }
         String encoded = encodeText(text);
         if (shouldSendSharedTextInline(encoded)) {
-            sendCommand(CMD_SHARED_TEXT, String.valueOf(timestamp), encoded);
+            sendCommand(
+                    CMD_SHARED_TEXT,
+                    String.valueOf(timestamp),
+                    encoded,
+                    String.valueOf(autoCopyToClipboard));
             return;
         }
-        sendSharedTextData(timestamp, text.getBytes(StandardCharsets.UTF_8));
+        sendSharedTextData(timestamp, text.getBytes(StandardCharsets.UTF_8), autoCopyToClipboard);
     }
 
     /**
@@ -2331,7 +2337,8 @@ public class SyncProtocol {
     }
 
     /** Send shared text via XMODEM with a last-changed timestamp. */
-    private void sendSharedTextData(long timestamp, byte[] textBytes) throws IOException {
+    private void sendSharedTextData(long timestamp, byte[] textBytes, boolean autoCopyToClipboard)
+            throws IOException {
         CompressionUtil.CompressedData payload =
                 CompressionUtil.compressIfBeneficial(SHARED_TEXT_TRANSFER_NAME, textBytes);
         xmodemInProgress.set(true);
@@ -2343,7 +2350,8 @@ public class SyncProtocol {
                     CMD_SHARED_TEXT_DATA,
                     String.valueOf(timestamp),
                     String.valueOf(payload.isCompressed()),
-                    String.valueOf(payload.getData().length));
+                    String.valueOf(payload.getData().length),
+                    String.valueOf(autoCopyToClipboard));
             waitForCommand(CMD_ACK);
             sendXmodemPayload(
                     payload.getData(),
@@ -2373,7 +2381,8 @@ public class SyncProtocol {
         if (pending == null) {
             return XModemTransfer.InterleaveResult.NOTHING_PENDING;
         }
-        if (!sendSharedTextInterleaved(pending.timestamp(), pending.text())) {
+        if (!sendSharedTextInterleaved(
+                pending.timestamp(), pending.text(), pending.autoCopyToClipboard())) {
             return XModemTransfer.InterleaveResult.FAILED;
         }
         // A newer text may have replaced the pending slot mid-send; the CAS keeps that one queued.
@@ -2411,7 +2420,11 @@ public class SyncProtocol {
                 return;
             }
             serialPort.writeLine(
-                    buildCommand(CMD_SHARED_TEXT, String.valueOf(pending.timestamp()), encoded));
+                    buildCommand(
+                            CMD_SHARED_TEXT,
+                            String.valueOf(pending.timestamp()),
+                            encoded,
+                            String.valueOf(pending.autoCopyToClipboard())));
             // Fire-and-forget: nothing acknowledges this frame, so clear the slot right away. A
             // newer text that replaced the slot mid-send stays pending for the next flush point.
             interleavableTextSource.clearIfCurrent(pending);
@@ -2429,7 +2442,8 @@ public class SyncProtocol {
      *     session is left untouched either way. Both ends always run the same build, so there is no
      *     peer-version fallback to consider here.
      */
-    public boolean sendSharedTextInterleaved(long timestamp, String text) throws IOException {
+    public boolean sendSharedTextInterleaved(
+            long timestamp, String text, boolean autoCopyToClipboard) throws IOException {
         if (text == null) {
             text = "";
         }
@@ -2442,7 +2456,12 @@ public class SyncProtocol {
             return false;
         }
         byte[] frame =
-                (buildCommand(CMD_SHARED_TEXT, String.valueOf(timestamp), encoded) + "\n")
+                (buildCommand(
+                                        CMD_SHARED_TEXT,
+                                        String.valueOf(timestamp),
+                                        encoded,
+                                        String.valueOf(autoCopyToClipboard))
+                                + "\n")
                         .getBytes(StandardCharsets.UTF_8);
         return xmodem.sendInterleavedFrame(frame);
     }

@@ -1,5 +1,6 @@
 package com.filesync.ui;
 
+import com.filesync.config.SettingsManager;
 import com.filesync.sync.FileSyncManager;
 import java.awt.Toolkit;
 import java.awt.datatransfer.DataFlavor;
@@ -20,6 +21,7 @@ public class SharedTextController {
     private final MainFrameComponents components;
     private final MainFrameState state;
     private final FileSyncManager syncManager;
+    private final SettingsManager settings;
     private final LogController logController;
     private final SharedTextUndoManager undoManager = new SharedTextUndoManager();
 
@@ -27,10 +29,12 @@ public class SharedTextController {
             MainFrameComponents components,
             MainFrameState state,
             FileSyncManager syncManager,
+            SettingsManager settings,
             LogController logController) {
         this.components = components;
         this.state = state;
         this.syncManager = syncManager;
+        this.settings = settings;
         this.logController = logController;
     }
 
@@ -68,6 +72,15 @@ public class SharedTextController {
                                     copySharedTextToClipboard();
                                 }
                             }
+                        });
+
+        components
+                .getSendToRemoteClipboardCheckBox()
+                .addActionListener(
+                        event -> {
+                            settings.setSharedTextAutoCopy(
+                                    components.getSendToRemoteClipboardCheckBox().isSelected());
+                            settings.save();
                         });
 
         components
@@ -111,9 +124,14 @@ public class SharedTextController {
     /** Copies the shared text area's content to the system clipboard and logs it. */
     private void copySharedTextToClipboard() {
         String text = components.getSharedTextArea().getText();
+        writeTextToSystemClipboard(text);
+        logController.log("Shared text copied to clipboard");
+    }
+
+    /** Writes {@code text} to the system clipboard; must be called on the EDT. */
+    private void writeTextToSystemClipboard(String text) {
         StringSelection selection = new StringSelection(text);
         Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
-        logController.log("Shared text copied to clipboard");
     }
 
     /**
@@ -136,9 +154,17 @@ public class SharedTextController {
         }
     }
 
-    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
-    public void onSharedTextReceived(String text) {
+    /**
+     * Called on the EDT by {@link SyncEventBridge}; no self-marshaling. When the sender asked for
+     * it ({@code autoCopyToClipboard}), the text also lands in the local system clipboard so no
+     * manual "Copy to Clipboard" click is needed.
+     */
+    public void onSharedTextReceived(String text, boolean autoCopyToClipboard) {
         undoManager.runAsSingleEdit(() -> components.getSharedTextArea().setText(text));
+        if (autoCopyToClipboard) {
+            writeTextToSystemClipboard(text);
+            logController.log("Shared text copied to clipboard");
+        }
     }
 
     public void pushSharedTextToRemote() {
@@ -147,6 +173,7 @@ public class SharedTextController {
             return;
         }
         String text = components.getSharedTextArea().getText();
+        boolean sendToRemoteClipboard = components.getSendToRemoteClipboardCheckBox().isSelected();
         // The send either writes a frame inline or runs a whole XMODEM transfer, so it must not
         // run on the event dispatch thread. The button stays disabled until the send returns.
         components.getSendSharedTextButton().setEnabled(false);
@@ -154,7 +181,7 @@ public class SharedTextController {
                 new Thread(
                         () -> {
                             try {
-                                syncManager.sendSharedText(text);
+                                syncManager.sendSharedText(text, sendToRemoteClipboard);
                             } finally {
                                 SwingUtilities.invokeLater(
                                         () ->

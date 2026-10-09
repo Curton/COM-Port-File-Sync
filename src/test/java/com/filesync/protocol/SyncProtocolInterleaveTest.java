@@ -31,11 +31,25 @@ class SyncProtocolInterleaveTest {
         port.feedReads(XModemTransfer.ACK);
         SyncProtocol protocol = new SyncProtocol(port);
 
-        assertTrue(protocol.sendSharedTextInterleaved(123L, "hello"));
+        assertTrue(protocol.sendSharedTextInterleaved(123L, "hello", false));
 
         assertEquals(1, port.getByteWrites().size(), "exactly one frame on the wire");
         assertArrayEquals(
-                "[[SYNC:SHARED_TEXT:123:aGVsbG8=]]\n"
+                "[[SYNC:SHARED_TEXT:123:aGVsbG8=:false]]\n"
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                port.getByteWrites().get(0));
+    }
+
+    @Test
+    void sendSharedTextInterleavedWritesTheAutoCopyFlagOnTheWire() throws IOException {
+        RecordingSerialPortManager port = new RecordingSerialPortManager();
+        port.feedReads(XModemTransfer.ACK);
+        SyncProtocol protocol = new SyncProtocol(port);
+
+        assertTrue(protocol.sendSharedTextInterleaved(123L, "hello", true));
+
+        assertArrayEquals(
+                "[[SYNC:SHARED_TEXT:123:aGVsbG8=:true]]\n"
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 port.getByteWrites().get(0));
     }
@@ -46,7 +60,7 @@ class SyncProtocolInterleaveTest {
         port.setBaudRate(1200); // inline budget = 120 B/s * 5 s minus framing
         SyncProtocol protocol = new SyncProtocol(port);
 
-        assertFalse(protocol.sendSharedTextInterleaved(1L, "x".repeat(700)));
+        assertFalse(protocol.sendSharedTextInterleaved(1L, "x".repeat(700), false));
         assertEquals(0, port.getByteWrites().size(), "an ineligible text must not be written");
     }
 
@@ -133,10 +147,28 @@ class SyncProtocolInterleaveTest {
         assertNull(pending.get(), "the fire-and-forget frame clears the pending slot right away");
         assertEquals(1, port.getByteWrites().size());
         assertArrayEquals(
-                "[[SYNC:SHARED_TEXT:123:aGVsbG8=]]\n"
+                "[[SYNC:SHARED_TEXT:123:aGVsbG8=:false]]\n"
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 port.getByteWrites().get(0),
                 "the wire bytes match the send-side interleaved frame exactly");
+    }
+
+    @Test
+    void receiveBoundaryFlushWritesTheAutoCopyFlagOnTheWire() throws IOException {
+        RecordingSerialPortManager port = new RecordingSerialPortManager();
+        SyncProtocol protocol = new SyncProtocol(port);
+        AtomicReference<PendingText> pending =
+                new AtomicReference<>(new StubPendingText(123L, "hello", true));
+        protocol.setInterleavableTextSource(
+                new StubSource(pending::get, expected -> pending.compareAndSet(expected, null)));
+
+        protocol.flushPendingSharedTextAtReceiveBoundary();
+
+        assertNull(pending.get(), "the fire-and-forget frame clears the pending slot right away");
+        assertArrayEquals(
+                "[[SYNC:SHARED_TEXT:123:aGVsbG8=:true]]\n"
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                port.getByteWrites().get(0));
     }
 
     @Test
@@ -186,10 +218,16 @@ class SyncProtocolInterleaveTest {
     private static final class StubPendingText implements PendingText {
         private final long timestamp;
         private final String text;
+        private final boolean autoCopyToClipboard;
 
         private StubPendingText(long timestamp, String text) {
+            this(timestamp, text, false);
+        }
+
+        private StubPendingText(long timestamp, String text, boolean autoCopyToClipboard) {
             this.timestamp = timestamp;
             this.text = text;
+            this.autoCopyToClipboard = autoCopyToClipboard;
         }
 
         @Override
@@ -200,6 +238,11 @@ class SyncProtocolInterleaveTest {
         @Override
         public String text() {
             return text;
+        }
+
+        @Override
+        public boolean autoCopyToClipboard() {
+            return autoCopyToClipboard;
         }
     }
 

@@ -90,7 +90,8 @@ public class SyncEventBridge {
             case SHARED_TEXT_RECEIVED -> {
                 SyncEvent.SharedTextReceivedEvent sharedTextEvent =
                         (SyncEvent.SharedTextReceivedEvent) event;
-                sharedTextController.onSharedTextReceived(sharedTextEvent.getText());
+                sharedTextController.onSharedTextReceived(
+                        sharedTextEvent.getText(), sharedTextEvent.isAutoCopyToClipboard());
             }
             case DROP_FILE_RECEIVED -> {
                 SyncEvent.DropFileReceivedEvent dropFileEvent =
