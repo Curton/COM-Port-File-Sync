@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -140,6 +141,14 @@ public class SyncPreviewRenderer {
      */
     private JPanel previewDialogPanel;
 
+    /**
+     * Row-preview fetches still running for the preview dialog on screen. The dialog is modal, so
+     * it is dismissed on the event dispatch thread while these workers may be mid-transfer; they
+     * are cancelled from there, otherwise a fetch the user has walked away from keeps streaming
+     * payload blocks and opens its diff window after the preview is gone.
+     */
+    private final List<SwingWorker<?, ?>> inFlightPreviewFetches = new CopyOnWriteArrayList<>();
+
     public SyncPreviewRenderer(JFrame owner, ConflictResolver conflictResolver) {
         this(owner, conflictResolver, msg -> {});
     }
@@ -195,8 +204,37 @@ public class SyncPreviewRenderer {
             SyncPreviewPlan plan = createFilteredSyncPlan(syncPreview, previewModel, rows);
             return new SyncPreviewResult(plan, previewModel, rows);
         } finally {
+            // The dialog is gone by every exit route - Cancel, Escape, the window's close button,
+            // or Start Sync - and a row fetch still in flight must not outlive it.
+            cancelInFlightPreviewFetches();
             this.previewDialogPanel = null;
         }
+    }
+
+    /**
+     * Abort the row-preview fetches still running for the open preview dialog: the peer is told to
+     * stop streaming first, while the worker is still inside its receive loop, and only then is the
+     * worker interrupted - after it unwinds it clears the transfer flag, and a cancel signal sent
+     * past that point lands on an idle line as a stray byte.
+     */
+    void cancelInFlightPreviewFetches() {
+        if (inFlightPreviewFetches.isEmpty()) {
+            return;
+        }
+        if (conflictResolver != null) {
+            conflictResolver.cancelInFlightFetch();
+        }
+        for (SwingWorker<?, ?> worker : inFlightPreviewFetches) {
+            worker.cancel(true);
+        }
+        inFlightPreviewFetches.clear();
+    }
+
+    /** Release a row's preview claim: its button's busy state and the window's wait cursor. */
+    private void releaseRowPreviewClaim(SyncPreviewRow row) {
+        row.setPreviewInProgress(false);
+        row.setPreviewProgressPercent(-1);
+        reflectPreviewState(row);
     }
 
     /** Build a preview panel without a search field; used by tests that only exercise the table. */
@@ -1288,9 +1326,7 @@ public class SyncPreviewRenderer {
             showPreviewForRow(row, null);
         } finally {
             if (!fetchHoldsTheClaim) {
-                row.setPreviewInProgress(false);
-                row.setPreviewProgressPercent(-1);
-                reflectPreviewState(row);
+                releaseRowPreviewClaim(row);
             }
         }
     }
@@ -1338,6 +1374,13 @@ public class SyncPreviewRenderer {
 
                     @Override
                     protected void done() {
+                        inFlightPreviewFetches.remove(this);
+                        if (isCancelled()) {
+                            // The preview dialog was dismissed while this fetch was running: the
+                            // transfer was aborted, so there is no window left to show the diff in.
+                            releaseRowPreviewClaim(row);
+                            return;
+                        }
                         byte[] base = null;
                         String failure = null;
                         try {
@@ -1368,12 +1411,11 @@ public class SyncPreviewRenderer {
                         try {
                             showPreviewForRow(row, failure);
                         } finally {
-                            row.setPreviewInProgress(false);
-                            row.setPreviewProgressPercent(-1);
-                            reflectPreviewState(row);
+                            releaseRowPreviewClaim(row);
                         }
                     }
                 };
+        inFlightPreviewFetches.add(worker);
         worker.execute();
     }
 
@@ -1838,6 +1880,14 @@ public class SyncPreviewRenderer {
         default byte[] fetchRemoteContent(String path, java.util.function.IntConsumer progress) {
             return fetchRemoteContent(path);
         }
+
+        /**
+         * Abort the remote fetch this resolver has in flight, if any: the UI that started it (the
+         * sync preview dialog) was dismissed while the transfer was still running, so the peer must
+         * be told to stop and the worker's blocking read must unwind. Resolvers that cannot cancel
+         * leave this as a no-op.
+         */
+        default void cancelInFlightFetch() {}
     }
 
     /**

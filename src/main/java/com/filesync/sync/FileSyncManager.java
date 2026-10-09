@@ -761,6 +761,43 @@ public class FileSyncManager {
                 false);
     }
 
+    /**
+     * Abort the remote file-content fetch a preview UI started and then dismissed: the user closed
+     * the sync preview (or started the sync) while a row's previous version was still streaming in.
+     * The caller interrupts the fetch worker right after this returns, which is what unwinds a
+     * worker parked in the command phase.
+     *
+     * <p>The cancel signal has to reach the peer while the worker is still inside its receive loop:
+     * once the worker unwinds it clears the transfer flag, and a cancel sent past that point lands
+     * on an idle line as a stray byte. Without it the peer keeps streaming the remaining blocks
+     * into a receiver that has already given up, and those orphaned bytes are later misread as
+     * command frames.
+     */
+    public void cancelRemoteFetch() {
+        if (!protocol.isXmodemInProgress()) {
+            // Nothing is streaming yet (the peer is still answering the request, or has already
+            // finished), so there is no transfer to stop and no stray bytes to clean up.
+            return;
+        }
+        try {
+            protocol.sendTransferCancel();
+        } catch (IOException e) {
+            eventBus.post(
+                    new SyncEvent.LogEvent(
+                            "Failed to stop the preview transfer: " + e.getMessage()));
+        }
+        // Drop whatever the aborted transfer left in the buffer so the listener cannot misread it
+        // as a command frame; frames that arrive later resync on their own framing.
+        try {
+            protocol.clearInputBuffer();
+        } catch (IOException ignored) {
+            // Best-effort hygiene; the frame resync also skips stale bytes.
+        }
+        // The transfer's progress events disabled the sync controls while it ran, and nothing else
+        // refreshes them now that the transfer is gone.
+        eventBus.post(new SyncEvent.SyncControlRefreshEvent());
+    }
+
     /** Default timeout for a remote log fetch (mirrors the file content fetch). */
     private static final long LOG_FETCH_TIMEOUT_MS = 10000;
 
@@ -945,6 +982,11 @@ public class FileSyncManager {
                 // progress events; nothing else in this path refreshes them, so do it here.
                 eventBus.post(new SyncEvent.SyncControlRefreshEvent());
             } catch (IOException e) {
+                if (Thread.currentThread().isInterrupted()) {
+                    // The fetch was abandoned - the preview that started it was dismissed - and
+                    // the interrupt is what unwound the read. There is nothing to report.
+                    return null;
+                }
                 if (ioFailureIsError) {
                     eventBus.post(new SyncEvent.ErrorEvent(ioFailurePrefix + e.getMessage()));
                 } else {

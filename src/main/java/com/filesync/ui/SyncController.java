@@ -96,6 +96,11 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         }
     }
 
+    @Override
+    public void cancelInFlightFetch() {
+        syncManager.cancelRemoteFetch();
+    }
+
     public void initActionHandlers() {
         components.getDirectionButton().addActionListener(event -> toggleDirection());
         components.getSyncButton().addActionListener(event -> onSyncButtonClicked());

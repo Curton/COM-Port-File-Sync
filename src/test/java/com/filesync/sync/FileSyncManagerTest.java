@@ -52,6 +52,8 @@ import org.junit.jupiter.api.io.TempDir;
  *   <li>Outgoing {@code fetchRemoteFileContent} parses the size from parameter index 0 of a {@code
  *       FILE_CONTENT_XFER} announcement and receives the content via XMODEM — regression test for
  *       the parameter-index off-by-one that broke large-file conflict resolution.
+ *   <li>Outgoing {@code cancelRemoteFetch} tells a streaming peer to stop and refreshes the sync
+ *       controls, and stays silent when nothing is streaming.
  * </ul>
  */
 class FileSyncManagerTest {
@@ -464,6 +466,91 @@ class FileSyncManagerTest {
                     events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
                     "A SyncControlRefreshEvent must be posted after the XMODEM content transfer"
                             + " completes");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void cancelRemoteFetch_whileThePeerIsStreaming_stopsItAndRefreshesTheControls()
+            throws Exception {
+        File folder = tempDir.resolve("root-cancel-fetch").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            startConnectedAsSender(fsm, serial);
+
+            // The announcement switches the fetch to XMODEM, but no block is fed: the peer is
+            // streaming, which is the state a dismissed preview dialog finds it in. It goes out
+            // only once the request is on the wire, so the listen loop (paused behind the fetch's
+            // exchange flag) cannot consume the announcement first.
+            AtomicReference<byte[]> fetched = new AtomicReference<>();
+            CountDownLatch fetchDone = new CountDownLatch(1);
+            Thread fetch =
+                    new Thread(
+                            () -> {
+                                fetched.set(fsm.fetchRemoteFileContent("big.bin"));
+                                fetchDone.countDown();
+                            },
+                            "fsm-test-fetch-cancel");
+            fetch.start();
+            waitUntil(
+                    () ->
+                            serial.getWrittenLines().stream()
+                                    .anyMatch(l -> l.contains("FILE_CONTENT_REQ")),
+                    Duration.ofSeconds(5));
+            serial.feedLine("[[SYNC:FILE_CONTENT_XFER:4096]]");
+
+            // isTransferBusy covers the XMODEM flag, so this waits for the transfer itself rather
+            // than for the ACK that precedes it.
+            waitUntil(fsm::isTransferBusy, Duration.ofSeconds(5));
+
+            fsm.cancelRemoteFetch();
+
+            assertTrue(
+                    serial.getWrittenLines().contains("[[SYNC:CANCEL]]"),
+                    "the peer must be told to stop streaming the blocks it is still sending");
+            assertTrue(
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "the transfer's progress events disabled the sync controls; they must be"
+                            + " refreshed once the transfer is abandoned");
+
+            // Let the abandoned receive unwind instead of waiting out its handshake window.
+            serial.failByteReads();
+            assertTrue(fetchDone.await(10, TimeUnit.SECONDS), "the fetch must unwind");
+            assertFalse(fetch.isAlive(), "the fetch thread must not outlive its transfer");
+            assertNull(fetched.get(), "an abandoned fetch reports no content");
+        } finally {
+            stopQuietly(fsm);
+        }
+    }
+
+    @Test
+    void cancelRemoteFetch_withNothingStreaming_writesNothingToTheLine() throws Exception {
+        File folder = tempDir.resolve("root-cancel-idle").toFile();
+        folder.mkdirs();
+
+        ScriptedSerialPortManager serial = new ScriptedSerialPortManager();
+        FileSyncManager fsm = new FileSyncManager(serial, new SettingsManager(true));
+        fsm.setSyncFolder(folder);
+        List<SyncEvent> events = new CopyOnWriteArrayList<>();
+        fsm.getEventBus().register(events::add);
+        try {
+            startConnectedAsSender(fsm, serial);
+
+            fsm.cancelRemoteFetch();
+
+            assertFalse(
+                    serial.getWrittenLines().contains("[[SYNC:CANCEL]]"),
+                    "a cancel signal on an idle line is a stray byte the peer has to make sense of");
+            assertFalse(
+                    events.stream().anyMatch(e -> e instanceof SyncEvent.SyncControlRefreshEvent),
+                    "nothing ran, so there is no control state to refresh");
         } finally {
             stopQuietly(fsm);
         }
