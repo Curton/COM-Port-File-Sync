@@ -523,6 +523,8 @@ class FileSyncManagerTest {
             // Let the abandoned receive unwind instead of waiting out its handshake window.
             serial.failByteReads();
             assertTrue(fetchDone.await(10, TimeUnit.SECONDS), "the fetch must unwind");
+            // The latch counts down inside the fetch, before its thread finishes unwinding.
+            fetch.join(5_000);
             assertFalse(fetch.isAlive(), "the fetch thread must not outlive its transfer");
             assertNull(fetched.get(), "an abandoned fetch reports no content");
         } finally {
