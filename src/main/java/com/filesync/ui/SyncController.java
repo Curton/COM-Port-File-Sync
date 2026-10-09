@@ -676,11 +676,18 @@ public class SyncController implements SyncPreviewRenderer.ConflictResolver {
         components.getProgressBar().setString("Starting sync...");
     }
 
-    /** Called on the EDT by {@link SyncEventBridge}; no self-marshaling. */
+    /**
+     * Called on the EDT by {@link SyncEventBridge}; no self-marshaling. Reached both by this side's
+     * own cancel and by the peer's, and either way it means the same thing: the session is over, so
+     * the bar belongs to a finished transfer. It therefore reverts to Ready on the same one-shot
+     * timer a completed sync uses - stopping that timer here parked the bar on its last percentage
+     * (or on this caption) until the next sync started, which is what a remote cancel looked like.
+     */
     public void onSyncCancelled() {
-        cancelProgressBarReset();
         components.getProgressBar().setIndeterminate(false);
+        components.getProgressBar().setValue(0);
         components.getProgressBar().setString("Sync cancelled");
+        scheduleProgressBarReset();
         updateSyncButtonState();
     }
 
