@@ -97,7 +97,7 @@ public class MainFrameComponents {
         sharedTextArea.setWrapStyleWord(true);
         sharedTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
 
-        sendToRemoteClipboardCheckBox = new JCheckBox("To Remote Clipboard");
+        sendToRemoteClipboardCheckBox = new JCheckBox();
         sendToRemoteClipboardCheckBox.setToolTipText(
                 "When checked, the sent text is copied directly into the remote clipboard");
         sendToRemoteClipboardCheckBox.setMargin(new Insets(2, 4, 2, 4));
