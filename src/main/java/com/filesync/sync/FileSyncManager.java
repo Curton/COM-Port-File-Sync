@@ -230,13 +230,6 @@ public class FileSyncManager {
                             eventBus.post(new SyncEvent.LogEvent(message));
                         }
                     }
-
-                    @Override
-                    public void onNotice(String message) {
-                        if (isTransferBusy()) {
-                            eventBus.post(new SyncEvent.LogEvent(message));
-                        }
-                    }
                 });
     }
 

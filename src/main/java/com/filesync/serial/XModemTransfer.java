@@ -42,19 +42,11 @@ public class XModemTransfer {
     private static final byte PADDING = 0x1A; // CTRL-Z for padding
     private static final int POLL_INTERVAL_MS = 1; // Reduced from 10ms for better throughput
     private static final int HANDSHAKE_RESEND_INTERVAL_MS = 200;
-    // Pause before the post-handshake drain while the connection runs the conservative strategy:
-    // an in-flight 'C' straggler arrives during it and is cleared here instead of being read at
-    // the first block's ACK position. The strategy is adaptive per connection (see {@link
-    // #fastDrainArmed}): the first session of every port session pays this pause; once a session
-    // completes without any straggler, later sessions skip the pause, and any straggler observed
-    // re-arms the pause for the rest of the connection. A straggler that outlasts the pause still
-    // only costs one block re-send, which the receiver's duplicate-block ACK absorbs.
+    // Fixed pause before the post-handshake drain, letting any in-flight 'C' straggler arrive so
+    // it can be cleared here instead of being read at the first block's ACK position. A straggler
+    // that outlasts even this pause still only costs one block re-send, which the receiver's
+    // duplicate-block ACK absorbs.
     private static final int HANDSHAKE_DRAIN_PAUSE_MS = 50;
-    // How many stray 'C's a single response read may skip once the session's first block ACK has
-    // arrived (see {@link #firstBlockAckSeen}). The bound only keeps a pathological 'C' flood from
-    // burning a whole response timeout on skips; past it the 'C' is returned and the caller's
-    // retry path — whose stale-char drain clears the backlog — takes over.
-    private static final int MAX_HANDSHAKE_STRAGGLERS = 4;
     private static final long RECEIVE_HANDSHAKE_WINDOW_MS = (long) MAX_RETRIES * 1000;
     // A receiver aborting mid-block re-sends CAN a few times, spaced out, because one lost CAN
     // makes the sender keep streaming into a session that has already given up.
@@ -101,33 +93,6 @@ public class XModemTransfer {
     private long transferStartTime;
     private long totalBytesTransferred;
 
-    // --- Adaptive handshake-drain strategy, scoped to one port session (one connection) ---
-    // Volatile: SyncProtocol serializes send() sessions, but successive sessions may run on
-    // different worker threads; volatile carries the strategy state across them.
-    /** Port-session epoch the strategy was last reset on; a change means a fresh connection. */
-    private volatile long drainStrategyEpoch = -1;
-
-    /**
-     * Armed after one session completes without any straggler: later sessions skip the drain pause.
-     * Any observed straggler disarms it for the rest of the connection, so the fast path is exposed
-     * at most once per connection and the worst case matches the fixed pause.
-     */
-    private volatile boolean fastDrainArmed;
-
-    /** Whether this send session has observed a straggler 'C' at any response position. */
-    private volatile boolean sessionSawStraggler;
-
-    /**
-     * Set once this session's first block ACK arrives. Until then a 'C' at a response position is
-     * ambiguous — it may be the receiver still polling in {@code initiateReceive()} (block 1 was
-     * lost) and must trigger the immediate block re-send that recovers the session inside the
-     * receiver's 10s handshake window. After the first ACK the receiver is provably out of its
-     * handshake — only {@code initiateReceive()} ever writes 'C' — so a later 'C' is always a
-     * straggler and is skipped instead of costing a re-send (see {@link
-     * #MAX_HANDSHAKE_STRAGGLERS}).
-     */
-    private volatile boolean firstBlockAckSeen;
-
     public XModemTransfer(SerialPortManager serialPort) {
         this.serialPort = serialPort;
     }
@@ -156,14 +121,6 @@ public class XModemTransfer {
         pushedBackByte = -1;
         // Capture the port session this transfer runs on; loop heads abort when it changes.
         transferSessionEpoch = serialPort.currentEpoch();
-        if (transferSessionEpoch != drainStrategyEpoch) {
-            // Fresh connection (first send after connect, or a teardown/reconnect): the adaptive
-            // drain starts conservative again — one clean session re-arms the fast path.
-            drainStrategyEpoch = transferSessionEpoch;
-            fastDrainArmed = false;
-        }
-        sessionSawStraggler = false;
-        firstBlockAckSeen = false;
 
         // Wait for receiver to send 'C' to initiate CRC mode
         if (!waitForHandshake()) {
@@ -239,13 +196,6 @@ public class XModemTransfer {
         if (!sendEOT()) {
             reportError("Failed to complete transfer: EOT not acknowledged");
             return false;
-        }
-
-        // A session that completed without any straggler at a response position is evidence the
-        // link settles quickly after the handshake: later sessions on this connection may skip
-        // the drain pause. A session that did see one never arms (and disarms if already armed).
-        if (!sessionSawStraggler && !fastDrainArmed) {
-            fastDrainArmed = true;
         }
 
         return true;
@@ -601,22 +551,16 @@ public class XModemTransfer {
      * sent multiple 'C' chars before the sender started listening, and these stale chars could
      * interfere with ACK detection during block sending.
      *
-     * <p>Conservative connections (every connection's first session, and every session after a
-     * straggler was observed) wait out the fixed pause first so an in-flight 'C' straggler arrives
-     * and is cleared here. Fast connections — one session already completed without any straggler —
-     * skip the pause: a straggler then lands at the first block's ACK position, where it costs one
-     * re-send the receiver's duplicate-block ACK absorbs, and the observation re-arms the
-     * conservative pause for the rest of the connection. The drain loop itself always runs: bytes
-     * already buffered when the handshake completed are cleared either way.
+     * <p>A fixed pause first lets any in-flight 'C' straggler arrive so the drain clears it; one
+     * that outlasts the pause is read at the block's ACK position instead and costs one block
+     * re-send (the receiver ACKs duplicate blocks), never the session.
      */
     private void drainExtraHandshakeChars() throws IOException {
-        if (!fastDrainArmed) {
-            // Small delay to let any in-flight 'C' chars arrive
-            try {
-                Thread.sleep(HANDSHAKE_DRAIN_PAUSE_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        // Small delay to let any in-flight 'C' chars arrive
+        try {
+            Thread.sleep(HANDSHAKE_DRAIN_PAUSE_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
         // Drain any 'C' or NAK chars that arrived during the pause. Receiver-originated
@@ -687,20 +631,13 @@ public class XModemTransfer {
 
             int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
-                // The receiver has provably left its handshake, so from now on a 'C' read at any
-                // response position can only be a straggler (see firstBlockAckSeen).
-                firstBlockAckSeen = true;
                 return true;
             }
             if (response == CAN) {
                 cancelSignalled = true;
                 return false;
             }
-            if (response == C) {
-                noteStraggler("block " + blockNumber + "'s ACK position");
-            }
-            // NAK, 'C' (stale handshake char past the skip bound, or a live handshake retry when
-            // block 1 never arrived), or timeout - retry
+            // NAK, 'C' (stale handshake char), or timeout - retry
         }
         return false;
     }
@@ -711,9 +648,6 @@ public class XModemTransfer {
             int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
                 return true;
-            }
-            if (response == C) {
-                noteStraggler("the EOT ACK position");
             }
         }
         return false;
@@ -741,11 +675,7 @@ public class XModemTransfer {
                 cancelSignalled = true;
                 throw new IOException("Transfer cancelled by receiver");
             }
-            if (response == C) {
-                noteStraggler("the interleave ACK position");
-            }
-            // NAK, a 'C' past the straggler-skip bound, timeout, or a frame the receiver could
-            // not parse.
+            // NAK, stale handshake char, timeout, or a frame the receiver could not parse.
         }
         return false;
     }
@@ -881,18 +811,9 @@ public class XModemTransfer {
      * acknowledged — so this keeps reading until a non-frame byte arrives and returns that. A lone
      * '[' (line noise, not a frame start) is returned as an unexpected response byte and its peeked
      * follower is pushed back, mirroring the receive loop's header-position handling.
-     *
-     * <p>Once the session's first block ACK has arrived, a 'C' read here is always a handshake
-     * straggler — the receiver's receive loop only writes ACK/NAK and frames; only {@code
-     * initiateReceive()} writes 'C', and it has provably exited — so it is skipped and the read
-     * keeps waiting for the real response, bounded by {@link #MAX_HANDSHAKE_STRAGGLERS}. Before the
-     * first ACK the 'C' is returned untouched: there it may be a live handshake retry (block 1
-     * never arrived) whose re-send response is the only thing that recovers the session inside the
-     * receiver's handshake window.
      */
     private int readResponseByteConsumingFrames(int timeoutMs) throws IOException {
         long deadline = System.currentTimeMillis() + timeoutMs;
-        int stragglers = 0;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -900,11 +821,6 @@ public class XModemTransfer {
             }
             int b = readByteWithTimeout((int) remaining);
             if (b != (FRAME_START_BYTE & 0xFF)) {
-                if (b == C && firstBlockAckSeen && stragglers < MAX_HANDSHAKE_STRAGGLERS) {
-                    stragglers++;
-                    noteStraggler("a post-ACK response position (skipped)");
-                    continue;
-                }
                 return b;
             }
             int second =
@@ -1039,36 +955,6 @@ public class XModemTransfer {
         }
     }
 
-    /** Surface a benign-but-notable protocol event as a log line, not an error. */
-    private void reportNotice(String message) {
-        if (progressListener != null) {
-            progressListener.onNotice(message);
-        }
-    }
-
-    /**
-     * Records a handshake straggler 'C' observed at a response position. A straggler is evidence
-     * the link does not settle immediately after the handshake, so it also retires the fast drain
-     * for the rest of the connection: the next session (and every one after it) waits out the
-     * conservative pause again. Benign by construction — the receiver absorbs the duplicate block a
-     * straggler at a pre-ACK position triggers — but worth a log line: it is the field evidence for
-     * whether stragglers happen at all, and in which band.
-     */
-    private void noteStraggler(String where) {
-        sessionSawStraggler = true;
-        if (fastDrainArmed) {
-            fastDrainArmed = false;
-            reportNotice(
-                    "Stray handshake 'C' read at "
-                            + where
-                            + "; re-armed the conservative "
-                            + HANDSHAKE_DRAIN_PAUSE_MS
-                            + "ms drain for this connection");
-        } else {
-            reportNotice("Stray handshake 'C' read at " + where + " (conservative drain)");
-        }
-    }
-
     private record BlockFormat(int size, byte header) {}
 
     /**
@@ -1129,13 +1015,7 @@ public class XModemTransfer {
 
         void onError(String message);
 
-        /** A deliberate cancel (CAN signal) ended the transfer; an expected, benign outcome. */
+        /** A deliberate cancel (CAN) ended the transfer; an expected, benign outcome. */
         default void onCancelled(String message) {}
-
-        /**
-         * A benign-but-notable protocol event (e.g. an observed handshake straggler 'C'), worth a
-         * log line but not an error entry.
-         */
-        default void onNotice(String message) {}
     }
 }
