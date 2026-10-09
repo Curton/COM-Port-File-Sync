@@ -76,6 +76,7 @@ public class ConflictResolutionDialog extends JDialog {
         JButton cancelButton = new JButton("Cancel");
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttonPanel.add(DialogMaximizeButton.create(this));
         buttonPanel.add(cancelButton);
         buttonPanel.add(applyToAllButton);
         buttonPanel.add(previousButton);
