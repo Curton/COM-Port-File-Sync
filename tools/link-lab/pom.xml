@@ -23,7 +23,7 @@
             with ../pom.xml: the simulated peer must run the same build as the app under test
             (the project deliberately has no cross-version wire compatibility).
         -->
-        <app.version>1.6.60</app.version>
+        <app.version>1.6.61</app.version>
         <app.source.root>${project.basedir}/../../src/main/java</app.source.root>
         <!--
             The two-ended link simulations (com.filesync.lab.e2e) are heavyweight regressions.
