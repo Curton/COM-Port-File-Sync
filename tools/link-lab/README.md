@@ -318,6 +318,13 @@ decides, and the tests follow whichever side won, so the election stays under te
 | `syncSurvivesALossyWire` | 40 kB payload carried through a wire that really flips bits, with retries |
 | `aDroppedControlFrameIsRecoveredByReconnectingAndRetrying` | dropped `ACK` (tamper rule) → wedged exchange → disconnect/reconnect/retry |
 
+`SyncFeaturePathsTest` adds the sync-feature paths the scenarios above do not reach: rename
+propagation (hash-paired `FILE_RENAME` move instead of transfer+delete), the append-only tail
+fast path and its prefix-shaped-conflict exemption, the `.gitignore` / `.filesyncignore` filters
+on both ends (including the strict-delete exemption), the conflict content fetch + text diff the
+UI's merge flow performs, and the pending-write queue a locked receiver file produces (retry and
+skip-all, then convergence on a later sync).
+
 Operational notes for these tests:
 
 - Roles re-negotiate after every session rebuild, so which side is sender/receiver is read fresh
