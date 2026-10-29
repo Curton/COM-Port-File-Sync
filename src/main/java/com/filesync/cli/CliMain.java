@@ -2,6 +2,8 @@ package com.filesync.cli;
 
 import com.filesync.AppVersion;
 import com.filesync.config.SettingsManager;
+import com.filesync.plugin.LinkPluginRegistry;
+import com.filesync.serial.RoutingPortManager;
 import com.filesync.serial.SerialPortManager;
 import java.io.PrintStream;
 
@@ -57,7 +59,31 @@ public final class CliMain {
             System.out.println("com-file-sync " + AppVersion.get());
             return EXIT_SUCCESS;
         }
-        return new CliSession(spec, settings, portOverride).run();
+        // Tests inject an in-memory port; production resolves the plugins itself. Both end up in
+        // the same CliSession, which never learns where its port manager came from.
+        SerialPortManager port = portOverride != null ? portOverride : pluginRoutingPort(spec);
+        return new CliSession(spec, settings, port).run();
+    }
+
+    /** Resolves the installed plugins and returns the port manager the session should use. */
+    static SerialPortManager pluginRoutingPort(CliSpec spec) {
+        return pluginRoutingPort(spec, LinkPluginRegistry.loadDefault());
+    }
+
+    /**
+     * The production port manager: {@code null} when no plugin is installed, so {@link CliSession}
+     * builds the plain manager exactly as before. With plugins, a routing manager wraps a plain
+     * manager configured from the command line and forwards {@code --port hidlink:A} to the plugin
+     * — no CLI-level branch, and a normal COM port still goes to jSerialComm untouched.
+     */
+    static SerialPortManager pluginRoutingPort(CliSpec spec, LinkPluginRegistry registry) {
+        if (registry.isEmpty()) {
+            return null;
+        }
+        System.out.println("Loaded " + registry.size() + " link plugin(s)");
+        return new RoutingPortManager(
+                new SerialPortManager(spec.baudRate, spec.dataBits, spec.stopBits, spec.parity),
+                registry);
     }
 
     static void printUsage(PrintStream out) {
@@ -80,7 +106,9 @@ public final class CliMain {
         out.println("            runs a command; the peer just answers the manifest request.");
         out.println();
         out.println("Options:");
-        out.println("  --port <name>         Serial port to open, e.g. COM3 (required)");
+        out.println("  --port <name>         Serial port to open, e.g. COM3, or a plugin");
+        out.println("                        endpoint listed after \"Loaded N link plugin(s)\",");
+        out.println("                        e.g. hidlink:A (plugins/*.jar next to the jar)");
         out.println("  --folder <dir>        Sync folder, must exist (required)");
         out.println("  --baud <rate>         Baud rate (default: saved GUI setting, 115200)");
         out.println("  --databits <n>        Data bits: 5, 6, 7 or 8 (default: saved setting, 8)");

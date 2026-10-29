@@ -1,10 +1,17 @@
 package com.filesync.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.filesync.config.SettingsManager;
+import com.filesync.plugin.FakeLinkPlugin;
+import com.filesync.plugin.LinkPluginRegistry;
+import com.filesync.serial.RoutingPortManager;
+import com.filesync.serial.SerialPortManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -72,5 +79,57 @@ class CliMainTest {
                         new SettingsManager(true),
                         port);
         assertEquals(CliMain.EXIT_FAILURE, code);
+    }
+
+    /** No plugins installed: the session keeps building its plain serial manager from the spec. */
+    @Test
+    void withoutPluginsTheSessionGetsNoPortOverride() throws Exception {
+        Path folder = Files.createDirectories(tempDir.resolve("plain-folder"));
+        CliSpec spec =
+                CliSpec.parse(
+                        new String[] {"send", "--port", "COM1", "--folder", folder.toString()},
+                        new SettingsManager(true));
+
+        assertNull(CliMain.pluginRoutingPort(spec, LinkPluginRegistry.empty()));
+    }
+
+    /** With a plugin installed, {@code --port <endpoint>} routes to the plugin's manager. */
+    @Test
+    void withPluginsThePortOverrideRoutesEndpointNames() throws Exception {
+        Path folder = Files.createDirectories(tempDir.resolve("plugin-folder"));
+        CliSpec spec =
+                CliSpec.parse(
+                        new String[] {
+                            "send",
+                            "--port",
+                            "hidlink:A",
+                            "--folder",
+                            folder.toString(),
+                            "--baud",
+                            "9600"
+                        },
+                        new SettingsManager(true));
+        SerialPortManager pluginPort =
+                new SerialPortManager() {
+                    @Override
+                    public boolean open(String portName) {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isOpen() {
+                        return true;
+                    }
+                };
+        FakeLinkPlugin bridge =
+                new FakeLinkPlugin("hidlink").endpoint("hidlink:A").manager(pluginPort);
+
+        SerialPortManager port =
+                CliMain.pluginRoutingPort(spec, new LinkPluginRegistry(List.of(bridge)));
+
+        assertTrue(port instanceof RoutingPortManager);
+        assertEquals(9600, port.getBaudRate(), "the CLI baud still configures the real manager");
+        assertTrue(port.open("hidlink:A"));
+        assertEquals(List.of("hidlink:A"), bridge.createRequests());
     }
 }
