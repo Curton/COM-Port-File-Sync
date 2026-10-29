@@ -1,9 +1,15 @@
 package com.filesync.ui;
 
 import com.filesync.config.SettingsManager;
+import com.filesync.plugin.LinkEndpoint;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
 import java.awt.Color;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
@@ -14,6 +20,13 @@ public class ConnectionController {
     private static final String CONNECTING_TEXT = "Connecting...";
     private static final String DISCONNECTING_TEXT = "Disconnecting...";
 
+    /**
+     * How often the port drop-down is re-enumerated while disconnected. An adapter (or a bridge)
+     * plugged in after startup must show up without the user pressing Refresh, but the poll must
+     * not cost anything while a session is live: it is skipped outside the idle phase.
+     */
+    private static final long PORT_POLL_INTERVAL_MS = 2000;
+
     private final JFrame owner;
     private final MainFrameComponents components;
     private final SettingsManager settings;
@@ -23,6 +36,12 @@ public class ConnectionController {
     private final LogController logController;
     private final Runnable updateSyncButtonState;
     private final SettingsDialog settingsDialog;
+    private final PortListComposer portListComposer;
+
+    /** Items the drop-down currently holds, so a poll can tell a change from a repeated answer. */
+    private volatile List<String> composedPorts = List.of();
+
+    private ScheduledExecutorService portPoller;
 
     public ConnectionController(
             JFrame owner,
@@ -33,7 +52,8 @@ public class ConnectionController {
             MainFrameState state,
             LogController logController,
             Runnable updateSyncButtonState,
-            SettingsDialog settingsDialog) {
+            SettingsDialog settingsDialog,
+            PortListComposer portListComposer) {
         this.owner = owner;
         this.components = components;
         this.settings = settings;
@@ -43,6 +63,7 @@ public class ConnectionController {
         this.logController = logController;
         this.updateSyncButtonState = updateSyncButtonState;
         this.settingsDialog = settingsDialog;
+        this.portListComposer = portListComposer;
     }
 
     public void initEventHandlers(Runnable onConnectionStatusChangedLabel) {
@@ -61,25 +82,125 @@ public class ConnectionController {
     }
 
     public void refreshPorts() {
-        components.getPortComboBox().removeAllItems();
-        java.util.List<String> ports = SerialPortManager.getAvailablePorts();
+        applyComposedPorts(portListComposer.compose());
+    }
+
+    /**
+     * Rebuilds the drop-down from one composition: items are replaced wholesale, a still-present
+     * selection survives, and a lone item is selected (the behaviour a single COM port always had).
+     * Must run on the event dispatch thread.
+     */
+    private void applyComposedPorts(PortListComposer.Composed composed) {
+        JComboBox<String> combo = components.getPortComboBox();
+        List<String> ports = composed.ports();
+        String selected = (String) combo.getSelectedItem();
+        combo.removeAllItems();
         for (String port : ports) {
-            components.getPortComboBox().addItem(port);
+            combo.addItem(port);
         }
-        if (ports.isEmpty()) {
+        if (selected != null && ports.contains(selected)) {
+            combo.setSelectedItem(selected);
+        } else if (ports.size() == 1) {
+            combo.setSelectedIndex(0);
+        }
+        composedPorts = ports;
+        logComposedPorts(composed);
+    }
+
+    private void logComposedPorts(PortListComposer.Composed composed) {
+        if (composed.ports().isEmpty()) {
             logController.log("No COM ports found");
-        } else {
-            logController.log("Found " + ports.size() + " COM port(s)");
-            if (ports.size() == 1) {
-                components.getPortComboBox().setSelectedIndex(0);
-            }
+            return;
         }
+        logController.log("Found " + composed.systemPorts().size() + " COM port(s)");
+        if (composed.endpoints().isEmpty()) {
+            return;
+        }
+        logController.log("Found " + composed.endpoints().size() + " plugin endpoint(s)");
+        for (LinkEndpoint endpoint : composed.endpoints()) {
+            // The description is where a bridge's resolved COM numbers and interface indices show
+            // up, which is what a support log needs to tell a data port from a debug console.
+            logController.log("  " + endpoint.id() + " (" + endpoint.describe() + ")");
+        }
+        if (composed.hiddenSystemPortCount() > 0) {
+            logController.log(
+                    "Hidden " + composed.hiddenSystemPortCount() + " plugin-internal COM port(s)");
+        }
+    }
+
+    /**
+     * Starts the periodic port scan that makes hot-plugged adapters and bridges appear on their
+     * own. Only ports are scanned; nothing is connected automatically from here.
+     */
+    public void startPortPolling() {
+        if (portPoller != null) {
+            return;
+        }
+        portPoller =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "PortEnumerator");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        portPoller.scheduleWithFixedDelay(
+                this::pollPortsOnce,
+                PORT_POLL_INTERVAL_MS,
+                PORT_POLL_INTERVAL_MS,
+                TimeUnit.MILLISECONDS);
+    }
+
+    /** Stops the periodic scan; called when the window closes. */
+    public void stopPortPolling() {
+        ScheduledExecutorService poller = portPoller;
+        portPoller = null;
+        if (poller != null) {
+            poller.shutdownNow();
+        }
+    }
+
+    /**
+     * One scan pass on the {@code PortEnumerator} thread. The task is scheduled with a fixed delay,
+     * so it must never throw — a failed scan is logged and retried on the next tick. The drop-down
+     * is only touched when the composed list actually changed, and only through {@code
+     * invokeLater}.
+     */
+    void pollPortsOnce() {
+        if (state.getPhase() != MainFrameState.ConnectionPhase.IDLE) {
+            return;
+        }
+        PortListComposer.Composed composed;
+        try {
+            composed = portListComposer.compose();
+        } catch (RuntimeException e) {
+            logController.log("Port scan failed: " + e);
+            return;
+        }
+        if (composed.ports().equals(composedPorts)) {
+            return;
+        }
+        SwingUtilities.invokeLater(
+                () -> {
+                    if (components.getPortComboBox().isPopupVisible()) {
+                        // Rebuilding under an open drop-down would move the item the user is
+                        // aiming at. Leaving composedPorts untouched makes the next tick retry.
+                        return;
+                    }
+                    applyComposedPorts(composed);
+                });
     }
 
     public void attemptAutoConnectOnStartup() {
         if (components.getPortComboBox().getItemCount() == 1) {
             String singlePort = components.getPortComboBox().getItemAt(0);
             components.getPortComboBox().setSelectedIndex(0);
+            if (portListComposer.isPluginPort(singlePort)) {
+                // A half-plugged bridge is a normal intermediate state; the 60 s handshake
+                // timeout with its modal error box must not become a startup ritual.
+                logController.log(
+                        "Only plugin endpoint " + singlePort + " found, connect manually");
+                return;
+            }
 
             SwingUtilities.invokeLater(
                     () -> {
@@ -102,6 +223,13 @@ public class ConnectionController {
         if (!MainFrameComponents.selectPortByName(components, lastPort)) {
             logController.log(
                     "Last used COM port " + lastPort + " not available, skipping auto-connect");
+            return;
+        }
+
+        if (portListComposer.isPluginPort(lastPort)) {
+            // The entry stays selected, so one click on Connect is all it takes.
+            logController.log(
+                    "Last used port " + lastPort + " is a plugin endpoint, skipping auto-connect");
             return;
         }
 

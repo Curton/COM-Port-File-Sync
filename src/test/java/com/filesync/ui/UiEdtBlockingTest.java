@@ -162,7 +162,8 @@ class UiEdtBlockingTest {
                 state,
                 new LogController(new JTextArea()),
                 () -> {},
-                null);
+                null,
+                new PortListComposer(com.filesync.plugin.LinkPluginRegistry.empty()));
     }
 
     /** Serial port whose {@code open} blocks until the test releases it. */

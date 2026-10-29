@@ -160,7 +160,8 @@ class ConnectionSingleFlightTest {
                 state,
                 new LogController(new JTextArea()),
                 () -> {},
-                null);
+                null,
+                new PortListComposer(com.filesync.plugin.LinkPluginRegistry.empty()));
     }
 
     private static void awaitRelease(CountDownLatch release) {

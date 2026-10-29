@@ -2,6 +2,8 @@ package com.filesync.ui;
 
 import com.filesync.AppVersion;
 import com.filesync.config.SettingsManager;
+import com.filesync.plugin.LinkPluginRegistry;
+import com.filesync.serial.RoutingPortManager;
 import com.filesync.serial.SerialPortManager;
 import com.filesync.sync.FileSyncManager;
 import com.filesync.sync.SyncEventListener;
@@ -39,12 +41,17 @@ public class MainFrame extends JFrame {
     public MainFrame() {
         settings = new SettingsManager();
 
+        // Plugins are discovered once, before the port manager exists: the routing manager needs
+        // to know which combo-box entries are endpoints rather than COM ports.
+        LinkPluginRegistry pluginRegistry = LinkPluginRegistry.loadDefault();
         serialPort =
-                new SerialPortManager(
-                        settings.getBaudRate(),
-                        settings.getDataBits(),
-                        settings.getStopBits(),
-                        settings.getParity());
+                new RoutingPortManager(
+                        new SerialPortManager(
+                                settings.getBaudRate(),
+                                settings.getDataBits(),
+                                settings.getStopBits(),
+                                settings.getParity()),
+                        pluginRegistry);
         syncManager = new FileSyncManager(serialPort, settings);
         eventBus = syncManager.getEventBus();
 
@@ -71,7 +78,8 @@ public class MainFrame extends JFrame {
                         state,
                         logController,
                         syncController::updateSyncButtonState,
-                        settingsDialog);
+                        settingsDialog,
+                        new PortListComposer(pluginRegistry));
         folderController =
                 new FolderController(
                         components,
@@ -113,6 +121,9 @@ public class MainFrame extends JFrame {
         // First log line: the combined-log merger pairs both peers' logs by timestamp, so the
         // build each side runs is visible side by side in the merged file.
         logController.log("COM Port File Sync v" + appVersion);
+        if (!pluginRegistry.isEmpty()) {
+            logController.log("Loaded " + pluginRegistry.size() + " link plugin(s)");
+        }
 
         initializeWorkflow();
     }
@@ -130,6 +141,8 @@ public class MainFrame extends JFrame {
         combinedLogController.initEventHandlers();
 
         connectionController.refreshPorts();
+        // Hot-plug detection: the list is rescanned off the EDT while the link is idle.
+        connectionController.startPortPolling();
         loadSavedState();
         connectionController.attemptAutoConnectOnStartup();
         dragDropController.setupDragAndDrop();
@@ -190,6 +203,7 @@ public class MainFrame extends JFrame {
     }
 
     private void cleanup() {
+        connectionController.stopPortPolling();
         if (eventBus != null && eventBusListener != null) {
             eventBus.unregister(eventBusListener);
         }
