@@ -150,6 +150,12 @@ public class XModemTransfer {
     /**
      * Overrides how many blocks a send session may pipeline before reading their acknowledgements.
      * 1 forces classic stop-and-wait. Only meaningful before the transfer starts.
+     *
+     * <p>A window pays off only when the path the acknowledgements travel is slower than the path
+     * the data travels: there, classic mode blocks the pipe for one round trip per block. When the
+     * data direction is itself the bottleneck the pipe stays back-pressured and the window changes
+     * nothing — measured over the hidlink bridge, the direction whose ACKs share the slow HID OUT
+     * pipe gained roughly 40%, while the direction that saturates that same pipe gained none.
      */
     public void setWindowBlocks(int blocks) {
         this.windowBlocks = clampWindowBlocks(blocks);
