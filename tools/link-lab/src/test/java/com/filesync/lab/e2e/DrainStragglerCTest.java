@@ -92,6 +92,11 @@ class DrainStragglerCTest {
         try {
             XModemTransfer sender = new XModemTransfer(senderPort);
             XModemTransfer receiver = new XModemTransfer(receiverPort);
+            // This class pins the classic drain-pause semantics (straggler inside the pause is
+            // swept, past it costs exactly one duplicate-block re-send). Windowed mode answers a
+            // straggler with nothing at all because responses are block-numbered, so the packet
+            // count it produces is a different expectation, covered by XModemTransferTest.
+            sender.setWindowBlocks(1);
             List<String> notices = new CopyOnWriteArrayList<>();
             sender.setProgressListener(
                     new XModemTransfer.TransferProgressListener() {
@@ -199,6 +204,7 @@ class DrainStragglerCTest {
         try {
             XModemTransfer sender = new XModemTransfer(senderPort);
             XModemTransfer receiver = new XModemTransfer(receiverPort);
+            sender.setWindowBlocks(1); // classic stop-and-wait: this class pins its straggler cost
             byte[] payload = new byte[PAYLOAD_SIZE];
             new Random(7).nextBytes(payload);
 

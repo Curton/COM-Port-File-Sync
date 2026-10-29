@@ -4,7 +4,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -23,10 +25,35 @@ public class XModemTransfer {
     public static final byte NAK = 0x15; // Negative Acknowledge
     public static final byte CAN = 0x18; // Cancel
     public static final byte C = 0x43; // 'C' for CRC mode
+    /**
+     * Receiver's windowed-mode offer ('W'), sent instead of 'C' when this end can accept a block
+     * window. A sender that understands it echoes 'W' back and then streams up to {@link
+     * #windowBlocks} blocks before reading their numbered acknowledgements; a sender that does not
+     * understand it ignores the byte, and the receiver falls back to 'C' on its next offer cycle.
+     * A windowed receiver answers every ACK/NAK with a second block-number byte, which is what
+     * lets the sender keep its window aligned when one acknowledgement is lost.
+     */
+    public static final byte WINDOWED = 0x57;
+
+    // Windowed-mode block headers. The mode is carried by every block instead of by the handshake
+    // alone, so one corrupted offer or echo cannot leave the two ends disagreeing about how
+    // acknowledgements are framed: the receiver switches its response framing per block, from the
+    // header it actually read.
+    public static final byte STX4K_WINDOWED = 0x07; // 4096-byte block, numbered ACK framing
+    public static final byte STX_WINDOWED = 0x08; // 1024-byte block, numbered ACK framing
+    public static final byte SOH_WINDOWED = 0x09; // 128-byte block, numbered ACK framing
 
     private static final int BLOCK_SIZE_1K = 1024; // XMODEM-1K block size
     private static final int BLOCK_SIZE_4K = 4096; // XMODEM-4K block size
     private static final int BLOCK_SIZE_128 = 128; // Standard XMODEM block size
+    // Pipelined mode: up to this many blocks are written back to back before their acknowledgements
+    // are read, which turns one round trip per block into one per window. Capped at 8 so the
+    // receiver's driver buffer never carries more than ~32 KB of unread lead.
+    private static final int DEFAULT_WINDOW_BLOCKS = 4;
+    private static final int MAX_WINDOW_BLOCKS = 8;
+    // Trailer byte after an ACK/NAK that does not answer a data block (EOT and interleaved frames)
+    // in windowed mode. The value is never interpreted, only consumed to keep the framing aligned.
+    private static final byte WINDOW_ACK_FILLER = 0x00;
     private static final int MAX_RETRIES = 10;
     private static final int TIMEOUT_MS = 10000;
     private static final int HANDSHAKE_TIMEOUT_MS = 60000;
@@ -101,6 +128,33 @@ public class XModemTransfer {
     private long transferStartTime;
     private long totalBytesTransferred;
 
+    /** How many blocks this end is willing to pipeline; 1 disables the offer entirely. */
+    private int windowBlocks = defaultWindowBlocks();
+
+    /**
+     * Whether the current transfer negotiated windowed mode. Reset at the start of every transfer
+     * and set by whichever handshake runs: a send session echoes the receiver's 'W', a receive
+     * session reads that echo.
+     */
+    private boolean windowedMode;
+
+    private static int defaultWindowBlocks() {
+        Integer configured = Integer.getInteger("filesync.xmodem.window");
+        return configured == null ? DEFAULT_WINDOW_BLOCKS : clampWindowBlocks(configured);
+    }
+
+    private static int clampWindowBlocks(int blocks) {
+        return Math.max(1, Math.min(MAX_WINDOW_BLOCKS, blocks));
+    }
+
+    /**
+     * Overrides how many blocks a send session may pipeline before reading their acknowledgements.
+     * 1 forces classic stop-and-wait. Only meaningful before the transfer starts.
+     */
+    public void setWindowBlocks(int blocks) {
+        this.windowBlocks = clampWindowBlocks(blocks);
+    }
+
     // --- Adaptive handshake-drain strategy, scoped to one port session (one connection) ---
     // Volatile: SyncProtocol serializes send() sessions, but successive sessions may run on
     // different worker threads; volatile carries the strategy state across them.
@@ -154,6 +208,8 @@ public class XModemTransfer {
         // A transfer aborted right after a lone-'[' pushback must not leak its pushed-back byte
         // into the next transfer: this instance is reused across reconnects.
         pushedBackByte = -1;
+        // The handshake decides the mode for this transfer; never inherit the previous session's.
+        windowedMode = false;
         // Capture the port session this transfer runs on; loop heads abort when it changes.
         transferSessionEpoch = serialPort.currentEpoch();
         if (transferSessionEpoch != drainStrategyEpoch) {
@@ -179,6 +235,45 @@ public class XModemTransfer {
         transferStartTime = System.currentTimeMillis();
         totalBytesTransferred = 0;
 
+        if (windowedMode) {
+            if (!sendInWindows(data)) {
+                if (cancelSignalled) {
+                    // The receiver aborted deliberately: an expected outcome, not a failure.
+                    reportCancelled("Transfer cancelled by receiver");
+                }
+                sendCancelIfSessionCurrent();
+                return false;
+            }
+        } else if (!sendClassic(data)) {
+            if (cancelSignalled) {
+                // The receiver aborted deliberately: an expected outcome, not a failure.
+                reportCancelled("Transfer cancelled by receiver");
+            }
+            sendCancelIfSessionCurrent();
+            return false;
+        }
+
+        // Send EOT and wait for ACK
+        if (!sendEOT()) {
+            reportError("Failed to complete transfer: EOT not acknowledged");
+            return false;
+        }
+
+        // A session that completed without any straggler at a response position is evidence the
+        // link settles quickly after the handshake: later sessions on this connection may skip
+        // the drain pause. A session that did see one never arms (and disarms if already armed).
+        if (!sessionSawStraggler && !fastDrainArmed) {
+            fastDrainArmed = true;
+        }
+
+        return true;
+    }
+
+    /**
+     * Classic stop-and-wait send loop: one block on the line at a time and one ACK read per block.
+     * Used whenever the peer did not offer a window, or this end's window is configured to 1.
+     */
+    private boolean sendClassic(byte[] data) throws IOException {
         int dataOffset = 0;
         int blockNumber = 1;
         int totalBlocks = estimateTotalBlocks(data.length);
@@ -215,7 +310,6 @@ public class XModemTransfer {
                                     + MAX_RETRIES
                                     + " retries");
                 }
-                sendCancelIfSessionCurrent();
                 return false;
             }
 
@@ -234,21 +328,181 @@ public class XModemTransfer {
                 }
             }
         }
-
-        // Send EOT and wait for ACK
-        if (!sendEOT()) {
-            reportError("Failed to complete transfer: EOT not acknowledged");
-            return false;
-        }
-
-        // A session that completed without any straggler at a response position is evidence the
-        // link settles quickly after the handshake: later sessions on this connection may skip
-        // the drain pause. A session that did see one never arms (and disarms if already armed).
-        if (!sessionSawStraggler && !fastDrainArmed) {
-            fastDrainArmed = true;
-        }
-
         return true;
+    }
+
+    /**
+     * Windowed send loop: up to {@link #windowBlocks} blocks go on the line back to back, then their
+     * numbered acknowledgements are read as a batch. The receiver ACKs in order, so the window's
+     * block numbers map every response to its block even when one acknowledgement is lost — the
+     * failure mode that makes an unnumbered pipelined ACK scheme unrecoverable.
+     *
+     * <p>The block-boundary hook runs once per window instead of once per block: the receiver is
+     * idle only after the whole window has been acknowledged, so that is the only safe interleave
+     * point.
+     */
+    private boolean sendInWindows(byte[] data) throws IOException {
+        int dataOffset = 0;
+        int blockNumber = 1;
+        int totalBlocks = estimateTotalBlocks(data.length);
+        boolean interleaveDisabled = false;
+
+        while (dataOffset < data.length) {
+            assertSessionCurrent();
+            List<byte[]> packets = new ArrayList<>(windowBlocks);
+            int[] blockNumbers = new int[windowBlocks];
+            int[] payloadBytes = new int[windowBlocks];
+            int count = 0;
+
+            while (count < windowBlocks && dataOffset < data.length) {
+                int remaining = data.length - dataOffset;
+                BlockFormat format = selectBlockFormat(remaining);
+                int bytesToCopy = Math.min(remaining, format.size());
+                byte[] block = new byte[format.size()];
+                System.arraycopy(data, dataOffset, block, 0, bytesToCopy);
+                Arrays.fill(block, bytesToCopy, block.length, PADDING);
+
+                packets.add(
+                        buildPacket(block, blockNumber, windowedHeader(format.header())));
+                blockNumbers[count] = blockNumber;
+                payloadBytes[count] = bytesToCopy;
+                dataOffset += bytesToCopy;
+                blockNumber++;
+                count++;
+            }
+
+            if (!sendWindow(packets, blockNumbers)) {
+                if (!cancelSignalled) {
+                    reportError(
+                            "Failed to send block "
+                                    + blockNumbers[0]
+                                    + " after "
+                                    + MAX_RETRIES
+                                    + " retries");
+                }
+                return false;
+            }
+
+            // Report progress block by block even though the ACKs arrived as a batch, so the UI
+            // and the batch meter keep their per-block granularity.
+            for (int i = 0; i < count; i++) {
+                totalBytesTransferred += payloadBytes[i];
+                reportProgress(blockNumbers[i], totalBlocks, totalBytesTransferred);
+            }
+
+            if (blockBoundaryHook != null && !interleaveDisabled && dataOffset < data.length) {
+                if (blockBoundaryHook.sendBetweenBlocks() == InterleaveResult.FAILED) {
+                    interleaveDisabled = true;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Transmit one window and collect its acknowledgements. Retries are go-back-N from the first
+     * block not yet acknowledged: the receiver accepts blocks strictly in order, so any block after
+     * a gap has already been rejected and must be resent. Duplicates that the receiver did accept
+     * (the lost-ACK case) are answered with a duplicate ACK and never written twice.
+     */
+    private boolean sendWindow(List<byte[]> packets, int[] blockNumbers) throws IOException {
+        int count = packets.size();
+        boolean[] acknowledged = new boolean[count];
+        int outstanding = count;
+
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            assertSessionCurrent();
+
+            int first = 0;
+            while (first < count && acknowledged[first]) {
+                first++;
+            }
+            int sent = count - first;
+            for (int i = first; i < count; i++) {
+                serialPort.write(packets.get(i));
+            }
+
+            // Read one response per packet sent, and no more: the receiver answers every packet
+            // exactly once, so counting them keeps the round paced by the wire. Consuming
+            // whatever happens to be buffered instead lets a burst of NAKs from this round burn
+            // the retry budget in milliseconds, before the peer has even seen the retransmission.
+            int answered = 0;
+            long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+            while (answered < sent && outstanding > 0) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    break;
+                }
+                int control = readResponseByteConsumingFrames((int) remaining);
+                if (control < 0) {
+                    break;
+                }
+                if (control == CAN) {
+                    cancelSignalled = true;
+                    return false;
+                }
+                if (control != ACK && control != NAK) {
+                    // A straggler handshake 'C' or line noise: harmless inside a window (the
+                    // numbered responses still map to their blocks), but worth recording — it is
+                    // the same evidence the classic path uses to keep the conservative drain.
+                    if (control == C) {
+                        noteStraggler("a windowed response position (ignored)");
+                    }
+                    continue;
+                }
+                int left = (int) Math.max(1, deadline - System.currentTimeMillis());
+                int number = readByteWithTimeout(left);
+                if (number < 0) {
+                    break;
+                }
+                answered++;
+                int index = indexOfBlock(blockNumbers, number);
+                if (control == ACK && index >= 0 && !acknowledged[index]) {
+                    acknowledged[index] = true;
+                    outstanding--;
+                    firstBlockAckSeen = true;
+                }
+            }
+
+            if (outstanding == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Maps a block header to its windowed-mode twin, which also selects numbered ACK framing. */
+    private static byte windowedHeader(byte header) {
+        return switch (header) {
+            case STX4K -> STX4K_WINDOWED;
+            case STX -> STX_WINDOWED;
+            case SOH -> SOH_WINDOWED;
+            default -> header;
+        };
+    }
+
+    private static int indexOfBlock(int[] blockNumbers, int number) {
+        int masked = number & 0xFF;
+        for (int i = 0; i < blockNumbers.length; i++) {
+            if ((blockNumbers[i] & 0xFF) == masked) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static byte[] buildPacket(byte[] block, int blockNumber, byte headerByte) {
+        int blockSize = block.length;
+        byte[] packet = new byte[3 + blockSize + 2]; // Header + blockNum + complement + data + CRC
+        packet[0] = headerByte;
+        packet[1] = (byte) (blockNumber & 0xFF);
+        packet[2] = (byte) (255 - (blockNumber & 0xFF));
+        System.arraycopy(block, 0, packet, 3, blockSize);
+
+        int crc = calculateCRC16(block);
+        packet[3 + blockSize] = (byte) ((crc >> 8) & 0xFF);
+        packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
+        return packet;
     }
 
     /** Receive data using XMODEM protocol (supports 4096, 1024 and 128-byte blocks) */
@@ -344,7 +598,7 @@ public class XModemTransfer {
 
                 if (header == EOT) {
                     // End of transmission
-                    serialPort.write(ACK);
+                    writeResponse(ACK, WINDOW_ACK_FILLER);
                     transferCompleted = true;
                     break;
                 }
@@ -368,7 +622,7 @@ public class XModemTransfer {
                     int second = readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
                     if (second == FRAME_START_BYTE) {
                         if (consumeInterleavedFrameAfterSecondBracket()) {
-                            serialPort.write(ACK);
+                            writeResponse(ACK, WINDOW_ACK_FILLER);
                         }
                         continue;
                     }
@@ -381,9 +635,9 @@ public class XModemTransfer {
                 // Determine block size based on header
                 int blockSize;
                 switch (header) {
-                    case STX4K -> blockSize = BLOCK_SIZE_4K;
-                    case STX -> blockSize = BLOCK_SIZE_1K;
-                    case SOH -> blockSize = BLOCK_SIZE_128;
+                    case STX4K, STX4K_WINDOWED -> blockSize = BLOCK_SIZE_4K;
+                    case STX, STX_WINDOWED -> blockSize = BLOCK_SIZE_1K;
+                    case SOH, SOH_WINDOWED -> blockSize = BLOCK_SIZE_128;
                     default -> {
                         retryCount++;
                         if (retryCount > MAX_RETRIES) {
@@ -391,10 +645,17 @@ public class XModemTransfer {
                             sendCancelIfSessionCurrent();
                             return -1;
                         }
-                        serialPort.write(NAK);
+                        writeResponse(NAK, expectedBlockNumber);
                         continue;
                     }
                 }
+                // Every block carries its own mode marker, so the response framing follows the
+                // header that was actually read rather than a handshake byte that noise may have
+                // eaten between the two ends.
+                windowedMode =
+                        header == STX4K_WINDOWED
+                                || header == STX_WINDOWED
+                                || header == SOH_WINDOWED;
 
                 // Read block number and its complement. A read timeout returns -1; masking it
                 // into a data byte (turning -1 into 0xFF) fabricates corruption that never
@@ -409,7 +670,7 @@ public class XModemTransfer {
                         sendCancelIfSessionCurrent();
                         return -1;
                     }
-                    serialPort.write(NAK);
+                    writeResponse(NAK, expectedBlockNumber);
                     continue;
                 }
 
@@ -434,7 +695,7 @@ public class XModemTransfer {
                         sendCancelIfSessionCurrent();
                         return -1;
                     }
-                    serialPort.write(NAK);
+                    writeResponse(NAK, expectedBlockNumber);
                     continue;
                 }
 
@@ -453,7 +714,7 @@ public class XModemTransfer {
                         sendCancelIfSessionCurrent();
                         return -1;
                     }
-                    serialPort.write(NAK);
+                    writeResponse(NAK, expectedBlockNumber);
                     continue;
                 }
                 int crcLow = readByteWithTimeout(TIMEOUT_MS);
@@ -464,7 +725,7 @@ public class XModemTransfer {
                         sendCancelIfSessionCurrent();
                         return -1;
                     }
-                    serialPort.write(NAK);
+                    writeResponse(NAK, expectedBlockNumber);
                     continue;
                 }
                 int receivedCrc = ((crcHigh & 0xFF) << 8) | (crcLow & 0xFF);
@@ -478,12 +739,18 @@ public class XModemTransfer {
                         sendCancelIfSessionCurrent();
                         return -1;
                     }
-                    serialPort.write(NAK);
+                    writeResponse(NAK, expectedBlockNumber);
                     continue;
                 }
 
-                // Check block number
-                if (blockNum == (expectedBlockNumber & 0xFF)) {
+                // Check block number. A windowed sender resends from the first unacknowledged
+                // block, so any block number behind the expected one is a resend this receiver
+                // already saved — the sender never advances past an unacknowledged block. The
+                // modular distance separates "behind" from "ahead" without a 256-entry history.
+                int distance = (expectedBlockNumber - blockNum) & 0xFF;
+                boolean duplicate =
+                        windowedMode ? distance > 0 && distance < 128 : distance == 1;
+                if (distance == 0) {
                     int toWrite = blockSize;
                     if (expectedDataLength >= 0 && written + toWrite > expectedDataLength) {
                         toWrite = (int) (expectedDataLength - written);
@@ -494,7 +761,7 @@ public class XModemTransfer {
                     }
                     expectedBlockNumber++;
                     retryCount = 0;
-                    serialPort.write(ACK);
+                    writeResponse(ACK, blockNum);
                     totalBytesTransferred += blockSize;
                     reportProgress(
                             expectedBlockNumber - 1, expectedTotalBlocks, totalBytesTransferred);
@@ -504,12 +771,12 @@ public class XModemTransfer {
                     if (receiveBoundaryHook != null) {
                         receiveBoundaryHook.sendBetweenReceivedBlocks();
                     }
-                } else if (blockNum == ((expectedBlockNumber - 1) & 0xFF)) {
+                } else if (duplicate) {
                     // Duplicate block, ACK but don't save
-                    serialPort.write(ACK);
+                    writeResponse(ACK, blockNum);
                 } else {
                     // Out of sequence
-                    serialPort.write(NAK);
+                    writeResponse(NAK, blockNum);
                 }
             }
 
@@ -570,29 +837,43 @@ public class XModemTransfer {
 
     private boolean waitForHandshake() throws IOException {
         long startTime = System.currentTimeMillis();
-        // The receiver sends its 'C' immediately after the command ACK, so the 'C' has usually
-        // already arrived by now; discarding it would stall the session until the receiver's
-        // next re-send cycle. Drain stale bytes but keep an early 'C'. A receiver-originated
-        // frame that raced the announce is consumed whole instead of being drained as noise.
+        // The receiver offers 'W' (windowed) or 'C' (classic). The first offer seen decides this
+        // transfer's mode; a windowed offer is echoed so the receiver knows the window is
+        // understood. A receiver that does not know 'W' only ever sends 'C', so an old peer simply
+        // keeps both ends on the classic path.
         while (serialPort.available() > 0) {
             assertSessionCurrent();
-            int b = readBufferedByteConsumingFrames();
-            if (b == C) {
+            if (acceptHandshakeByte(readBufferedByteConsumingFrames())) {
                 return true;
             }
         }
 
         while (System.currentTimeMillis() - startTime < HANDSHAKE_TIMEOUT_MS) {
             assertSessionCurrent();
-            int b = readResponseByteConsumingFrames(1000);
-            if (b == C) {
+            if (acceptHandshakeByte(readResponseByteConsumingFrames(1000))) {
                 return true;
             }
-            if (b == NAK) {
-                // Checksum mode requested, but we only support CRC
-                // Keep waiting for 'C'
-            }
         }
+        return false;
+    }
+
+    /**
+     * Acts on one handshake byte: 'C' selects classic mode, 'W' selects windowed mode and is echoed
+     * back (the receiver waits for that echo before it starts its receive loop). Anything else — a
+     * NAK asking for checksum mode, or stray line noise — is ignored and the wait continues.
+     */
+    private boolean acceptHandshakeByte(int value) throws IOException {
+        if (value == C) {
+            windowedMode = false;
+            return true;
+        }
+        if (value == WINDOWED && windowBlocks > 1) {
+            windowedMode = true;
+            serialPort.write(WINDOWED);
+            return true;
+        }
+        // NAK means checksum mode, which this implementation does not support; anything else is
+        // noise. Both are ignored: the receiver keeps offering 'C' (or 'W') until it is answered.
         return false;
     }
 
@@ -633,19 +914,32 @@ public class XModemTransfer {
 
     private boolean initiateReceive() throws IOException {
         serialPort.clearInputBuffer();
+        windowedMode = false;
 
-        // Send 'C' to request CRC mode, re-sending every HANDSHAKE_RESEND_INTERVAL_MS so a 'C'
-        // the sender missed costs one short cycle instead of a full second. The overall wait
-        // keeps the former MAX_RETRIES x 1s budget.
+        // Offer windowed mode when this end can take a window, alternating with the classic 'C' so
+        // a sender that does not know 'W' still connects on the next cycle. Re-sending every
+        // HANDSHAKE_RESEND_INTERVAL_MS keeps a lost offer from costing a full handshake second.
+        boolean windowOffer = windowBlocks > 1;
+        boolean offerWindow = windowOffer;
+
         long deadline = System.currentTimeMillis() + RECEIVE_HANDSHAKE_WINDOW_MS;
         while (System.currentTimeMillis() < deadline) {
             assertSessionCurrent();
-            serialPort.write(C);
+            serialPort.write(offerWindow ? WINDOWED : C);
+            offerWindow = windowOffer && !offerWindow;
 
             long waitStart = System.currentTimeMillis();
             while (System.currentTimeMillis() - waitStart < HANDSHAKE_RESEND_INTERVAL_MS) {
                 assertSessionCurrent();
                 if (serialPort.available() > 0) {
+                    int first = serialPort.read() & 0xFF;
+                    // The sender echoes 'W' when it understood the offer; that byte is consumed
+                    // here because it is not a block header. Anything else is the stream's first
+                    // real byte and is pushed back for the receive loop. Response framing itself
+                    // is decided per block from its header, so a lost echo cannot desync the ends.
+                    if (first != WINDOWED) {
+                        pushedBackByte = first;
+                    }
                     return true;
                 }
                 try {
@@ -659,17 +953,21 @@ public class XModemTransfer {
         return false;
     }
 
-    private boolean sendBlock(byte[] block, int blockNumber, byte headerByte) throws IOException {
-        int blockSize = block.length;
-        byte[] packet = new byte[3 + blockSize + 2]; // Header + blockNum + complement + data + CRC
-        packet[0] = headerByte;
-        packet[1] = (byte) (blockNumber & 0xFF);
-        packet[2] = (byte) (255 - (blockNumber & 0xFF));
-        System.arraycopy(block, 0, packet, 3, blockSize);
+    /**
+     * Write one flow-control response. Windowed mode appends a block number (or a filler for
+     * responses that do not answer a data block) so the sender can map every acknowledgement to its
+     * block even after one acknowledgement is lost.
+     */
+    private void writeResponse(byte control, int blockNumber) throws IOException {
+        if (!windowedMode) {
+            serialPort.write(control);
+            return;
+        }
+        serialPort.write(new byte[] {control, (byte) (blockNumber & 0xFF)});
+    }
 
-        int crc = calculateCRC16(block);
-        packet[3 + blockSize] = (byte) ((crc >> 8) & 0xFF);
-        packet[3 + blockSize + 1] = (byte) (crc & 0xFF);
+    private boolean sendBlock(byte[] block, int blockNumber, byte headerByte) throws IOException {
+        byte[] packet = buildPacket(block, blockNumber, headerByte);
 
         for (int retry = 0; retry < MAX_RETRIES; retry++) {
             assertSessionCurrent();
@@ -710,6 +1008,7 @@ public class XModemTransfer {
             serialPort.write(EOT);
             int response = readResponseByteConsumingFrames(TIMEOUT_MS);
             if (response == ACK) {
+                consumeWindowedTrailer();
                 return true;
             }
             if (response == C) {
@@ -717,6 +1016,18 @@ public class XModemTransfer {
             }
         }
         return false;
+    }
+
+    /**
+     * Consume the framing byte that windowed mode appends to a response, so it cannot be read as a
+     * block header or control byte by the next phase. Bounded by a short timeout: the trailer is
+     * written right behind the ACK, so a miss means the peer is gone and the byte's absence is not
+     * the caller's problem.
+     */
+    private void consumeWindowedTrailer() throws IOException {
+        if (windowedMode) {
+            readByteWithTimeout(INTERLEAVE_ACK_TIMEOUT_MS);
+        }
     }
 
     /**
@@ -735,6 +1046,7 @@ public class XModemTransfer {
             serialPort.write(frame);
             int response = readResponseByteConsumingFrames(INTERLEAVE_ACK_TIMEOUT_MS);
             if (response == ACK) {
+                consumeWindowedTrailer();
                 return true;
             }
             if (response == CAN) {

@@ -982,6 +982,361 @@ class XModemTransferTest {
                 "no stale pushed-back byte may leak into the follow-up receive");
     }
 
+    // ========== windowed (pipelined) mode ==========
+
+    @Test
+    @Timeout(20)
+    void windowedSendPipelinesAWholeWindowBeforeReadingAcks() throws IOException {
+        // Five 4K blocks and a four-block window. The response script only becomes readable once
+        // four data packets are on the line: a stop-and-wait sender would sit out the 10s block
+        // timeout here, a pipelined one writes the window and then collects the ACKs.
+        byte[] payload = new byte[5 * 4096];
+        Arrays.fill(payload, (byte) 0x41);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(
+                                new Stage(4, windowedAcks(1, 2, 3, 4)),
+                                new Stage(5, windowedAcks(5)),
+                                new Stage(5, windowedEotAck())));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+
+        List<Byte> dataHeaders = new ArrayList<>();
+        for (byte[] write : serialPort.getWrites()) {
+            if (write.length > 4) {
+                dataHeaders.add(write[0]);
+            }
+        }
+        assertEquals(
+                List.of(
+                        XModemTransfer.STX4K_WINDOWED,
+                        XModemTransfer.STX4K_WINDOWED,
+                        XModemTransfer.STX4K_WINDOWED,
+                        XModemTransfer.STX4K_WINDOWED,
+                        XModemTransfer.STX4K_WINDOWED),
+                dataHeaders);
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedSendRetransmitsFromTheFirstUnackedBlockAfterNak() throws IOException {
+        // Block 2 is rejected and block 3 is rejected behind it. The receiver's response burst
+        // ends there, so the sender must go back to 2 immediately instead of waiting out the
+        // block timeout, and it must resend 3 as well (the receiver discards out-of-order blocks).
+        byte[] payload = new byte[3 * 4096];
+        Arrays.fill(payload, (byte) 0x42);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(
+                                new Stage(
+                                        3,
+                                        new byte[] {
+                                            XModemTransfer.ACK,
+                                            1,
+                                            XModemTransfer.NAK,
+                                            2,
+                                            XModemTransfer.NAK,
+                                            3
+                                        }),
+                                new Stage(5, windowedAcks(2, 3)),
+                                new Stage(5, windowedEotAck())));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+
+        List<Integer> numbers = new ArrayList<>();
+        for (byte[] write : serialPort.getWrites()) {
+            if (write.length > 4) {
+                numbers.add(write[1] & 0xFF);
+            }
+        }
+        assertEquals(
+                List.of(1, 2, 3, 2, 3),
+                numbers,
+                "a NAK must retransmit the window from the first unacknowledged block");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedSendIgnoresARepeatedAckForAnAlreadyAckedBlock() throws IOException {
+        // An extra ACK for block 1 (the shape a duplicated response produces on a noisy line) must
+        // not undo block 1's acknowledgement or make the sender resend it.
+        byte[] payload = new byte[3 * 4096];
+        Arrays.fill(payload, (byte) 0x43);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(
+                                new Stage(
+                                        3,
+                                        new byte[] {
+                                            XModemTransfer.ACK,
+                                            1,
+                                            XModemTransfer.ACK,
+                                            1,
+                                            XModemTransfer.ACK,
+                                            2
+                                        }),
+                                new Stage(4, windowedAcks(3)),
+                                new Stage(4, windowedEotAck())));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+
+        List<Integer> numbers = new ArrayList<>();
+        for (byte[] write : serialPort.getWrites()) {
+            if (write.length > 4) {
+                numbers.add(write[1] & 0xFF);
+            }
+        }
+        assertEquals(
+                1,
+                numbers.stream().filter(number -> number == 1).count(),
+                "a duplicate ACK for block 1 must not resend it: " + numbers);
+        assertEquals(List.of(1, 2, 3), numbers.subList(0, 3));
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedSendAbortsWhenTheReceiverCancelsInsideTheWindow() throws IOException {
+        byte[] payload = new byte[3 * 4096];
+        Arrays.fill(payload, (byte) 0x44);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(new Stage(3, new byte[] {XModemTransfer.ACK, 1, XModemTransfer.CAN})));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertFalse(transfer.send(payload));
+        assertTrue(transfer.wasCancelSignalled(), "CAN inside a window is a peer cancel");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedSendKeepsTheShortTailInsideTheSameWindow() throws IOException {
+        // 4300 bytes = one 4K block plus two 128-byte blocks. All three travel in one window, and
+        // their differently sized packets still map to numbered ACKs.
+        byte[] payload = new byte[4300];
+        Arrays.fill(payload, (byte) 0x45);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(
+                                new Stage(3, windowedAcks(1, 2, 3)),
+                                new Stage(3, windowedEotAck())));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+
+        List<Byte> dataHeaders = new ArrayList<>();
+        for (byte[] write : serialPort.getWrites()) {
+            if (write.length > 4) {
+                dataHeaders.add(write[0]);
+            }
+        }
+        assertEquals(
+                List.of(
+                        XModemTransfer.STX4K_WINDOWED,
+                        XModemTransfer.SOH_WINDOWED,
+                        XModemTransfer.SOH_WINDOWED),
+                dataHeaders);
+    }
+
+    @Test
+    @Timeout(20)
+    void aSenderWithTheWindowSwitchedOffIgnoresTheOfferAndUsesClassicC() throws IOException {
+        // The receiver first offers 'W' and then 'C'. A sender configured for stop-and-wait must
+        // ignore the offer, never echo 'W', and complete on the classic single-byte protocol.
+        byte[] payload = new byte[4096];
+        Arrays.fill(payload, (byte) 0x46);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED, XModemTransfer.C},
+                        List.of(
+                                new Stage(1, new byte[] {XModemTransfer.ACK}),
+                                new Stage(1, new byte[] {XModemTransfer.ACK})));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+        transfer.setWindowBlocks(1);
+
+        assertTrue(transfer.send(payload));
+        assertEquals(
+                0,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.WINDOWED}),
+                "a classic sender must not echo the window offer");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedReceiveFollowsTheBlockHeaderWhenTheEchoWasLost() throws IOException {
+        // A noisy line ate the sender's 'W' echo: the receiver never saw it and starts in classic
+        // framing. The numbered header on the first block must switch it over, or every response
+        // would be framed differently from what the sender expects.
+        byte[] first = blockOf(1);
+        byte[] second = blockOf(2);
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 1, first);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 2, second);
+        script.write(XModemTransfer.EOT);
+
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] payload = transfer.receive(2 * 128);
+
+        assertArrayEquals(join(first, second), payload);
+        assertArrayEquals(
+                new byte[] {XModemTransfer.ACK, 1},
+                serialPort.getWrites().get(1),
+                "the block header alone must select numbered acknowledgements");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedSendIgnoresAStragglerCWithoutResendingTheBlock() throws IOException {
+        // The classic path pays one duplicate-block re-send for a stray 'C' at an ACK position.
+        // A windowed sender maps responses by block number, so the same straggler costs nothing.
+        byte[] payload = new byte[3 * 4096];
+        Arrays.fill(payload, (byte) 0x47);
+        StagedSerialPortManager serialPort =
+                new StagedSerialPortManager(
+                        new byte[] {XModemTransfer.WINDOWED},
+                        List.of(
+                                new Stage(
+                                        3,
+                                        new byte[] {
+                                            XModemTransfer.C,
+                                            XModemTransfer.ACK,
+                                            1,
+                                            XModemTransfer.ACK,
+                                            2,
+                                            XModemTransfer.ACK,
+                                            3
+                                        }),
+                                new Stage(3, windowedEotAck())));
+
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        assertTrue(transfer.send(payload));
+        assertEquals(
+                3,
+                countDataPackets(serialPort.getWrites()),
+                "a straggler inside a window must not trigger a re-send");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedReceiveAcksEveryBlockWithItsNumber() throws IOException {
+        byte[] first = blockOf(1);
+        byte[] second = blockOf(2);
+        byte[] third = blockOf(3);
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        script.write(XModemTransfer.WINDOWED); // the sender's echo of our offer
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 1, first);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 2, second);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 3, third);
+        script.write(XModemTransfer.EOT);
+
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] payload = transfer.receive(3 * 128);
+
+        assertNotNull(payload);
+        assertArrayEquals(join(first, second, third), payload);
+        List<byte[]> writes = serialPort.getWrites();
+        assertArrayEquals(
+                new byte[] {XModemTransfer.WINDOWED}, writes.get(0), "the window offer");
+        assertArrayEquals(new byte[] {XModemTransfer.ACK, 1}, writes.get(1));
+        assertArrayEquals(new byte[] {XModemTransfer.ACK, 2}, writes.get(2));
+        assertArrayEquals(new byte[] {XModemTransfer.ACK, 3}, writes.get(3));
+        assertArrayEquals(
+                new byte[] {XModemTransfer.ACK, 0},
+                writes.get(writes.size() - 1),
+                "the EOT acknowledgement carries the framing filler");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedReceiveAcceptsAResentOlderBlockWithoutSavingItTwice() throws IOException {
+        // A go-back-N resend after a lost ACK: block 1 arrives again while 2 is already saved.
+        byte[] first = blockOf(1);
+        byte[] second = blockOf(2);
+        byte[] third = blockOf(3);
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        script.write(XModemTransfer.WINDOWED);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 1, first);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 2, second);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 1, first);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 3, third);
+        script.write(XModemTransfer.EOT);
+
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] payload = transfer.receive(3 * 128);
+
+        assertArrayEquals(join(first, second, third), payload);
+        assertEquals(
+                2,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.ACK, 1}),
+                "the resent block is acknowledged again, so the sender stops resending it");
+    }
+
+    @Test
+    @Timeout(20)
+    void windowedReceiveNaksABlockAheadOfTheExpectedOne() throws IOException {
+        byte[] first = blockOf(1);
+        byte[] second = blockOf(2);
+        ByteArrayOutputStream script = new ByteArrayOutputStream();
+        script.write(XModemTransfer.WINDOWED);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 2, second); // arrives before block 1
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 1, first);
+        appendPacket(script, XModemTransfer.SOH_WINDOWED, 2, second);
+        script.write(XModemTransfer.EOT);
+
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(script.toByteArray());
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] payload = transfer.receive(2 * 128);
+
+        assertArrayEquals(join(first, second), payload);
+        assertEquals(
+                1,
+                countWrites(serialPort.getWrites(), new byte[] {XModemTransfer.NAK, 2}),
+                "an out-of-order block is NAKed with its own number");
+    }
+
+    @Test
+    @Timeout(20)
+    void aClassicReceiveStillAnswersWithSingleBytes() throws IOException {
+        // The sender ignores the window offer and starts a classic block stream. Every response
+        // must stay a single byte, or an old sender would read the number as a control byte.
+        byte[] payload = "classic".getBytes(StandardCharsets.UTF_8);
+        RecordingTestSerialPortManager serialPort =
+                new RecordingTestSerialPortManager(buildSohFrame(payload));
+        XModemTransfer transfer = new XModemTransfer(serialPort);
+
+        byte[] result = transfer.receive(payload.length);
+
+        assertArrayEquals(payload, result);
+        for (byte[] write : serialPort.getWrites()) {
+            assertEquals(1, write.length, "classic responses are single bytes");
+        }
+    }
+
     /** Build an input of one leading byte followed by {@code ackCount} ACK bytes. */
     private static byte[] buildInput(byte first, int ackCount) {
         ByteArrayOutputStream stream = new ByteArrayOutputStream();
@@ -1000,6 +1355,52 @@ class XModemTransferTest {
             }
         }
         return count;
+    }
+
+    private static byte[] windowedAcks(int... blockNumbers) {
+        byte[] bytes = new byte[blockNumbers.length * 2];
+        for (int i = 0; i < blockNumbers.length; i++) {
+            bytes[i * 2] = XModemTransfer.ACK;
+            bytes[i * 2 + 1] = (byte) (blockNumbers[i] & 0xFF);
+        }
+        return bytes;
+    }
+
+    private static byte[] windowedEotAck() {
+        return new byte[] {XModemTransfer.ACK, 0};
+    }
+
+    private static byte[] blockOf(int seed) {
+        byte[] block = new byte[128];
+        for (int i = 0; i < block.length; i++) {
+            block[i] = (byte) (seed * 31 + i);
+        }
+        return block;
+    }
+
+    private static void appendPacket(
+            ByteArrayOutputStream out, byte header, int blockNumber, byte[] block) {
+        int crc = XModemTransfer.calculateCRC16(block);
+        out.write(header);
+        out.write(blockNumber & 0xFF);
+        out.write(255 - (blockNumber & 0xFF));
+        out.writeBytes(block);
+        out.write((crc >> 8) & 0xFF);
+        out.write(crc & 0xFF);
+    }
+
+    private static byte[] join(byte[]... parts) {
+        int length = 0;
+        for (byte[] part : parts) {
+            length += part.length;
+        }
+        byte[] joined = new byte[length];
+        int offset = 0;
+        for (byte[] part : parts) {
+            System.arraycopy(part, 0, joined, offset, part.length);
+            offset += part.length;
+        }
+        return joined;
     }
 
     /** Count block packet writes (header + blockNum + complement + data + CRC), i.e. re-sends. */
@@ -1053,6 +1454,88 @@ class XModemTransferTest {
         }
         stream.write(XModemTransfer.EOT);
         return stream.toByteArray();
+    }
+
+    /** Response script that becomes readable only after a number of data packets were written. */
+    private record Stage(int afterPackets, byte[] bytes) {}
+
+    /**
+     * Port manager with a two-part script: handshake bytes are readable immediately, while the
+     * response stages are revealed only once the sender has written the stated number of data
+     * packets. That is what makes a pipelining assertion meaningful — a stop-and-wait sender blocks
+     * on a silent port instead of producing the writes that would unlock the next stage.
+     */
+    private static final class StagedSerialPortManager extends SerialPortManager {
+        private final byte[] handshake;
+        private final List<Stage> stages;
+        private final List<byte[]> writes = new CopyOnWriteArrayList<>();
+        private int handshakePos;
+        private int stageIndex;
+        private int stagePos;
+        private int packetsWritten;
+
+        private StagedSerialPortManager(byte[] handshake, List<Stage> stages) {
+            this.handshake = handshake;
+            this.stages = stages;
+        }
+
+        List<byte[]> getWrites() {
+            return writes;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public int available() {
+            if (handshakePos < handshake.length) {
+                return handshake.length - handshakePos;
+            }
+            while (stageIndex < stages.size()) {
+                Stage stage = stages.get(stageIndex);
+                if (packetsWritten < stage.afterPackets()) {
+                    return 0;
+                }
+                if (stagePos < stage.bytes().length) {
+                    return stage.bytes().length - stagePos;
+                }
+                stageIndex++;
+                stagePos = 0;
+            }
+            return 0;
+        }
+
+        @Override
+        public int read() {
+            if (available() <= 0) {
+                return -1;
+            }
+            if (handshakePos < handshake.length) {
+                return handshake[handshakePos++] & 0xFF;
+            }
+            Stage stage = stages.get(stageIndex);
+            return stage.bytes()[stagePos++] & 0xFF;
+        }
+
+        @Override
+        public void write(int b) {
+            writes.add(new byte[] {(byte) b});
+        }
+
+        @Override
+        public void write(byte[] data) {
+            writes.add(data.clone());
+            if (data.length > 4) {
+                packetsWritten++;
+            }
+        }
+
+        @Override
+        public void clearInputBuffer() {
+            // Intentionally ignored in test.
+        }
     }
 
     /**
